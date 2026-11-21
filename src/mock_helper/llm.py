@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import os
 import re
 import shutil
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -261,6 +264,7 @@ class InterviewCopilotLLM:
         user: str,
         timeout: float,
         expect_json: bool,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         model_name, effort = _parse_agy_model_spec(model)
         format_rule = (
@@ -269,13 +273,14 @@ class InterviewCopilotLLM:
             else "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY the requested Markdown response."
         )
         combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
+        use_stream = on_delta is not None and not expect_json
         args = [
             "agy",
             "--model",
             model_name,
             "--disable-slash-commands",
             "--output-format",
-            "json",
+            "stream-json" if use_stream else "json",
         ]
         if effort:
             args.extend(["--effort", effort])
@@ -286,23 +291,80 @@ class InterviewCopilotLLM:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+
+        if not use_stream:
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise TimeoutError(f"agy CLI timed out after {timeout:.0f}s")
+
+            stdout = stdout_b.decode("utf-8", errors="replace").strip()
+            stderr = stderr_b.decode("utf-8", errors="replace").strip()
+            if proc.returncode != 0:
+                raise RuntimeError(f"agy CLI exited {proc.returncode}: {(stderr or stdout)[:300]}")
+
+            envelope = _extract_json_object(stdout)
+            status = envelope.get("status")
+            if status and status != "SUCCESS":
+                raise RuntimeError(f"agy status={status}: {envelope.get('error', '')}")
+            return str(envelope.get("response", stdout)).strip()
+
+        # Stream NDJSON events from `agy --output-format stream-json`
+        deadline = time.monotonic() + timeout
+        streamed_chunks: list[str] = []
+        final_result: dict[str, Any] | None = None
+        assert proc.stdout is not None and proc.stderr is not None
+        stderr_task = asyncio.create_task(proc.stderr.read())
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                line_b = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                if not line_b:
+                    break
+                line = line_b.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ev_type = ev.get("event")
+                if ev_type == "step_update":
+                    su = ev.get("step_update") or {}
+                    if su.get("step_type") == "agent_response":
+                        delta = su.get("text_delta")
+                        if isinstance(delta, str) and delta:
+                            streamed_chunks.append(delta)
+                            if on_delta is not None:
+                                await on_delta(delta)
+                elif ev_type == "result":
+                    res_obj = ev.get("result")
+                    if isinstance(res_obj, dict):
+                        final_result = res_obj
+            remaining = max(0.1, deadline - time.monotonic())
+            await asyncio.wait_for(proc.wait(), timeout=remaining)
+            stderr_b = await stderr_task
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            stderr_task.cancel()
             raise TimeoutError(f"agy CLI timed out after {timeout:.0f}s")
 
-        stdout = stdout_b.decode("utf-8", errors="replace").strip()
         stderr = stderr_b.decode("utf-8", errors="replace").strip()
+        if final_result is not None:
+            status = final_result.get("status")
+            if status and status != "SUCCESS":
+                raise RuntimeError(f"agy status={status}: {final_result.get('error', '')}")
+            resp_text = str(final_result.get("response", "")).strip()
+            if resp_text:
+                return resp_text
         if proc.returncode != 0:
-            raise RuntimeError(f"agy CLI exited {proc.returncode}: {(stderr or stdout)[:300]}")
-
-        envelope = _extract_json_object(stdout)
-        status = envelope.get("status")
-        if status and status != "SUCCESS":
-            raise RuntimeError(f"agy status={status}: {envelope.get('error', '')}")
-        return str(envelope.get("response", stdout)).strip()
+            raise RuntimeError(f"agy CLI exited {proc.returncode}: {stderr[:300]}")
+        return "".join(streamed_chunks).strip()
 
     async def _call_pi_cli(
         self,
@@ -311,6 +373,7 @@ class InterviewCopilotLLM:
         system: str,
         user: str,
         timeout: float,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         clean_model = re.sub(r"^pi/", "", model.strip())
         args = [
@@ -319,6 +382,8 @@ class InterviewCopilotLLM:
             "--no-session",
             "--no-context-files",
             "--no-tools",
+            "--no-extensions",
+            "--no-mcp",
             "--model",
             clean_model,
             "--system-prompt",
@@ -331,14 +396,51 @@ class InterviewCopilotLLM:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if on_delta is None:
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise TimeoutError(f"pi CLI timed out after {timeout:.0f}s")
+
+            stdout = stdout_b.decode("utf-8", errors="replace").strip()
+            stderr = stderr_b.decode("utf-8", errors="replace").strip()
+            if proc.returncode != 0:
+                raise RuntimeError(f"pi CLI exited {proc.returncode}: {(stderr or stdout)[:300]}")
+            return stdout
+
+        deadline = time.monotonic() + timeout
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        chunks: list[str] = []
+        assert proc.stdout is not None and proc.stderr is not None
+        stderr_task = asyncio.create_task(proc.stderr.read())
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                data = await asyncio.wait_for(proc.stdout.read(256), timeout=remaining)
+                if not data:
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        chunks.append(tail)
+                        await on_delta(tail)
+                    break
+                text_chunk = decoder.decode(data, final=False)
+                if text_chunk:
+                    chunks.append(text_chunk)
+                    await on_delta(text_chunk)
+            remaining = max(0.1, deadline - time.monotonic())
+            await asyncio.wait_for(proc.wait(), timeout=remaining)
+            stderr_b = await stderr_task
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            stderr_task.cancel()
             raise TimeoutError(f"pi CLI timed out after {timeout:.0f}s")
 
-        stdout = stdout_b.decode("utf-8", errors="replace").strip()
+        stdout = "".join(chunks).strip()
         stderr = stderr_b.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
             raise RuntimeError(f"pi CLI exited {proc.returncode}: {(stderr or stdout)[:300]}")
@@ -355,6 +457,7 @@ class InterviewCopilotLLM:
         timeout: float = 30.0,
         expect_json: bool = False,
         disable_fast_thinking: bool = True,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         cli = self.config.cli_backend
         if cli == "agy":
@@ -364,6 +467,7 @@ class InterviewCopilotLLM:
                 user=user,
                 timeout=timeout,
                 expect_json=expect_json,
+                on_delta=on_delta,
             )
         if cli == "pi":
             return await self._call_pi_cli(
@@ -371,6 +475,7 @@ class InterviewCopilotLLM:
                 system=system,
                 user=user,
                 timeout=timeout,
+                on_delta=on_delta,
             )
 
         client = self._client()
@@ -391,6 +496,18 @@ class InterviewCopilotLLM:
             extra = _fast_extra_body(model)
             if extra:
                 kwargs["extra_body"] = extra
+
+        if on_delta is not None:
+            stream = await client.chat.completions.create(**kwargs, stream=True, timeout=timeout)
+            parts: list[str] = []
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    parts.append(delta)
+                    await on_delta(delta)
+            return "".join(parts).strip()
 
         resp = await client.chat.completions.create(**kwargs, timeout=timeout)
         return (resp.choices[0].message.content or "").strip()
@@ -751,7 +868,12 @@ class InterviewCopilotLLM:
             logger.warning("Full-context regroup skipped: %s", exc)
             return []
 
-    async def generate_calibration_report(self, session: InterviewSession) -> str:
+    async def generate_calibration_report(
+        self,
+        session: InterviewSession,
+        *,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
         metrics = session.compute_metrics()
         if not self.config.is_configured:
             return self._offline_calibration_summary(session)
@@ -831,6 +953,7 @@ class InterviewCopilotLLM:
                 timeout=240.0,
                 expect_json=False,
                 disable_fast_thinking=False,
+                on_delta=on_delta,
             )
             return content or self._offline_calibration_summary(session)
         except Exception as exc:

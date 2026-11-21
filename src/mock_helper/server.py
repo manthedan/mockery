@@ -108,11 +108,20 @@ class AppRuntime:
         self.card_probe_gen: dict[str, int] = {}
         self.role_orientation_checked: set[str] = set()
         self.role_orientation_inflight: set[str] = set()
+        self.regrouped_signature: dict[str, tuple[int, int, int]] = {}
 
         # Connected WebSocket senders & active capture owner
         self.ws_senders: set[Any] = set()
         self.capturing_sender: Any | None = None
         self.asr_watcher_task: asyncio.Task[Any] | None = None
+
+    @staticmethod
+    def transcript_regroup_sig(session: InterviewSession) -> tuple[int, int, int]:
+        return (
+            len(session.utterances),
+            sum(u.rev for u in session.utterances),
+            len(session.warmup_utterance_ids),
+        )
 
     def current_phase_and_actions(self) -> tuple[str, list[str], dict[str, str]]:
         phase = derive_session_phase(
@@ -163,6 +172,7 @@ class AppRuntime:
         self.capture_started_epoch_ms = None
         self.capturing_sender = None
         self.close_archive()
+        self.asr.clear_streams()
         if mark_ended:
             self.active_session.ended_epoch_ms = now_ms
 
@@ -247,6 +257,8 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
         if runtime.asr_watcher_task is not None and not runtime.asr_watcher_task.done():
             runtime.asr_watcher_task.cancel()
         runtime.close_archive()
+        runtime.asr.clear_streams()
+        runtime.store.close()
         await runtime.llm.aclose()
 
     app = FastAPI(title="Mock Helper — Live Interview Copilot", lifespan=lifespan)
@@ -440,11 +452,19 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                                 seg.audio,
                                 default_speaker=seg.speaker,
                             ),
-                            asyncio.to_thread(runtime.asr.transcribe_pcm, seg.audio),
+                            asyncio.to_thread(
+                                runtime.asr.transcribe_pcm_partial,
+                                seg.utterance_id,
+                                seg.audio,
+                            ),
                         )
                     else:
                         speaker = seg.speaker
-                        res = await asyncio.to_thread(runtime.asr.transcribe_pcm, seg.audio)
+                        res = await asyncio.to_thread(
+                            runtime.asr.transcribe_pcm_partial,
+                            seg.utterance_id,
+                            seg.audio,
+                        )
                     if res.text and runtime.active_session.id == target_session.id:
                         await upsert_utterance_and_route(
                             target_session=target_session,
@@ -464,6 +484,10 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                 finally:
                     partial_inflight[seg.speaker] = False
                 return
+
+            # Release incremental KV cache immediately when a speech turn finalizes;
+            # finals always run exact full-clip `transcribe_pcm` (0.00% WER regression).
+            runtime.asr.drop_stream(seg.utterance_id)
 
             if use_acoustic_diarizer:
                 try:
@@ -507,7 +531,7 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                         existing = target_session.utterance_map().get(seg.utterance_id)
                         if existing is not None and not existing.final:
                             target_session.remove_utterance(seg.utterance_id)
-                            runtime.store.save(target_session)
+                            runtime.store.save_live(target_session)
                             await broadcast_session()
                     return
 
@@ -520,7 +544,7 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                 existing = target_session.utterance_map().get(seg.utterance_id)
                 if existing is not None and not existing.final:
                     target_session.remove_utterance(seg.utterance_id)
-                    runtime.store.save(target_session)
+                    runtime.store.save_live(target_session)
                     await broadcast_session()
                 return
             await upsert_utterance_and_route(
@@ -557,7 +581,7 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                 had_draft = target_session.remove_utterance(utt.id)
                 target_session.echo_bleed_dropped += 1
                 if had_draft:
-                    runtime.store.save(target_session)
+                    runtime.store.save_live(target_session)
                 if runtime.active_session.id == target_session.id:
                     await broadcast_session()
                 return
@@ -576,7 +600,7 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
             if utt.final or existing is None or (utt.rev % 4 == 0):
                 runtime.store.append_utterance_event(target_session.id, utt)
             if utt.final:
-                runtime.store.save(target_session)
+                runtime.store.save_live(target_session)
 
             if runtime.active_session.id == target_session.id:
                 if is_inplace_draft:
@@ -1118,9 +1142,11 @@ async def _handle_ws_command(
 
         async def _run_regroup() -> None:
             try:
+                sig_before = runtime.transcript_regroup_sig(target_session)
                 boundaries = await runtime.llm.regroup_cards_full_context(target_session)
                 if boundaries:
                     runtime.grouper.apply_regroup_boundaries(target_session, boundaries)
+                    runtime.regrouped_signature[target_session.id] = sig_before
                     runtime.store.save(target_session)
                 if runtime.active_session.id == target_session.id:
                     runtime.regroup_job = AsyncJobState.IDLE
@@ -1156,17 +1182,58 @@ async def _handle_ws_command(
 
         async def _run_calibration() -> None:
             try:
-                if regroup_first and runtime.llm_config.is_configured:
+                cur_sig = runtime.transcript_regroup_sig(target_session)
+                needs_regroup = (
+                    regroup_first
+                    and runtime.llm_config.is_configured
+                    and runtime.regrouped_signature.get(target_session.id) != cur_sig
+                )
+                if needs_regroup:
                     if runtime.active_session.id == target_session.id:
                         runtime.regroup_job = AsyncJobState.RUNNING
                     try:
                         boundaries = await runtime.llm.regroup_cards_full_context(target_session)
                         if boundaries:
                             runtime.grouper.apply_regroup_boundaries(target_session, boundaries)
+                            runtime.regrouped_signature[target_session.id] = cur_sig
                     finally:
                         if runtime.active_session.id == target_session.id:
                             runtime.regroup_job = AsyncJobState.IDLE
-                report_md = await runtime.llm.generate_calibration_report(target_session)
+
+                delta_buf: list[str] = []
+                last_flush = 0.0
+
+                async def _on_calib_delta(chunk: str) -> None:
+                    nonlocal last_flush
+                    if not chunk or runtime.active_session.id != target_session.id:
+                        return
+                    delta_buf.append(chunk)
+                    now = time.monotonic()
+                    if last_flush == 0.0 or (now - last_flush) >= 0.12 or sum(len(c) for c in delta_buf) >= 240:
+                        text = "".join(delta_buf)
+                        delta_buf.clear()
+                        last_flush = now
+                        await runtime.broadcast_all(
+                            {
+                                "type": "calibration_delta",
+                                "session_id": target_session.id,
+                                "delta": text,
+                            }
+                        )
+
+                report_md = await runtime.llm.generate_calibration_report(
+                    target_session,
+                    on_delta=_on_calib_delta,
+                )
+                if delta_buf and runtime.active_session.id == target_session.id:
+                    await runtime.broadcast_all(
+                        {
+                            "type": "calibration_delta",
+                            "session_id": target_session.id,
+                            "delta": "".join(delta_buf),
+                        }
+                    )
+                    delta_buf.clear()
                 target_session.calibration_markdown = report_md
                 runtime.store.save(target_session)
                 if runtime.active_session.id == target_session.id:
