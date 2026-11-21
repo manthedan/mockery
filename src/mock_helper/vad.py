@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 from typing import Literal
 
@@ -59,6 +58,9 @@ class SileroVADRuntime:
         return float(out[0, 0]), next_state
 
 
+_EMPTY_F32 = np.empty(0, dtype=np.float32)
+
+
 class ChannelVADSegmenter:
     """
     Explicit 4-state (`SILENCE` -> `ONSET` -> `SPEAKING` <-> `TRAILING_PAUSE` -> `SILENCE`)
@@ -92,14 +94,23 @@ class ChannelVADSegmenter:
 
         self._onnx_state = np.zeros((2, 1, 128), dtype=np.float32)
         self._frame_inp = np.zeros((1, CONTEXT_SAMPLES + FRAME_SAMPLES), dtype=np.float32)
-        self._pending = np.zeros(0, dtype=np.float32)
-        self._pre_roll: deque[np.ndarray] = deque(maxlen=pre_roll_frames)
+        self._pending = _EMPTY_F32
+
+        # Preallocated ring buffer for silence pre-roll (zero allocations per 32ms frame)
+        self._pre_roll_cap = max(0, pre_roll_frames)
+        self._pre_roll_buf = np.empty((self._pre_roll_cap, FRAME_SAMPLES), dtype=np.float32)
+        self._pre_roll_write = 0
+        self._pre_roll_count = 0
+
+        # Preallocated contiguous segment buffer (eliminates per-frame copies + O(N^2) np.concatenate)
+        self._seg_cap_frames = self.max_segment_frames + self._pre_roll_cap + 2
+        self._seg_buf = np.empty(self._seg_cap_frames * FRAME_SAMPLES, dtype=np.float32)
+        self._seg_frame_count = 0
 
         self._turn_state: VADTurnState = VADTurnState.SILENCE
         self._total_frames_processed = max(0, initial_offset_ms // FRAME_MS)
         self._active_utt_id = ""
         self._active_rev = 0
-        self._segment_frames: list[np.ndarray] = []
         self._segment_start_frame = 0
         self._speech_frame_count = 0
         self._trailing_silence_frames = 0
@@ -116,6 +127,19 @@ class ChannelVADSegmenter:
         if target not in allowed:
             raise RuntimeError(f"Illegal VADTurnState transition: {self._turn_state} -> {target}")
         self._turn_state = target
+
+    def _append_seg_frame(self, frame: np.ndarray) -> None:
+        idx = self._seg_frame_count
+        if idx >= self._seg_cap_frames:
+            new_cap = max(self._seg_cap_frames * 2, idx + 16)
+            grown = np.empty(new_cap * FRAME_SAMPLES, dtype=np.float32)
+            used = idx * FRAME_SAMPLES
+            grown[:used] = self._seg_buf[:used]
+            self._seg_buf = grown
+            self._seg_cap_frames = new_cap
+        start = idx * FRAME_SAMPLES
+        self._seg_buf[start : start + FRAME_SAMPLES] = frame
+        self._seg_frame_count = idx + 1
 
     def push_pcm_int16(self, pcm_bytes: bytes) -> list[VADEvent]:
         if not pcm_bytes:
@@ -142,7 +166,7 @@ class ChannelVADSegmenter:
             if ev is not None:
                 events.append(ev)
 
-        self._pending = buf[offset:].copy()
+        self._pending = buf[offset:].copy() if offset < buf.size else _EMPTY_F32
         return events
 
     def _process_frame(self, frame: np.ndarray) -> VADEvent | None:
@@ -155,15 +179,36 @@ class ChannelVADSegmenter:
         self._total_frames_processed += 1
 
         if self._turn_state == VADTurnState.SILENCE:
-            self._pre_roll.append(frame.copy())
+            if self._pre_roll_cap > 0:
+                self._pre_roll_buf[self._pre_roll_write] = frame
+                self._pre_roll_write = (self._pre_roll_write + 1) % self._pre_roll_cap
+                if self._pre_roll_count < self._pre_roll_cap:
+                    self._pre_roll_count += 1
             if prob >= self.speech_threshold:
                 self._transition(VADTurnState.ONSET)
                 self._active_utt_id = short_id("utt")
                 self._active_rev = 0
-                pre_len = len(self._pre_roll)
+                pre_len = self._pre_roll_count
                 self._segment_start_frame = max(0, frame_idx - pre_len + 1)
-                self._segment_frames = list(self._pre_roll)
-                self._pre_roll.clear()
+                if pre_len > 0:
+                    start_slot = (self._pre_roll_write - pre_len) % self._pre_roll_cap
+                    if start_slot + pre_len <= self._pre_roll_cap:
+                        n_samp = pre_len * FRAME_SAMPLES
+                        self._seg_buf[:n_samp] = self._pre_roll_buf[
+                            start_slot : start_slot + pre_len
+                        ].reshape(-1)
+                    else:
+                        first_n = self._pre_roll_cap - start_slot
+                        first_samp = first_n * FRAME_SAMPLES
+                        rem_n = pre_len - first_n
+                        rem_samp = rem_n * FRAME_SAMPLES
+                        self._seg_buf[:first_samp] = self._pre_roll_buf[start_slot:].reshape(-1)
+                        self._seg_buf[first_samp : first_samp + rem_samp] = self._pre_roll_buf[
+                            :rem_n
+                        ].reshape(-1)
+                self._seg_frame_count = pre_len
+                self._pre_roll_write = 0
+                self._pre_roll_count = 0
                 self._speech_frame_count = 1
                 self._trailing_silence_frames = 0
                 self._frames_since_last_partial = 0
@@ -172,7 +217,7 @@ class ChannelVADSegmenter:
             return None
 
         # Active speech turn (`ONSET`, `SPEAKING`, or `TRAILING_PAUSE`)
-        self._segment_frames.append(frame.copy())
+        self._append_seg_frame(frame)
         self._frames_since_last_partial += 1
 
         if prob >= self.silence_threshold:
@@ -184,7 +229,7 @@ class ChannelVADSegmenter:
             self._trailing_silence_frames += 1
             self._transition(VADTurnState.TRAILING_PAUSE)
 
-        seg_len = len(self._segment_frames)
+        seg_len = self._seg_frame_count
         if (
             self._trailing_silence_frames >= self.min_silence_frames
             or (seg_len >= self.soft_segment_frames and self._trailing_silence_frames >= self.soft_silence_frames)
@@ -198,7 +243,7 @@ class ChannelVADSegmenter:
         ):
             self._frames_since_last_partial = 0
             self._active_rev += 1
-            audio = np.concatenate(self._segment_frames)
+            audio = self._seg_buf[: seg_len * FRAME_SAMPLES].copy()
             return VADEvent(
                 utterance_id=self._active_utt_id,
                 rev=self._active_rev,
@@ -216,7 +261,7 @@ class ChannelVADSegmenter:
         return self._finalize_current_segment(current_frame_idx=self._total_frames_processed)
 
     def _finalize_current_segment(self, current_frame_idx: int) -> VADEvent | None:
-        frames = self._segment_frames
+        seg_frames = self._seg_frame_count
         speech_frames = self._speech_frame_count
         utt_id = self._active_utt_id
         next_rev = self._active_rev + 1
@@ -226,16 +271,16 @@ class ChannelVADSegmenter:
         self._transition(VADTurnState.SILENCE)
         self._active_utt_id = ""
         self._active_rev = 0
-        self._segment_frames = []
+        self._seg_frame_count = 0
         self._speech_frame_count = 0
         self._trailing_silence_frames = 0
         self._frames_since_last_partial = 0
 
-        if speech_frames < self.min_speech_frames or not frames:
+        if speech_frames < self.min_speech_frames or seg_frames == 0:
             return None
 
-        audio = np.concatenate(frames)
-        rms = float(np.sqrt(np.mean(np.square(audio))))
+        view = self._seg_buf[: seg_frames * FRAME_SAMPLES]
+        rms = float(np.sqrt(float(np.dot(view, view)) / view.size))
         if rms < 1e-4:
             return None
 
@@ -243,7 +288,7 @@ class ChannelVADSegmenter:
             utterance_id=utt_id,
             rev=next_rev,
             kind="final",
-            audio=audio,
+            audio=view.copy(),
             start_ms=start_ms,
             end_ms=end_ms,
         )

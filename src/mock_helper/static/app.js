@@ -379,6 +379,11 @@ function handleServerMessage(msg) {
     return;
   }
 
+  if (msg.type === "utterance_draft") {
+    applyUtteranceDraftPatch(msg);
+    return;
+  }
+
   if (msg.type === "session_state") {
     const prevSelected = state.selectedQaId;
     const prevSessionId = state.session?.id;
@@ -438,12 +443,100 @@ function handleServerMessage(msg) {
   }
 }
 
+function applyUtteranceDraftPatch(msg) {
+  const session = state.session;
+  const utt = msg.utterance;
+  if (!session || !utt || (msg.session_id && session.id !== msg.session_id)) {
+    return;
+  }
+
+  let prevSpeaker = null;
+  const allUtts = session.utterances || [];
+  const uIdx = allUtts.findIndex((u) => u.id === utt.id);
+  if (uIdx >= 0) {
+    if (utt.rev < allUtts[uIdx].rev) return;
+    prevSpeaker = allUtts[uIdx].speaker;
+    allUtts[uIdx] = utt;
+  } else {
+    allUtts.push(utt);
+  }
+
+  let targetQa = null;
+  let probeStateChanged = false;
+  if (msg.qa_id) {
+    targetQa = (session.qa_groups_resolved || []).find((q) => q.id === msg.qa_id) || null;
+    if (targetQa) {
+      const qUtts = targetQa.utterances || (targetQa.utterances = []);
+      const qIdx = qUtts.findIndex((u) => u.id === utt.id);
+      if (qIdx >= 0) {
+        qUtts[qIdx] = utt;
+      } else {
+        qUtts.push(utt);
+      }
+      if (msg.probe_state && targetQa.probe_state !== msg.probe_state) {
+        targetQa.probe_state = msg.probe_state;
+        probeStateChanged = true;
+      }
+      if (typeof msg.has_speculative_cache === "boolean") {
+        targetQa.has_speculative_cache = msg.has_speculative_cache;
+      }
+    }
+  } else {
+    const warm = session.warmup_resolved || (session.warmup_resolved = []);
+    const wIdx = warm.findIndex((u) => u.id === utt.id);
+    if (wIdx >= 0) {
+      warm[wIdx] = utt;
+    } else {
+      warm.push(utt);
+    }
+  }
+
+  const container = el("qaList");
+  const speakerChanged = prevSpeaker !== null && prevSpeaker !== utt.speaker;
+  const searchActive = Boolean(state.searchQuery.trim());
+  const span = !speakerChanged && !searchActive
+    ? container?.querySelector(`[data-utt-row="${CSS.escape(utt.id)}"]`)
+    : null;
+
+  if (!span) {
+    renderQAList();
+    if (probeStateChanged) renderProbesPanel();
+    return;
+  }
+
+  // O(1) DOM patch: update only the live draft text span without rebuilding any card
+  const wasNearBottom =
+    container.scrollHeight - container.scrollTop - container.clientHeight < 64;
+  span.innerHTML = dimFillersHtml(String(utt.text || "").trim());
+
+  // Invalidate only this card's cached render signature so the next full reconciliation stays exact
+  const cardEl = span.closest(".qa-card");
+  if (cardEl) {
+    cardEl._bodySig = "";
+    cardEl._uttSig = "";
+    if (probeStateChanged && targetQa) {
+      const pillHost = cardEl.querySelector(".qa-probe-pill-host");
+      if (pillHost) {
+        pillHost.innerHTML = renderCardProbePill(targetQa.probe_state || "idle");
+      }
+    }
+  }
+
+  if (wasNearBottom) {
+    container.scrollTop = container.scrollHeight;
+  }
+  updateJumpToBottomVisibility();
+  if (probeStateChanged) {
+    renderProbesPanel();
+  }
+}
+
 /* ---------------- Shared-Clock Web Audio Capture ---------------- */
 
 async function ensureSharedAudioContext() {
   if (!state.sharedAudioCtx || state.sharedAudioCtx.state === "closed") {
     const ctx = new AudioContext();
-    await ctx.audioWorklet.addModule("/static/pcm-worklet.js");
+    await ctx.audioWorklet.addModule("/static/pcm-worklet.js?v=perf2");
     state.sharedAudioCtx = ctx;
   }
   if (state.sharedAudioCtx.state === "suspended") {
@@ -1230,9 +1323,19 @@ function renderPhaseNavStrip(qas) {
   const strip = el("phaseNavStrip");
   syncPhaseTableActive();
   if (!qas.length) {
-    strip.innerHTML = "";
+    if (strip._navSig !== "") {
+      strip.innerHTML = "";
+      strip._navSig = "";
+    }
     return;
   }
+  const navSig = qas
+    .map((qa) => `${qa.id}|${qa.badge}|${qa.title}|${qa.id === state.selectedQaId ? 1 : 0}`)
+    .join("||");
+  if (strip._navSig === navSig) {
+    return;
+  }
+  strip._navSig = navSig;
   strip.innerHTML = qas
     .map((qa) => {
       const kw = shortPhaseKeyword(qa.title);
@@ -1248,6 +1351,25 @@ function renderPhaseNavStrip(qas) {
     .join("");
 }
 
+const _cardHtmlTemplate = document.createElement("template");
+
+function _buildCardElement(html) {
+  _cardHtmlTemplate.innerHTML = html.trim();
+  return _cardHtmlTemplate.content.firstElementChild;
+}
+
+function _computeUtterancesSig(utts, { q, activeCite, canSplitAny, reviewsByUttId }) {
+  let parts = `${q}|${canSplitAny ? 1 : 0}|${utts.length}`;
+  for (let i = 0; i < utts.length; i++) {
+    const u = utts[i];
+    const citeMark = activeCite && activeCite === u.id ? "!" : "";
+    const revList = reviewsByUttId ? reviewsByUttId.get(u.id) : null;
+    const revMark = revList ? `#${revList.join(",")}` : "";
+    parts += `\n${u.id}:${u.rev}:${u.final ? 1 : 0}:${u.speaker[0]}:${u.start_ms}:${citeMark}${revMark}:${u.text || ""}`;
+  }
+  return parts;
+}
+
 function renderQAList() {
   const container = el("qaList");
   const session = state.session;
@@ -1258,6 +1380,23 @@ function renderQAList() {
   const allowed = allowedEventsSet();
   const canSplitAny = allowed.has("split_card");
   const canMergeAny = allowed.has("merge_card");
+  const completed = isSessionCompleted();
+  const q = state.searchQuery.trim();
+  const activeCite = state.activeCitationUttId || "";
+
+  let reviewsByUttId = null;
+  const pendingReviews = session.pending_reviews;
+  if (pendingReviews && pendingReviews.length > 0) {
+    reviewsByUttId = new Map();
+    for (const r of pendingReviews) {
+      let arr = reviewsByUttId.get(r.utterance_id);
+      if (!arr) {
+        arr = [];
+        reviewsByUttId.set(r.utterance_id, arr);
+      }
+      arr.push(r.id);
+    }
+  }
 
   renderPhaseNavStrip(qas);
 
@@ -1268,23 +1407,42 @@ function renderQAList() {
     (activeEl.classList.contains("qa-title-input") || activeEl.classList.contains("qa-note-input"))
   ) {
     state.pendingQARerender = true;
-    const warmList = container.querySelector('[data-warmup-list="true"]');
-    if (warmList && warmup.length > 0) {
-      warmList.innerHTML = renderUtteranceRowsHtml(warmup);
+    const warmCard = container.querySelector('[data-warmup-card="true"]');
+    if (warmCard && warmup.length > 0) {
+      const wSig = _computeUtterancesSig(warmup, { q, activeCite, canSplitAny: false, reviewsByUttId });
+      if (warmCard._uttSig !== wSig) {
+        const warmList = warmCard.querySelector('[data-warmup-list="true"]');
+        if (warmList) warmList.innerHTML = renderUtteranceRowsHtml(warmup);
+        warmCard._uttSig = wSig;
+        warmCard._bodySig = "";
+      }
     }
     for (const qa of qas) {
       const cardEl = container.querySelector(`[data-qa-card="${CSS.escape(qa.id)}"]`);
       if (!cardEl) continue;
-      const uttListEl = cardEl.querySelector(".utterance-list");
-      if (uttListEl) {
-        uttListEl.innerHTML = renderUtteranceRowsHtml(qa.utterances || [], {
-          qaId: qa.id,
-          canSplitAny,
-        });
+      const uSig = _computeUtterancesSig(qa.utterances || [], {
+        q,
+        activeCite,
+        canSplitAny,
+        reviewsByUttId,
+      });
+      if (cardEl._uttSig !== uSig) {
+        const uttListEl = cardEl.querySelector(".utterance-list");
+        if (uttListEl) {
+          uttListEl.innerHTML = renderUtteranceRowsHtml(qa.utterances || [], {
+            qaId: qa.id,
+            canSplitAny,
+          });
+        }
+        cardEl._uttSig = uSig;
+        cardEl._bodySig = "";
       }
-      const pillHost = cardEl.querySelector(".qa-probe-pill-host");
-      if (pillHost) {
-        pillHost.innerHTML = renderCardProbePill(qa.probe_state || "idle");
+      const pState = qa.probe_state || "idle";
+      if (cardEl._probeState !== pState) {
+        const pillHost = cardEl.querySelector(".qa-probe-pill-host");
+        if (pillHost) pillHost.innerHTML = renderCardProbePill(pState);
+        cardEl._probeState = pState;
+        cardEl._bodySig = "";
       }
     }
     return;
@@ -1297,33 +1455,71 @@ function renderQAList() {
     !hadContent || container.scrollHeight - container.scrollTop - container.clientHeight < 64;
 
   if (qas.length === 0 && warmup.length === 0) {
-    container.innerHTML = `
-      <div class="quiet-state">
-        <p class="quiet-title">${state.captureState === "streaming" ? "Listening…" : "Nothing said yet."}</p>
-        <p>${
-          state.simulatorOpen
-            ? "Type a turn below and the transcript will build itself into cards."
-            : "The transcript appears here as you talk, grouped into cards as the interview moves along."
-        }</p>
-      </div>
-    `;
+    const emptySig = `${state.captureState === "streaming" ? 1 : 0}|${state.simulatorOpen ? 1 : 0}`;
+    if (container._emptySig !== emptySig || hadContent) {
+      container.innerHTML = `
+        <div class="quiet-state">
+          <p class="quiet-title">${state.captureState === "streaming" ? "Listening…" : "Nothing said yet."}</p>
+          <p>${
+            state.simulatorOpen
+              ? "Type a turn below and the transcript will build itself into cards."
+              : "The transcript appears here as you talk, grouped into cards as the interview moves along."
+          }</p>
+        </div>
+      `;
+      container._emptySig = emptySig;
+    }
     updateJumpToBottomVisibility();
     return;
   }
 
-  const parts = [];
+  container._emptySig = "";
+
+  // Index existing card DOM nodes so untouched cards survive with zero rebuilds
+  let existingWarmup = null;
+  const existingById = new Map();
+  for (const child of Array.from(container.children)) {
+    if (child.hasAttribute("data-warmup-card")) {
+      existingWarmup = child;
+    } else if (child.hasAttribute("data-qa-card")) {
+      existingById.set(child.getAttribute("data-qa-card"), child);
+    } else {
+      child.remove();
+    }
+  }
+
+  const desiredNodes = [];
+  let domMutated = false;
 
   if (warmup.length > 0) {
-    parts.push(`
-      <article class="qa-card warmup-card">
-        <div class="qa-card-header">
-          <span class="qa-badge"></span>
-          <span class="qa-title-static">Before the first question</span>
-          <div class="qa-card-actions"><span>${warmup.length} turn${warmup.length === 1 ? "" : "s"}</span></div>
-        </div>
-        <div class="utterance-list" data-warmup-list="true">${renderUtteranceRowsHtml(warmup)}</div>
-      </article>
-    `);
+    const warmUttSig = _computeUtterancesSig(warmup, {
+      q,
+      activeCite,
+      canSplitAny: false,
+      reviewsByUttId,
+    });
+    const warmBodySig = `warm|${warmup.length}|${warmUttSig}`;
+    let warmEl = existingWarmup;
+    if (!warmEl || warmEl._bodySig !== warmBodySig) {
+      const nextWarm = _buildCardElement(`
+        <article class="qa-card warmup-card" data-warmup-card="true">
+          <div class="qa-card-header">
+            <span class="qa-badge"></span>
+            <span class="qa-title-static">Before the first question</span>
+            <div class="qa-card-actions"><span>${warmup.length} turn${warmup.length === 1 ? "" : "s"}</span></div>
+          </div>
+          <div class="utterance-list" data-warmup-list="true">${renderUtteranceRowsHtml(warmup)}</div>
+        </article>
+      `);
+      nextWarm._bodySig = warmBodySig;
+      nextWarm._uttSig = warmUttSig;
+      if (warmEl) {
+        warmEl.replaceWith(nextWarm);
+      }
+      warmEl = nextWarm;
+      domMutated = true;
+    }
+    desiredNodes.push(warmEl);
   }
 
   for (let i = 0; i < qas.length; i++) {
@@ -1331,48 +1527,88 @@ function renderQAList() {
     const isSelected = qa.id === state.selectedQaId;
     const pState = qa.probe_state || "idle";
     const utts = qa.utterances || [];
+    const canMerge = i > 0 && canMergeAny && !completed;
+    const uttSig = _computeUtterancesSig(utts, {
+      q,
+      activeCite,
+      canSplitAny,
+      reviewsByUttId,
+    });
+    const bodySig = `${qa.badge}|${qa.title}|${qa.notes || ""}|${pState}|${canMerge ? 1 : 0}|${uttSig}`;
 
-    parts.push(`
-      <article class="qa-card ${isSelected ? "selected" : ""}" data-qa-card="${escapeHtml(qa.id)}">
-        <div class="qa-card-header">
-          <span class="qa-badge">${escapeHtml(qa.badge)}</span>
-          <input
-            class="qa-title-input"
-            data-qa-title="${escapeHtml(qa.id)}"
-            value="${escapeHtml(qa.title)}"
-            title="Click to rename"
-            spellcheck="false"
-          />
-          <div class="qa-card-actions">
-            ${
-              i > 0 && canMergeAny && !isSessionCompleted()
-                ? `<button type="button" class="link-quiet qa-merge-btn" data-action="merge" data-qa="${escapeHtml(qa.id)}" title="Merge this card into the one above">Merge up</button>`
-                : ""
-            }
-            <span class="qa-probe-pill-host qa-probe-state">${renderCardProbePill(pState)}</span>
-            <span>${utts.length} turn${utts.length === 1 ? "" : "s"}</span>
+    let cardEl = existingById.get(qa.id);
+    if (cardEl && cardEl._bodySig === bodySig) {
+      cardEl.classList.toggle("selected", isSelected);
+    } else {
+      const nextCard = _buildCardElement(`
+        <article class="qa-card ${isSelected ? "selected" : ""}" data-qa-card="${escapeHtml(qa.id)}">
+          <div class="qa-card-header">
+            <span class="qa-badge">${escapeHtml(qa.badge)}</span>
+            <input
+              class="qa-title-input"
+              data-qa-title="${escapeHtml(qa.id)}"
+              value="${escapeHtml(qa.title)}"
+              title="Click to rename"
+              spellcheck="false"
+            />
+            <div class="qa-card-actions">
+              ${
+                canMerge
+                  ? `<button type="button" class="link-quiet qa-merge-btn" data-action="merge" data-qa="${escapeHtml(qa.id)}" title="Merge this card into the one above">Merge up</button>`
+                  : ""
+              }
+              <span class="qa-probe-pill-host qa-probe-state">${renderCardProbePill(pState)}</span>
+              <span>${utts.length} turn${utts.length === 1 ? "" : "s"}</span>
+            </div>
           </div>
-        </div>
-        <div class="utterance-list">
-          ${renderUtteranceRowsHtml(utts, { qaId: qa.id, canSplitAny })}
-        </div>
-        <div class="qa-card-footer">
-          <input
-            class="qa-note-input"
-            data-qa-note="${escapeHtml(qa.id)}"
-            placeholder="Add a private note…"
-            value="${escapeHtml(qa.notes || "")}"
-          />
-        </div>
-      </article>
-    `);
+          <div class="utterance-list">
+            ${renderUtteranceRowsHtml(utts, { qaId: qa.id, canSplitAny })}
+          </div>
+          <div class="qa-card-footer">
+            <input
+              class="qa-note-input"
+              data-qa-note="${escapeHtml(qa.id)}"
+              placeholder="Add a private note…"
+              value="${escapeHtml(qa.notes || "")}"
+            />
+          </div>
+        </article>
+      `);
+      nextCard._bodySig = bodySig;
+      nextCard._uttSig = uttSig;
+      nextCard._probeState = pState;
+      if (cardEl) {
+        cardEl.replaceWith(nextCard);
+      }
+      cardEl = nextCard;
+      domMutated = true;
+    }
+    desiredNodes.push(cardEl);
   }
 
-  container.innerHTML = parts.join("");
-  if (wasNearBottom) {
-    container.scrollTop = container.scrollHeight;
-  } else {
-    container.scrollTop = prevScrollTop;
+  // Remove stale cards no longer in session and reconcile order without detaching unchanged nodes
+  const desiredSet = new Set(desiredNodes);
+  for (const child of Array.from(container.children)) {
+    if (!desiredSet.has(child)) {
+      child.remove();
+      domMutated = true;
+    }
+  }
+  for (let i = 0; i < desiredNodes.length; i++) {
+    const node = desiredNodes[i];
+    const current = container.children[i];
+    if (current !== node) {
+      container.insertBefore(node, current || null);
+      domMutated = true;
+    }
+  }
+
+  if (domMutated) {
+    if (wasNearBottom) {
+      container.scrollTop = container.scrollHeight;
+    } else {
+      container.scrollTop = prevScrollTop;
+    }
   }
   updateJumpToBottomVisibility();
 }
@@ -1437,6 +1673,32 @@ function renderProbesPanel() {
   const label = el("selectedQaLabel");
   const stateEl = el("probeReadinessBadge");
   const content = el("probesContent");
+
+  if (qa) {
+    state.selectedQaId = qa.id;
+  }
+
+  let probesSig;
+  if (!qa) {
+    probesSig = "none";
+  } else {
+    const pState = qa.probe_state || "idle";
+    const history = qa.dive_deeper_history || [];
+    const latest = history.length > 0 ? history[history.length - 1] : null;
+    let askedBits = "";
+    if (latest && latest.probes) {
+      for (let idx = 0; idx < latest.probes.length; idx++) {
+        askedBits += state.askedProbes.has(`${qa.id}:${history.length}:${idx}`) ? "1" : "0";
+      }
+    }
+    probesSig = `${qa.id}|${qa.badge}|${qa.title}|${pState}|${history.length}|${askedBits}|${latest?.quick_read || ""}|${latest?.model_used || ""}`;
+  }
+
+  if (content._probesSig === probesSig) {
+    return;
+  }
+  content._probesSig = probesSig;
+
   const setDiveBtn = (text, { disabled = false, hidden = false } = {}) => {
     diveBtn.disabled = disabled;
     diveBtn.classList.toggle("hidden", hidden);
@@ -1461,7 +1723,6 @@ function renderProbesPanel() {
     return;
   }
 
-  state.selectedQaId = qa.id;
   const pState = qa.probe_state || "idle";
   const history = qa.dive_deeper_history || [];
   const hasProbes = history.length > 0;
@@ -2157,7 +2418,8 @@ function renderCalibrationPanel() {
   const sm = state.session?.state_machines;
   const calibRunning = sm?.jobs?.calibration === "running";
   const allowed = allowedEventsSet();
-  const hasReport = Boolean(state.session?.calibration_markdown);
+  const reportMd = state.session?.calibration_markdown || "";
+  const hasReport = Boolean(reportMd);
 
   el("runCalibrationBtn").disabled = !allowed.has("generate_calibration") || calibRunning;
   el("runCalibrationBtn").textContent = calibRunning ? "Reading the transcript…" : "Reveal the audit";
@@ -2181,12 +2443,32 @@ function renderCalibrationPanel() {
   const toolbarEl = el("reportToolbar");
   const secNavEl = el("reportSectionNav");
 
+  const sr = state.session?.self_rating || null;
+  const perCard = state.session?.metrics?.per_card || null;
+  const srSig = sr
+    ? `${sr.hire_signal || ""}|${sr.perceived_level || ""}|${sr.gut_rationale || ""}|${sr.biggest_concern || ""}`
+    : "";
+  const perCardSig = perCard
+    ? perCard
+        .map((c) => `${c.badge}|${c.title}|${c.span_seconds}|${c.candidate_words}|${c.interviewer_words}`)
+        .join(";")
+    : "";
+  const reportSig = `${calibRunning ? 1 : 0}|${hasReport ? 1 : 0}|${showVerdictCard ? 1 : 0}|${srSig}|${perCardSig}|${reportMd}`;
+
+  if (outputEl._reportSig === reportSig) {
+    if (showVerdictCard) {
+      syncPhaseTableActive();
+    }
+    return;
+  }
+  outputEl._reportSig = reportSig;
+
   if (calibRunning) {
     toolbarEl.classList.add("hidden");
     outputEl.classList.add("empty-report");
     outputEl.textContent = "Reading the whole transcript against your call…";
   } else if (hasReport) {
-    const insights = parseCalibrationInsights(state.session.calibration_markdown);
+    const insights = parseCalibrationInsights(reportMd);
     if (showVerdictCard) {
       renderVerdictCompareCard(insights);
     }
@@ -2200,7 +2482,7 @@ function renderCalibrationPanel() {
       .join("");
 
     outputEl.classList.remove("empty-report");
-    outputEl.innerHTML = renderMarkdownSafe(state.session.calibration_markdown);
+    outputEl.innerHTML = renderMarkdownSafe(reportMd);
     syncReportNavToScroll();
   } else {
     toolbarEl.classList.add("hidden");
