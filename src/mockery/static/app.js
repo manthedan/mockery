@@ -2,6 +2,14 @@ import { createProfileAddonsController } from "./profile_addons.js";
 import { createPracticeStudioController } from "./practice_studio.js";
 import { createSystemDesignStudioPlugin } from "./design_studio.js";
 import { createCodingStudioPlugin } from "./coding_studio.js";
+import {
+  createMachine,
+  createMachineRegistry,
+  createModalTokenController,
+  createPackOpTracker,
+  deriveAppRoute,
+  formatApiDetail,
+} from "./state_machines.js";
 
 const CHANNEL_INTERVIEWER = 0x01;
 const CHANNEL_CANDIDATE = 0x02;
@@ -66,10 +74,14 @@ const CAPTURE_TRANSITIONS = {
   stopping: new Set(["idle"]),
 };
 
+const clientMachines = createMachineRegistry({ maxTransitions: 40 });
+const packOps = createPackOpTracker(clientMachines);
+
 const state = {
   wsState: "connecting",
   captureState: "idle",
   modalState: "none",
+  route: "launchpad",
   rightTab: "probes",
   wideCopilot: false,
   editingSelfRating: false,
@@ -78,8 +90,10 @@ const state = {
   forceWorkspace: false,
 
   ws: null,
+  wsReconnectTimer: null,
   outbox: [],
   session: null,
+  optimisticBackup: null,
   selectedQaId: null,
   asr: { state: "loading", generation: 0, last_inference_ms: 0 },
   diarizer: null,
@@ -95,6 +109,8 @@ const state = {
   navLockUntil: 0,
   pendingNewSession: false,
   pendingQARerender: false,
+  savingSettings: false,
+  loadingSavedSession: false,
 
   sharedAudioCtx: null,
   audioCleanupFns: [],
@@ -110,6 +126,8 @@ const state = {
   addons: null,
   profileSummary: null,
   practiceActive: false,
+  clientMachines,
+  packOps,
 };
 
 let profileAddons = null;
@@ -117,6 +135,7 @@ let practiceStudio = null;
 
 const _mockeryStateDescriptor = {
   get() {
+    const regSnap = clientMachines.snapshot();
     return {
       wsState: state.wsState,
       captureState: state.captureState,
@@ -132,6 +151,12 @@ const _mockeryStateDescriptor = {
       profileSummary: state.profileSummary,
       practiceActive: state.practiceActive,
       serverMachines: state.session?.state_machines || null,
+      route: state.route,
+      practice: practiceStudio?.getStateSnapshot?.() || null,
+      profileAddons: profileAddons?.getStateSnapshot?.() || null,
+      activeOps: regSnap.activeOps,
+      recentTransitions: regSnap.recentTransitions,
+      clientMachines: regSnap.machines,
     };
   },
 };
@@ -183,37 +208,58 @@ function initTheme() {
 
 /* ---------------- Core State Helpers ---------------- */
 
-function setWsState(next) {
-  if (next === state.wsState) return;
-  if (!WS_TRANSITIONS[state.wsState]?.has(next)) {
-    console.warn(`Unexpected WS transition: ${state.wsState} -> ${next}`);
-  }
-  const prev = state.wsState;
-  state.wsState = next;
-  renderConnectionIndicator();
-  if (next === "reconnecting" && prev === "connected") {
-    showToast("Lost the connection. Reconnecting…", 3000);
-  } else if (next === "connected" && prev !== "connecting") {
-    showToast("Reconnected.", 2000);
-  }
+const wsMachine = createMachine({
+  name: "ws_transport",
+  initial: "connecting",
+  transitions: WS_TRANSITIONS,
+  registry: clientMachines,
+  strict: false,
+  onTransition: (next, prev) => {
+    state.wsState = next;
+    renderConnectionIndicator();
+    if (next === "reconnecting" && prev === "connected") {
+      showToast("Lost the connection. Reconnecting…", 3000);
+    } else if (next === "connected" && prev !== "connecting") {
+      showToast("Reconnected.", 2000);
+    }
+  },
+});
+
+const captureMachine = createMachine({
+  name: "copilot_capture",
+  initial: "idle",
+  transitions: CAPTURE_TRANSITIONS,
+  registry: clientMachines,
+  strict: true,
+  onTransition: (next) => {
+    state.captureState = next;
+    renderCaptureControls();
+    renderWorkspaceMode();
+  },
+});
+
+const modalCtrl = createModalTokenController({
+  initial: "none",
+  registry: clientMachines,
+  onChange: (next) => {
+    state.modalState = next;
+    el("settingsModal")?.classList.toggle("hidden", next !== "settings");
+    el("historyModal")?.classList.toggle("hidden", next !== "history");
+    el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
+    el("profileModal")?.classList.toggle("hidden", next !== "profile");
+  },
+});
+
+function setWsState(next, event = null) {
+  wsMachine.transition(next, { event });
 }
 
-function setCaptureState(next) {
-  if (next === state.captureState) return;
-  if (!CAPTURE_TRANSITIONS[state.captureState]?.has(next)) {
-    throw new Error(`Illegal client capture transition: ${state.captureState} -> ${next}`);
-  }
-  state.captureState = next;
-  renderCaptureControls();
-  renderWorkspaceMode();
+function setCaptureState(next, event = null) {
+  captureMachine.transition(next, { event });
 }
 
-function setModalState(next) {
-  state.modalState = next;
-  el("settingsModal").classList.toggle("hidden", next !== "settings");
-  el("historyModal").classList.toggle("hidden", next !== "history");
-  el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
-  el("profileModal")?.classList.toggle("hidden", next !== "profile");
+function setModalState(next, opts = {}) {
+  return modalCtrl.set(next, opts);
 }
 
 function closeAllPopovers() {
@@ -277,31 +323,88 @@ function allowedEventsSet() {
 
 /* ---------------- WebSocket Transport State Machine ---------------- */
 
+function saveOptimisticBackup() {
+  const sm = state.session?.state_machines;
+  if (!sm || state.optimisticBackup) return;
+  state.optimisticBackup = {
+    sessionId: state.session.id,
+    phase: sm.session?.phase,
+    allowed_events: Array.isArray(sm.session?.allowed_events) ? [...sm.session.allowed_events] : [],
+    jobs: sm.jobs ? { ...sm.jobs } : {},
+  };
+}
+
+function rollbackOptimisticState() {
+  const b = state.optimisticBackup;
+  state.optimisticBackup = null;
+  if (!b || !state.session || state.session.id !== b.sessionId || !state.session.state_machines) {
+    return;
+  }
+  const sm = state.session.state_machines;
+  if (sm.session) {
+    sm.session.phase = b.phase;
+    sm.session.allowed_events = b.allowed_events;
+  }
+  if (sm.jobs) {
+    sm.jobs = { ...sm.jobs, ...b.jobs };
+  }
+  renderPhaseAndControls();
+  renderQAList();
+  renderCalibrationPanel();
+}
+
 function connectWS() {
-  setWsState(state.wsState === "reconnecting" ? "connecting" : state.wsState);
+  if (state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+  }
+  if (state.wsState === "reconnecting") {
+    setWsState("connecting", "ws_reconnect");
+  }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws/session`);
   ws.binaryType = "arraybuffer";
   state.ws = ws;
 
   ws.onopen = () => {
-    setWsState("connected");
-    while (state.outbox.length > 0 && ws.readyState === WebSocket.OPEN) {
-      ws.send(state.outbox.shift());
+    if (state.ws !== ws) return;
+    if (state.wsReconnectTimer) {
+      clearTimeout(state.wsReconnectTimer);
+      state.wsReconnectTimer = null;
     }
-    if (state.captureState === "streaming") {
+    setWsState("connected", "ws_open");
+    let flushedStart = false;
+    while (state.outbox.length > 0 && ws.readyState === WebSocket.OPEN) {
+      const raw = state.outbox.shift();
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.type === "start_capture") flushedStart = true;
+      } catch {
+        /* ignore */
+      }
+      ws.send(raw);
+    }
+    if (state.captureState === "streaming" && !flushedStart) {
       sendCmd({ type: "start_capture" });
     }
   };
 
   ws.onmessage = (ev) => {
+    if (state.ws !== ws) return;
     const msg = JSON.parse(ev.data);
     handleServerMessage(msg);
   };
 
   ws.onclose = () => {
-    setWsState("reconnecting");
-    setTimeout(connectWS, 1400);
+    if (state.ws !== ws) return;
+    state.pendingNewSession = false;
+    rollbackOptimisticState();
+    setWsState("reconnecting", "ws_close");
+    if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = setTimeout(() => {
+      state.wsReconnectTimer = null;
+      connectWS();
+    }, 1400);
   };
 }
 
@@ -335,11 +438,15 @@ function handleServerMessage(msg) {
   }
 
   if (msg.type === "transition_rejected") {
-    showToast(`${msg.remediation || "That isn't available right now."}`);
+    state.pendingNewSession = false;
+    rollbackOptimisticState();
+    showToast(`${msg.remediation || msg.message || "That isn't available right now."}`);
     return;
   }
 
   if (msg.type === "error") {
+    state.pendingNewSession = false;
+    rollbackOptimisticState();
     showToast(msg.message || "Something went wrong.");
     return;
   }
@@ -372,6 +479,7 @@ function handleServerMessage(msg) {
 
   if (msg.type === "regroup_loading") {
     if (state.session?.state_machines?.jobs) {
+      saveOptimisticBackup();
       state.session.state_machines.jobs.regroup = "running";
       state.session.state_machines.session.allowed_events =
         state.session.state_machines.session.allowed_events.filter(
@@ -390,6 +498,7 @@ function handleServerMessage(msg) {
       state.calibrationStreamRaf = null;
     }
     if (state.session?.state_machines) {
+      saveOptimisticBackup();
       state.session.state_machines.jobs.calibration = "running";
       state.session.state_machines.session.phase = "calibrating";
       state.editingSelfRating = false;
@@ -417,6 +526,7 @@ function handleServerMessage(msg) {
   }
 
   if (msg.type === "calibration_ready") {
+    state.optimisticBackup = null;
     state.streamingCalibrationMd = "";
     if (state.calibrationStreamRaf) {
       cancelAnimationFrame(state.calibrationStreamRaf);
@@ -436,6 +546,7 @@ function handleServerMessage(msg) {
   }
 
   if (msg.type === "session_state") {
+    state.optimisticBackup = null;
     const prevSelected = state.selectedQaId;
     const prevSessionId = state.session?.id;
     state.session = msg.session;
@@ -610,12 +721,17 @@ async function ensureSharedAudioContext() {
 
 async function startCapture() {
   if (state.captureState !== "idle") return;
+  if (state.practiceActive || practiceStudio?.isPracticeStartingOrActive?.()) {
+    showToast("Exit Practice Mode before starting live recording.", 3000);
+    return;
+  }
 
   const mode = el("modeSelect").value;
   pushSessionConfig();
   closeAllPopovers();
+  const prevForceWorkspace = state.forceWorkspace;
   state.forceWorkspace = true;
-  setCaptureState("requesting_permissions");
+  setCaptureState("requesting_permissions", "start_capture");
 
   try {
     let streamsToAttach;
@@ -627,7 +743,7 @@ async function startCapture() {
 
     sendCmd({ type: "start_capture" });
     state.localSegmentStartedAt = Date.now();
-    setCaptureState("streaming");
+    setCaptureState("streaming", "permissions_granted");
 
     for (const item of streamsToAttach) {
       attachStreamToSharedContext(item.ctx, item.stream, item.channelId, item.meterId);
@@ -637,7 +753,8 @@ async function startCapture() {
     state.timerHandle = setInterval(updateTimer, 500);
   } catch (err) {
     stopAudioStreamsOnly();
-    setCaptureState("idle");
+    state.forceWorkspace = prevForceWorkspace;
+    setCaptureState("idle", "permissions_failed");
     sendCmd({ type: "cancel_capture" });
     showToast(`Could not start recording: ${err.message || err}`, 5500);
   }
@@ -886,7 +1003,27 @@ function renderTimerPill(elapsedSec) {
 /* ---------------- Workspace Mode (Launchpad vs Active Split Studio) ---------------- */
 
 function renderWorkspaceMode() {
-  if (state.practiceActive) {
+  const qas = state.session?.qa_groups_resolved || [];
+  const warmup = state.session?.warmup_resolved || [];
+  const hasContent = qas.length > 0 || warmup.length > 0;
+  const nextRoute = deriveAppRoute({
+    practiceActive: state.practiceActive,
+    captureState: state.captureState,
+    forceWorkspace: state.forceWorkspace,
+    hasCopilotContent: hasContent,
+  });
+  if (nextRoute !== state.route) {
+    clientMachines.recordTransition({
+      machine: "app_route",
+      from: state.route,
+      to: nextRoute,
+      event: "render_workspace_mode",
+      reason: null,
+    });
+    state.route = nextRoute;
+  }
+
+  if (nextRoute === "practice") {
     el("appShell").classList.remove("setup-mode");
     el("setupLaunchpad").classList.add("hidden");
     el("workspaceGrid").classList.add("hidden");
@@ -894,11 +1031,7 @@ function renderWorkspaceMode() {
     return;
   }
 
-  const qas = state.session?.qa_groups_resolved || [];
-  const warmup = state.session?.warmup_resolved || [];
-  const hasContent = qas.length > 0 || warmup.length > 0;
-  const isCapturing = state.captureState !== "idle";
-  const showLaunchpad = !hasContent && !isCapturing && !state.forceWorkspace;
+  const showLaunchpad = nextRoute === "launchpad";
 
   el("appShell").classList.toggle("setup-mode", showLaunchpad);
   el("setupLaunchpad").classList.toggle("hidden", !showLaunchpad);
@@ -2698,8 +2831,19 @@ function showInlineTestResult(targetEl, resObj) {
 
 async function openSettingsModal() {
   closeAllPopovers();
-  const [statusRes, disc] = await Promise.all([fetch("/api/status"), fetchDiscovery()]);
+  const reqToken = modalCtrl.beginRequest();
+  let statusRes;
+  let disc;
+  try {
+    [statusRes, disc] = await Promise.all([fetch("/api/status"), fetchDiscovery()]);
+  } catch (err) {
+    if (modalCtrl.isCurrent(reqToken)) {
+      showToast(`Could not load settings: ${err.message || "network error"}`);
+    }
+    return;
+  }
   const data = await statusRes.json();
+  if (!modalCtrl.isCurrent(reqToken)) return;
   state.llm = data.llm;
   syncHomeAiPrompt(data.llm);
   profileAddons?.applyStatusSnapshot(data);
@@ -2915,7 +3059,7 @@ async function openSettingsModal() {
     syncModelChoosers({ redetect: true });
   };
 
-  setModalState("settings");
+  setModalState("settings", { reqToken, event: "open_settings" });
 }
 
 async function testSettingsConnection() {
@@ -2954,7 +3098,7 @@ async function openDataDirectory() {
     const res = await fetch("/api/open-data-dir", { method: "POST" });
     const data = await res.json();
     if (!res.ok || !data.ok) {
-      showToast(data.detail || `Sessions folder: ${data.path || "local"}`, 3500);
+      showToast(formatApiDetail(data.detail, `Sessions folder: ${data.path || "local"}`), 3500);
     }
   } catch (err) {
     showToast(`Could not open folder: ${err.message || "network error"}`);
@@ -2962,6 +3106,16 @@ async function openDataDirectory() {
 }
 
 async function saveSettings() {
+  if (state.savingSettings) return;
+  state.savingSettings = true;
+  const settingsOpenToken = modalCtrl.currentToken;
+  clientMachines.beginOp("save_settings");
+  const saveBtn = el("saveSettingsBtn");
+  const origLabel = saveBtn?.textContent || "Save";
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving…";
+  }
   const payload = {
     provider: el("llmPresetSelect").value,
     base_url: el("llmBaseUrlInput").value,
@@ -2970,41 +3124,56 @@ async function saveSettings() {
     api_key: el("llmApiKeyInput").value || null,
     parakeet_model: el("parakeetModelSelect").value,
   };
-  let res;
   try {
-    res = await fetch("/api/settings/llm", {
+    const res = await fetch("/api/settings/llm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(formatApiDetail(err.detail, `Could not save settings (${res.status}).`));
+      return;
+    }
+    const data = await res.json();
+    if (data.llm) {
+      state.llm = data.llm;
+      syncHomeAiPrompt(data.llm);
+    }
+    if (data.asr) {
+      state.asr = data.asr;
+      renderAsrBadge();
+    }
+    showToast("Settings saved.", 2200);
+    modalCtrl.closeIf("settings", settingsOpenToken);
   } catch (err) {
     showToast(`Failed to save settings: ${err.message || "network error"}`);
-    return;
+  } finally {
+    state.savingSettings = false;
+    clientMachines.endOp("save_settings");
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = origLabel;
+    }
   }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const msg = typeof err.detail === "string" ? err.detail : err.detail?.message;
-    showToast(msg || `Could not save settings (${res.status}).`);
-    return;
-  }
-  const data = await res.json();
-  if (data.llm) {
-    state.llm = data.llm;
-    syncHomeAiPrompt(data.llm);
-  }
-  if (data.asr) {
-    state.asr = data.asr;
-    renderAsrBadge();
-  }
-  showToast("Settings saved.", 2200);
-  setModalState("none");
 }
 
 async function openOnboardingModal(statusData = null) {
-  const [data, disc] = await Promise.all([
-    statusData ? Promise.resolve(statusData) : fetch("/api/status").then((r) => r.json()),
-    fetchDiscovery(),
-  ]);
+  const reqToken = modalCtrl.beginRequest();
+  let data;
+  let disc;
+  try {
+    [data, disc] = await Promise.all([
+      statusData ? Promise.resolve(statusData) : fetch("/api/status").then((r) => r.json()),
+      fetchDiscovery(),
+    ]);
+  } catch (err) {
+    if (modalCtrl.isCurrent(reqToken)) {
+      showToast(`Could not load AI setup: ${err.message || "network error"}`);
+    }
+    return;
+  }
+  if (!modalCtrl.isCurrent(reqToken)) return;
   state.llm = data.llm;
   const presets = data.llm.presets || {};
 
@@ -3115,10 +3284,11 @@ async function openOnboardingModal(statusData = null) {
 
   el("onboardApiKeyInput").value = "";
   el("onboardStatus").classList.add("hidden");
-  setModalState("onboarding");
+  setModalState("onboarding", { reqToken, event: "open_onboarding" });
 }
 
 async function testAndSaveOnboardingKey() {
+  const onboardToken = modalCtrl.currentToken;
   const provKey = state.onboardProvider || "gemini";
   const presets = state.llm?.presets || {};
   const p = presets[provKey] || {};
@@ -3165,7 +3335,7 @@ async function testAndSaveOnboardingKey() {
       state.llm = saved.llm;
       syncHomeAiPrompt(saved.llm);
       setTimeout(() => {
-        setModalState("none");
+        modalCtrl.closeIf("onboarding", onboardToken);
         showToast(`${p.label || provKey} connected and ready.`, 2600);
       }, 450);
     }
@@ -3309,7 +3479,17 @@ async function refreshHomeSessions() {
 
 async function openHistoryModal() {
   closeAllPopovers();
-  const sessions = await fetchSavedSessions();
+  const reqToken = modalCtrl.beginRequest();
+  let sessions;
+  try {
+    sessions = await fetchSavedSessions();
+  } catch (err) {
+    if (modalCtrl.isCurrent(reqToken)) {
+      showToast(`Could not load interview history: ${err.message || "network error"}`);
+    }
+    return;
+  }
+  if (!modalCtrl.isCurrent(reqToken)) return;
   const list = el("historyList");
   if (!sessions.length) {
     list.innerHTML = `<div class="history-empty">No interviews saved yet.</div>`;
@@ -3335,44 +3515,56 @@ async function openHistoryModal() {
       })
       .join("");
   }
-  setModalState("history");
+  setModalState("history", { reqToken, event: "open_history" });
 }
 
 async function loadSavedSession(id) {
-  if (!id) return;
+  if (!id || state.loadingSavedSession) return;
   if (!allowedEventsSet().has("load_historical_session") || state.captureState !== "idle") {
     showToast("End the recording before opening another interview.");
     return;
   }
-  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/load`, { method: "POST" });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const msg = typeof err.detail === "string" ? err.detail : err.detail?.message;
-    showToast(msg || "Could not open that interview.");
-    return;
+  state.loadingSavedSession = true;
+  clientMachines.beginOp("load_saved_session", { sessionId: id });
+  try {
+    if (state.practiceActive && practiceStudio?.exitPracticeToHome) {
+      await practiceStudio.exitPracticeToHome();
+    }
+    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/load`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(formatApiDetail(err.detail, "Could not open that interview."));
+      return;
+    }
+    const data = await res.json();
+    state.session = data.session;
+    state.optimisticBackup = null;
+    state.activeCitationUttId = null;
+    state.editingSelfRating = false;
+    state.baseElapsedMs = data.session.live_elapsed_ms || 0;
+    renderTimerPill(state.baseElapsedMs / 1000);
+    const qas = state.session.qa_groups_resolved || [];
+    state.selectedQaId = qas.length ? qas[0].id : null;
+    syncConfigInputsFromSession();
+    renderWorkspaceMode();
+    renderSpeakerToggle();
+    renderPhaseAndControls();
+    renderQAList();
+    // A reopened interview starts on its first phase, so show the top of the transcript to match
+    // the highlighted phase tab (and the phase table in Calibration).
+    el("qaList").scrollTop = 0;
+    updateJumpToBottomVisibility();
+    renderProbesPanel();
+    renderCalibrationPanel();
+    renderMetricsBar();
+    activateRightTab(state.session.calibration_markdown ? "calibration" : "probes");
+    setModalState("none", { event: "loaded_saved_session" });
+  } catch (err) {
+    showToast(`Could not open that interview: ${err.message || "network error"}`);
+  } finally {
+    state.loadingSavedSession = false;
+    clientMachines.endOp("load_saved_session");
   }
-  const data = await res.json();
-  state.session = data.session;
-  state.activeCitationUttId = null;
-  state.editingSelfRating = false;
-  state.baseElapsedMs = data.session.live_elapsed_ms || 0;
-  renderTimerPill(state.baseElapsedMs / 1000);
-  const qas = state.session.qa_groups_resolved || [];
-  state.selectedQaId = qas.length ? qas[0].id : null;
-  syncConfigInputsFromSession();
-  renderWorkspaceMode();
-  renderSpeakerToggle();
-  renderPhaseAndControls();
-  renderQAList();
-  // A reopened interview starts on its first phase, so show the top of the transcript to match
-  // the highlighted phase tab (and the phase table in Calibration).
-  el("qaList").scrollTop = 0;
-  updateJumpToBottomVisibility();
-  renderProbesPanel();
-  renderCalibrationPanel();
-  renderMetricsBar();
-  activateRightTab(state.session.calibration_markdown ? "calibration" : "probes");
-  setModalState("none");
 }
 
 /* ---------------- Event Listeners & Hotkeys ---------------- */
@@ -3987,6 +4179,8 @@ profileAddons = createProfileAddonsController({
   escapeHtml,
   showToast,
   setModalState,
+  clientMachines,
+  packOps,
   onRoleApply: (jd) => {
     if (!jd?.title) return;
     const roleLabel = jd.company ? `${jd.title} (${jd.company})` : jd.title;
@@ -4008,19 +4202,22 @@ practiceStudio = createPracticeStudioController({
   el,
   escapeHtml,
   showToast,
+  clientMachines,
   onPracticeActiveChange: () => {
     renderWorkspaceMode();
   },
 });
 practiceStudio.registerStudioPlugin(
   "system_design",
-  createSystemDesignStudioPlugin({ escapeHtml, showToast })
+  createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMachines })
 );
 practiceStudio.registerStudioPlugin(
   "coding",
   createCodingStudioPlugin({
     escapeHtml,
     showToast,
+    clientMachines,
+    packOps,
     getAddons: () => state.addons || profileAddons.getAddons(),
     onAddonsUpdated: (addons) => {
       state.addons = addons;

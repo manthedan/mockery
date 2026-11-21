@@ -4,6 +4,8 @@
  * served with strict Worker CSP headers, and Python loads strictly from `/api/addons/pyodide/`.
  */
 
+import { createPackOpTracker, formatApiDetail } from "./state_machines.js";
+
 const JS_TIMEOUT_MS = 3500;
 const PY_BOOT_TIMEOUT_MS = 20000;
 const PY_RUN_TIMEOUT_MS = 4000;
@@ -199,7 +201,14 @@ function shortRunId() {
   return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function createCodingStudioPlugin({ escapeHtml, showToast, getAddons, onAddonsUpdated }) {
+export function createCodingStudioPlugin({
+  escapeHtml,
+  showToast,
+  getAddons,
+  onAddonsUpdated,
+  packOps = null,
+}) {
+  const sharedPackOps = packOps || createPackOpTracker();
   return function mountCodingStudio({
     containerEl,
     session,
@@ -477,7 +486,12 @@ export function createCodingStudioPlugin({ escapeHtml, showToast, getAddons, onA
     function renderPyBanner() {
       const banner = q("[data-cs-py-banner]");
       if (!banner) return;
-      const needsPyodide = state.language === "python" && !isPyodidePackInstalled(state.addons);
+      const pyPack = (state.addons?.packs || []).find((p) => p && p.id === "pyodide_python");
+      const installing = sharedPackOps.isInstalling("pyodide_python") || pyPack?.state === "installing";
+      const uninstalling =
+        sharedPackOps.isUninstalling("pyodide_python") || pyPack?.state === "uninstalling";
+      const busy = installing || uninstalling;
+      const needsPyodide = state.language === "python" && (!isPyodidePackInstalled(state.addons) || busy);
       banner.classList.toggle("hidden", !needsPyodide);
       if (!needsPyodide) {
         banner.innerHTML = "";
@@ -485,14 +499,14 @@ export function createCodingStudioPlugin({ escapeHtml, showToast, getAddons, onA
       }
       banner.innerHTML = `
         <div class="cs-py-banner-text">
-          <strong>Offline Python runner not installed.</strong>
+          <strong>Offline Python runner ${uninstalling ? "is being removed…" : "not installed."}</strong>
           You can write Python and have the AI review it right now, or install the verified local Pyodide WASM pack (~14 MB) to execute Python unit tests offline.
         </div>
         <div class="cs-py-banner-actions">
-          <button type="button" class="btn btn-ink btn-xs" data-cs-install-pyodide ${state.installingPyodide ? "disabled" : ""}>
-            ${state.installingPyodide ? "Downloading Pyodide…" : "Install Offline Python (~14 MB)"}
+          <button type="button" class="btn btn-ink btn-xs" data-cs-install-pyodide ${busy ? "disabled" : ""}>
+            ${installing ? "Downloading Pyodide…" : uninstalling ? "Removing Pyodide…" : "Install Offline Python (~14 MB)"}
           </button>
-          <button type="button" class="btn btn-quiet btn-xs" data-cs-switch-js ${state.installingPyodide ? "disabled" : ""}>
+          <button type="button" class="btn btn-quiet btn-xs" data-cs-switch-js ${busy ? "disabled" : ""}>
             Switch to JavaScript
           </button>
         </div>
@@ -769,23 +783,24 @@ export function createCodingStudioPlugin({ escapeHtml, showToast, getAddons, onA
     }
 
     async function installPyodideInline() {
-      if (state.installingPyodide) return;
+      if (!sharedPackOps.begin("pyodide_python", "installing")) return;
       state.installingPyodide = true;
       renderPyBanner();
+      let refreshedFromResponse = false;
       try {
         const res = await fetch("/api/addons/pyodide_python/install", { method: "POST" });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.detail || "Pyodide installation failed.");
-        }
-        // Publish returned addon status globally even if this studio instance unmounted mid-download
+        const data = await res.json().catch(() => ({}));
         if (data?.addons) {
+          refreshedFromResponse = true;
           onAddonsUpdated?.(data.addons);
+          if (!state.destroyed) {
+            state.addons = data.addons;
+          }
+        }
+        if (!res.ok) {
+          throw new Error(formatApiDetail(data.detail, "Pyodide installation failed."));
         }
         if (state.destroyed) return;
-        if (data?.addons) {
-          state.addons = data.addons;
-        }
         if (isPyodidePackInstalled(data?.addons || state.addons)) {
           showToast(
             "Offline Python runner (Pyodide) installed! You can now run Python tests offline.",
@@ -799,8 +814,21 @@ export function createCodingStudioPlugin({ escapeHtml, showToast, getAddons, onA
           showToast(String(err.message || err), 3600);
         }
       } finally {
+        sharedPackOps.end("pyodide_python");
+        state.installingPyodide = false;
+        if (!refreshedFromResponse) {
+          try {
+            const freshRes = await fetch("/api/addons");
+            if (freshRes.ok) {
+              const freshAddons = await freshRes.json();
+              onAddonsUpdated?.(freshAddons);
+              if (!state.destroyed) state.addons = freshAddons;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
         if (!state.destroyed) {
-          state.installingPyodide = false;
           renderAll({ preserveCursor: true });
         }
       }
@@ -1042,6 +1070,11 @@ export function createCodingStudioPlugin({ escapeHtml, showToast, getAddons, onA
     containerEl.addEventListener("keydown", onKeyDown);
     containerEl.addEventListener("focusout", onFocusOut);
     editorEl?.addEventListener("scroll", onScroll);
+    const unsubscribePackOps = sharedPackOps.subscribe((packId) => {
+      if (state.destroyed || packId !== "pyodide_python") return;
+      renderPyBanner();
+      renderStatusPill();
+    });
 
     return {
       getWorkspaceContext() {
@@ -1078,6 +1111,7 @@ export function createCodingStudioPlugin({ escapeHtml, showToast, getAddons, onA
       },
       destroy() {
         state.destroyed = true;
+        unsubscribePackOps?.();
         terminateActiveRun();
         containerEl.removeEventListener("click", onClick);
         containerEl.removeEventListener("input", onInput);
