@@ -1,4 +1,5 @@
 import { createProfileAddonsController } from "./profile_addons.js";
+import { createPracticeStudioController } from "./practice_studio.js";
 
 const CHANNEL_INTERVIEWER = 0x01;
 const CHANNEL_CANDIDATE = 0x02;
@@ -106,9 +107,11 @@ const state = {
   onboardProvider: "gemini",
   addons: null,
   profileSummary: null,
+  practiceActive: false,
 };
 
 let profileAddons = null;
+let practiceStudio = null;
 
 const _mockeryStateDescriptor = {
   get() {
@@ -125,6 +128,7 @@ const _mockeryStateDescriptor = {
       diarizer: state.diarizer,
       addons: state.addons,
       profileSummary: state.profileSummary,
+      practiceActive: state.practiceActive,
       serverMachines: state.session?.state_machines || null,
     };
   },
@@ -880,6 +884,14 @@ function renderTimerPill(elapsedSec) {
 /* ---------------- Workspace Mode (Launchpad vs Active Split Studio) ---------------- */
 
 function renderWorkspaceMode() {
+  if (state.practiceActive) {
+    el("appShell").classList.remove("setup-mode");
+    el("setupLaunchpad").classList.add("hidden");
+    el("workspaceGrid").classList.add("hidden");
+    state.homeVisible = false;
+    return;
+  }
+
   const qas = state.session?.qa_groups_resolved || [];
   const warmup = state.session?.warmup_resolved || [];
   const hasContent = qas.length > 0 || warmup.length > 0;
@@ -901,6 +913,7 @@ function renderWorkspaceMode() {
   }
   if (showLaunchpad && !state.homeVisible) {
     refreshHomeSessions();
+    practiceStudio?.refreshPracticeHistory();
   }
   state.homeVisible = showLaunchpad;
 
@@ -1085,8 +1098,10 @@ function updateContextSummaryChip() {
   el("contextRoleSummary").textContent = role;
   el("contextTypeSummary").textContent = TYPE_SHORT_LABELS[typeVal] || typeVal;
 
-  for (const btn of document.querySelectorAll("#setupTypePills [data-setup-type]")) {
-    btn.classList.toggle("active", btn.getAttribute("data-setup-type") === typeVal);
+  if (!practiceStudio?.isHomePracticeMode?.()) {
+    for (const btn of document.querySelectorAll("#setupTypePills [data-setup-type]")) {
+      btn.classList.toggle("active", btn.getAttribute("data-setup-type") === typeVal);
+    }
   }
   const modeVal = el("modeSelect").value || "remote_meet";
   for (const btn of document.querySelectorAll("#setupModePills [data-setup-mode]")) {
@@ -1102,7 +1117,7 @@ function syncConfigInputsFromSession() {
   if (document.activeElement !== el("roleInput")) {
     el("roleInput").value = cfg.role_title;
   }
-  if (document.activeElement !== el("setupRoleInput")) {
+  if (!practiceStudio?.isHomePracticeMode?.() && document.activeElement !== el("setupRoleInput")) {
     el("setupRoleInput").value = cfg.role_title;
   }
   if (document.activeElement !== el("typeSelect")) {
@@ -3194,6 +3209,8 @@ async function checkInitialOnboarding() {
     state.llm = data.llm;
     syncHomeAiPrompt(data.llm);
     profileAddons?.applyStatusSnapshot(data);
+    practiceStudio?.applyStatusSnapshot(data);
+    practiceStudio?.refreshPracticeHistory();
     if (data.llm?.needs_onboarding && state.modalState === "none") {
       await openOnboardingModal(data);
     }
@@ -3408,12 +3425,16 @@ function initEvents() {
     el("manualTextInput").focus();
   };
 
-  // Sync Setup Launchpad inputs <-> Topbar Popover inputs
+  // Sync Setup Launchpad inputs <-> Topbar Popover inputs (only mutate Copilot config in Copilot mode)
   el("setupRoleInput").oninput = () => {
+    if (practiceStudio?.isHomePracticeMode?.()) return;
     el("roleInput").value = el("setupRoleInput").value;
     updateContextSummaryChip();
   };
-  el("setupRoleInput").onchange = pushSessionConfig;
+  el("setupRoleInput").onchange = () => {
+    if (practiceStudio?.isHomePracticeMode?.()) return;
+    pushSessionConfig();
+  };
 
   el("roleInput").oninput = () => {
     el("setupRoleInput").value = el("roleInput").value;
@@ -3433,6 +3454,13 @@ function initEvents() {
   el("setupTypePills").onclick = (ev) => {
     const btn = ev.target.closest("[data-setup-type]");
     if (!btn) return;
+    if (practiceStudio?.isHomePracticeMode?.()) {
+      for (const opt of document.querySelectorAll("#setupTypePills [data-setup-type]")) {
+        opt.classList.toggle("active", opt === btn);
+        opt.setAttribute("aria-pressed", opt === btn ? "true" : "false");
+      }
+      return;
+    }
     el("typeSelect").value = btn.getAttribute("data-setup-type");
     pushSessionConfig();
   };
@@ -3916,7 +3944,7 @@ function initEvents() {
 
     const tag = (ev.target?.tagName || "").toUpperCase();
     const isTyping = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-    if (isTyping || state.modalState !== "none") return;
+    if (isTyping || state.modalState !== "none" || state.practiceActive) return;
 
     if ((ev.key === "d" || ev.key === "D") && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
       ev.preventDefault();
@@ -3966,6 +3994,19 @@ profileAddons = createProfileAddonsController({
       el("contextRoleSummary").textContent = roleLabel;
     }
     pushSessionConfig();
+    practiceStudio?.refreshQuestionPicker();
+  },
+  onAddonsChange: (addons) => {
+    practiceStudio?.applyStatusSnapshot({ addons });
+  },
+});
+practiceStudio = createPracticeStudioController({
+  state,
+  el,
+  escapeHtml,
+  showToast,
+  onPracticeActiveChange: () => {
+    renderWorkspaceMode();
   },
 });
 renderSpeakerToggle();
