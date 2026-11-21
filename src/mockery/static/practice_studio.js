@@ -102,8 +102,24 @@ const KOKORO_VOICE_LABELS = {
   bm_george: "George (UK · Warm)",
 };
 
+const PHONON_VOICE_LABELS = {
+  Harper: "Harper (US · Clear)",
+  Hadley: "Hadley (US · Warm)",
+  Easton: "Easton (US · Calm)",
+  Juniper: "Juniper (US · Bright)",
+  Trevor: "Trevor (US · Steady)",
+  Maeve: "Maeve (US · Expressive)",
+  Miles: "Miles (US · Deep)",
+  default: "Default (Offline Built-in)",
+};
+
 const VOICE_PREVIEW_TEXT =
-  "Hi! I'm your local Kokoro interview coach. Ready to walk through your next mock interview?";
+  "Hi! I'm your local interview coach. Ready to walk through your next mock interview?";
+
+const VOICE_PREVIEW_BY_ENGINE = {
+  phonon: "Hi! I'm your Phonon interview coach running locally on your Mac. Ready to practice?",
+  kokoro: "Hi! I'm your Kokoro interview coach running locally on your Mac. Ready to practice?",
+};
 
 export function createPracticeStudioController({
   state,
@@ -135,6 +151,7 @@ export function createPracticeStudioController({
     voiceEnabled: true,
     selectedVoice: savedVoice,
     isSpeaking: false,
+    speakingPreviewEngine: null, // null | "picker" | "phonon" | "kokoro"
     speakGen: 0,
     ttsAbort: null,
     activeAudio: null,
@@ -290,9 +307,66 @@ export function createPracticeStudioController({
     }
   }
 
+  function buildAvailableVoiceGroups(tts = local.ttsStatus) {
+    if (!tts) return [];
+    const groups = [];
+    const engines = tts.engines || {};
+    const phononVoices =
+      engines.phonon?.ready && Array.isArray(engines.phonon.voices) && engines.phonon.voices.length > 0
+        ? engines.phonon.voices
+        : tts.engine === "phonon" && Array.isArray(tts.voices) && tts.voices.length > 0
+          ? tts.voices
+          : [];
+    const kokoroVoices =
+      engines.kokoro?.ready && Array.isArray(engines.kokoro.voices) && engines.kokoro.voices.length > 0
+        ? engines.kokoro.voices
+        : tts.engine === "kokoro" && Array.isArray(tts.voices) && tts.voices.length > 0
+          ? tts.voices
+          : [];
+
+    if (phononVoices.length > 0) {
+      groups.push({
+        engine: "phonon",
+        label: "Phonon-31M (62 MB · Fast)",
+        voices: phononVoices.map((v) => ({
+          value: `phonon:${v}`,
+          raw: v,
+          label: PHONON_VOICE_LABELS[v] || v,
+        })),
+      });
+    }
+    if (kokoroVoices.length > 0) {
+      groups.push({
+        engine: "kokoro",
+        label: "Kokoro-82M (183 MB · Studio)",
+        voices: kokoroVoices.map((v) => ({
+          value: `kokoro:${v}`,
+          raw: v,
+          label: KOKORO_VOICE_LABELS[v] || v,
+        })),
+      });
+    }
+    return groups;
+  }
+
   function resolveEffectiveVoice() {
     const tts = local.ttsStatus;
-    if (!tts || !Array.isArray(tts.voices) || tts.voices.length === 0) return "";
+    if (!tts) return "";
+    const groups = buildAvailableVoiceGroups(tts);
+    if (groups.length > 0) {
+      const all = groups.flatMap((g) => g.voices);
+      const saved = String(local.selectedVoice || "").trim();
+      if (saved) {
+        const exact = all.find((opt) => opt.value === saved);
+        if (exact) return exact.value;
+        // Backward compatibility with previously saved unprefixed voice IDs (e.g. "af_heart")
+        const rawMatch = all.find((opt) => opt.raw === saved);
+        if (rawMatch) return rawMatch.value;
+      }
+      const primaryGroup = groups.find((g) => g.engine === tts.engine) || groups[0];
+      return primaryGroup?.voices[0]?.value || "";
+    }
+    if (!Array.isArray(tts.voices) || tts.voices.length === 0) return "";
     if (local.selectedVoice && tts.voices.includes(local.selectedVoice)) {
       return local.selectedVoice;
     }
@@ -301,11 +375,21 @@ export function createPracticeStudioController({
 
   function renderVoiceControls() {
     const tts = local.ttsStatus;
+    const groups = buildAvailableVoiceGroups(tts);
+    const eff = resolveEffectiveVoice();
+    const activeEngine = eff.startsWith("phonon:")
+      ? "phonon"
+      : eff.startsWith("kokoro:")
+        ? "kokoro"
+        : tts?.engine || "browser";
+
     const voiceLbl = el("practiceVoiceLabel");
     if (voiceLbl && tts) {
-      if (tts.engine === "kokoro") {
-        voiceLbl.textContent = "AI speaks questions aloud (Kokoro-82M neural voice, instant barge-in)";
-      } else if (tts.engine === "macos_say") {
+      if (activeEngine === "kokoro") {
+        voiceLbl.textContent = "AI speaks questions aloud (Kokoro-82M studio voice, instant barge-in)";
+      } else if (activeEngine === "phonon") {
+        voiceLbl.textContent = "AI speaks questions aloud (Phonon-31M fast neural voice, instant barge-in)";
+      } else if (activeEngine === "macos_say") {
         voiceLbl.textContent = "AI speaks questions aloud (macOS fallback voice, instant barge-in)";
       } else {
         voiceLbl.textContent = "AI speaks questions aloud (browser voice, instant barge-in)";
@@ -313,36 +397,62 @@ export function createPracticeStudioController({
     }
 
     const upgradeRow = el("practiceKokoroUpgradeRow");
-    const installBtn = el("practiceInstallKokoroBtn");
+    const installPhononBtn = el("practiceInstallPhononBtn");
+    const installKokoroBtn = el("practiceInstallKokoroBtn");
     const pickerRow = el("practiceVoicePickerRow");
     const voiceSel = el("practiceVoiceSelect");
     const previewBtn = el("practicePreviewVoiceBtn");
-    const op = packOps?.get?.("kokoro_tts") || null;
+    const phononOp = packOps?.get?.("phonon_tts") || null;
+    const kokoroOp = packOps?.get?.("kokoro_tts") || null;
 
     if (upgradeRow && tts) {
-      const showUpgrade = Boolean(tts.kokoro_available && !tts.kokoro_installed);
+      const anyNeuralInstalled = Boolean(
+        tts.neural_installed || tts.kokoro_installed || tts.phonon_installed
+      );
+      const anyNeuralAvailable = Boolean(tts.kokoro_available || tts.phonon_available);
+      const showUpgrade = anyNeuralAvailable && !anyNeuralInstalled;
       upgradeRow.classList.toggle("hidden", !showUpgrade);
-      if (installBtn) {
-        const busy = op === "installing" || op === "uninstalling";
-        installBtn.disabled = busy;
-        installBtn.textContent =
-          op === "installing"
-            ? "Downloading Kokoro-82M (183 MB)…"
-            : op === "uninstalling"
+
+      if (installPhononBtn) {
+        installPhononBtn.classList.toggle("hidden", !tts.phonon_available);
+        const busy = phononOp === "installing" || phononOp === "uninstalling";
+        installPhononBtn.disabled = busy;
+        installPhononBtn.textContent =
+          phononOp === "installing"
+            ? "Downloading Phonon (62 MB)…"
+            : phononOp === "uninstalling"
               ? "Removing…"
-              : "Install Kokoro-82M voice (183 MB)";
+              : "Install Phonon-31M (62 MB · Fast)";
+      }
+      if (installKokoroBtn) {
+        installKokoroBtn.classList.toggle("hidden", !tts.kokoro_available);
+        const busy = kokoroOp === "installing" || kokoroOp === "uninstalling";
+        installKokoroBtn.disabled = busy;
+        installKokoroBtn.textContent =
+          kokoroOp === "installing"
+            ? "Downloading Kokoro (183 MB)…"
+            : kokoroOp === "uninstalling"
+              ? "Removing…"
+              : "Install Kokoro-82M (183 MB · Studio)";
       }
     }
 
     if (pickerRow && tts) {
-      const isKokoroReady = tts.engine === "kokoro" && Array.isArray(tts.voices) && tts.voices.length > 0;
-      pickerRow.classList.toggle("hidden", !isKokoroReady);
-      if (isKokoroReady && voiceSel) {
-        const eff = resolveEffectiveVoice();
-        const sig = tts.voices.join("|");
+      const hasNeuralVoices = groups.length > 0;
+      pickerRow.classList.toggle("hidden", !hasNeuralVoices);
+      if (hasNeuralVoices && voiceSel) {
+        const sig = groups.map((g) => `${g.engine}:${g.voices.map((v) => v.raw).join(",")}`).join("|");
         if (voiceSel.dataset.voicesSig !== sig) {
-          voiceSel.innerHTML = tts.voices
-            .map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(KOKORO_VOICE_LABELS[v] || v)}</option>`)
+          voiceSel.innerHTML = groups
+            .map(
+              (g) =>
+                `<optgroup label="${escapeHtml(g.label)}">${g.voices
+                  .map(
+                    (opt) =>
+                      `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`
+                  )
+                  .join("")}</optgroup>`
+            )
             .join("");
           voiceSel.dataset.voicesSig = sig;
         }
@@ -353,7 +463,8 @@ export function createPracticeStudioController({
     }
 
     if (previewBtn) {
-      previewBtn.textContent = local.isSpeaking ? "Stop preview" : "Preview voice";
+      previewBtn.textContent =
+        local.isSpeaking && local.speakingPreviewEngine === "picker" ? "Stop preview" : "Preview voice";
     }
   }
 
@@ -455,13 +566,25 @@ export function createPracticeStudioController({
 
   /* ---------------- Local Voice Playback & Instant Barge-In ---------------- */
 
-  function setSpeakingUI(speaking) {
+  function setSpeakingUI(speaking, previewTag = null) {
     local.isSpeaking = speaking;
+    local.speakingPreviewEngine = speaking ? previewTag : null;
     el("practiceBargeInBtn")?.classList.toggle("hidden", !speaking);
     const prevBtn = el("practicePreviewVoiceBtn");
-    if (prevBtn) prevBtn.textContent = speaking ? "Stop preview" : "Preview voice";
-    const obPrevBtn = el("onboardKokoroPreviewBtn");
-    if (obPrevBtn) obPrevBtn.textContent = speaking ? "Stop preview" : "Preview voice";
+    if (prevBtn) {
+      prevBtn.textContent =
+        speaking && local.speakingPreviewEngine === "picker" ? "Stop preview" : "Preview voice";
+    }
+    const obPhononBtn = el("onboardPhononPreviewBtn");
+    if (obPhononBtn) {
+      obPhononBtn.textContent =
+        speaking && local.speakingPreviewEngine === "phonon" ? "Stop preview" : "Preview Phonon";
+    }
+    const obKokoroBtn = el("onboardKokoroPreviewBtn");
+    if (obKokoroBtn) {
+      obKokoroBtn.textContent =
+        speaking && local.speakingPreviewEngine === "kokoro" ? "Stop preview" : "Preview Kokoro";
+    }
   }
 
   function stopSpeaking() {
@@ -498,10 +621,10 @@ export function createPracticeStudioController({
         /* ignore */
       }
     }
-    setSpeakingUI(false);
+    setSpeakingUI(false, null);
   }
 
-  async function speakText(text, { force = false, voice = null } = {}) {
+  async function speakText(text, { force = false, voice = null, engine = null, previewTag = null } = {}) {
     const clean = String(text || "").trim();
     if (!clean) return;
     if (!local.voiceEnabled && !force) return;
@@ -510,11 +633,16 @@ export function createPracticeStudioController({
     const myGen = local.speakGen;
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     local.ttsAbort = ctrl;
-    setSpeakingUI(true);
+    setSpeakingUI(true, previewTag);
 
-    const chosenVoice = voice || resolveEffectiveVoice();
     const payload = { text: clean, rate: 1.0 };
-    if (chosenVoice) payload.voice = chosenVoice;
+    if (engine) {
+      payload.engine = engine;
+      if (voice) payload.voice = voice;
+    } else {
+      const chosenVoice = voice || resolveEffectiveVoice();
+      if (chosenVoice) payload.voice = chosenVoice;
+    }
 
     try {
       const res = await fetch("/api/tts/speak", {
@@ -2125,6 +2253,12 @@ export function createPracticeStudioController({
       if (turn?.text) speakText(turn.text, { force: true });
     });
 
+    el("practiceInstallPhononBtn")?.addEventListener("click", () => {
+      if (typeof onInstallPack === "function") {
+        onInstallPack("phonon_tts");
+      }
+    });
+
     el("practiceInstallKokoroBtn")?.addEventListener("click", () => {
       if (typeof onInstallPack === "function") {
         onInstallPack("kokoro_tts");
@@ -2140,6 +2274,7 @@ export function createPracticeStudioController({
       } catch {
         /* ignore */
       }
+      renderVoiceControls();
     });
 
     el("practicePreviewVoiceBtn")?.addEventListener("click", () => {
@@ -2147,12 +2282,21 @@ export function createPracticeStudioController({
     });
   }
 
-  function previewVoice() {
-    if (local.isSpeaking) {
+  function previewVoice({ engine = null } = {}) {
+    const tag = engine || "picker";
+    if (local.isSpeaking && local.speakingPreviewEngine === tag) {
       stopSpeaking();
       return;
     }
-    speakText(VOICE_PREVIEW_TEXT, { force: true });
+    const effEngine =
+      engine ||
+      (resolveEffectiveVoice().startsWith("phonon:")
+        ? "phonon"
+        : resolveEffectiveVoice().startsWith("kokoro:")
+          ? "kokoro"
+          : null);
+    const text = VOICE_PREVIEW_BY_ENGINE[effEngine] || VOICE_PREVIEW_TEXT;
+    speakText(text, { force: true, engine: engine || null, previewTag: tag });
   }
 
   if (packOps && typeof packOps.subscribe === "function") {

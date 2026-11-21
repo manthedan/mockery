@@ -571,6 +571,7 @@ def test_onboarding_voice_wizard_contracts_and_addon_tts_refresh(tmp_path: Path,
         body = r_inst.json()
         assert body["tts"]["engine"] == "kokoro"
         assert body["tts"]["kokoro_installed"] is True
+        assert body["tts"]["neural_installed"] is True
         assert "af_heart" in body["tts"]["voices"]
 
         r_del = client.delete("/api/addons/kokoro_tts")
@@ -578,6 +579,33 @@ def test_onboarding_voice_wizard_contracts_and_addon_tts_refresh(tmp_path: Path,
         del_body = r_del.json()
         assert del_body["tts"]["kokoro_installed"] is False
         assert del_body["tts"]["engine"] != "kokoro"
+
+    phonon_flag = {"on": False}
+    monkeypatch.setattr(runtime.tts, "is_phonon_installed", lambda: phonon_flag["on"])
+    monkeypatch.setattr(runtime.tts, "install_phonon", lambda: (phonon_flag.__setitem__("on", True) or True))
+    monkeypatch.setattr(runtime.tts, "uninstall_phonon", lambda: (phonon_flag.__setitem__("on", False) or True))
+    runtime.addons.register_pack_handler(
+        "phonon_tts",
+        is_installed=lambda: phonon_flag["on"],
+        install=lambda: (phonon_flag.__setitem__("on", True) or True),
+        uninstall=lambda: (phonon_flag.__setitem__("on", False) or True),
+        available=True,
+    )
+
+    with TestClient(app) as client:
+        r_ph = client.post("/api/addons/phonon_tts/install")
+        assert r_ph.status_code == 200
+        ph_body = r_ph.json()
+        assert ph_body["tts"]["engine"] == "phonon"
+        assert ph_body["tts"]["phonon_installed"] is True
+        assert ph_body["tts"]["neural_installed"] is True
+        assert "Harper" in ph_body["tts"]["voices"]
+
+        r_ph_del = client.delete("/api/addons/phonon_tts")
+        assert r_ph_del.status_code == 200
+        ph_del_body = r_ph_del.json()
+        assert ph_del_body["tts"]["phonon_installed"] is False
+        assert ph_del_body["tts"]["engine"] != "phonon"
 
     static_dir = Path(__file__).resolve().parents[1] / "src" / "mockery" / "static"
     html = (static_dir / "index.html").read_text(encoding="utf-8")
@@ -587,10 +615,15 @@ def test_onboarding_voice_wizard_contracts_and_addon_tts_refresh(tmp_path: Path,
     for required_id in (
         "onboardStepAi",
         "onboardStepPacks",
+        "onboardPhononCard",
+        "onboardPhononInstallBtn",
+        "onboardPhononPreviewBtn",
+        "onboardKokoroCard",
         "onboardKokoroInstallBtn",
         "onboardKokoroPreviewBtn",
         "onboardOptionalPacksList",
         "practiceKokoroUpgradeRow",
+        "practiceInstallPhononBtn",
         "practiceInstallKokoroBtn",
         "practiceVoicePickerRow",
         "practiceVoiceSelect",
@@ -602,4 +635,120 @@ def test_onboarding_voice_wizard_contracts_and_addon_tts_refresh(tmp_path: Path,
     assert "mockery_onboard_packs_seen" in app_js
     assert "renderVoiceControls" in practice_js and "previewVoice" in practice_js
     assert "mockery_tts_voice" in practice_js
+    assert "PHONON_VOICE_LABELS" in practice_js
 
+
+def test_phonon_verified_download_and_dual_engine_routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import asyncio
+    import hashlib
+    import httpx
+    import mockery.tts as tts_mod
+
+    engine = LocalTTSEngine(tmp_path / "models")
+    assert engine.is_phonon_available() is True
+    assert engine.is_phonon_installed() is False
+
+    fake_files = {
+        "config.json": b'{"sample_rate": 24000}',
+        "tokenizer.json": b'{"version": "1.0"}',
+        "default-voice.safetensors": b"fake-default-voice",
+        "model.q8.gguf": b"fake-phonon-q8-gguf",
+    }
+    monkeypatch.setattr(
+        tts_mod,
+        "PHONON_ASSETS",
+        tuple(
+            (name, f"https://example.test/phonon/{name}", hashlib.sha256(data).hexdigest())
+            for name, data in fake_files.items()
+        ),
+    )
+
+    # 1. Corrupt download must fail checksum and leave no partial files
+    bad_transport = httpx.MockTransport(lambda req: httpx.Response(200, content=b"tampered"))
+    with httpx.Client(transport=bad_transport) as bad_client:
+        with pytest.raises(RuntimeError, match="Checksum mismatch"):
+            engine.install_phonon(client=bad_client)
+    assert engine.is_phonon_installed() is False
+    assert not (engine.phonon_dir / "config.json").exists()
+    assert not (engine.phonon_dir / "config.json.tmp").exists()
+
+    # 2. Valid verified download + stubbed Phonon & Kokoro engines test dual routing + offline voice fallback
+    class _StubPhonon:
+        sample_rate = 24000
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self.fail_catalog = False
+
+        def synth(self, text: str, *, voice: str = "default"):
+            self.calls.append((text, voice))
+            if self.fail_catalog and voice != "default":
+                raise RuntimeError("offline: cannot fetch catalog voice")
+            return np.zeros(2400, dtype=np.float32)
+
+    class _StubKokoro:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, float, str]] = []
+
+        def create(self, text: str, *, voice: str, speed: float, lang: str):
+            self.calls.append((text, voice, speed, lang))
+            return np.zeros(2400, dtype=np.float32), 24000
+
+    phonon_stub = _StubPhonon()
+    kokoro_stub = _StubKokoro()
+
+    def _fake_ensure_phonon() -> bool:
+        engine._phonon = phonon_stub
+        engine._phonon_error = None
+        return True
+
+    monkeypatch.setattr(engine, "_ensure_phonon_loaded", _fake_ensure_phonon)
+
+    def _ok_handler(req: httpx.Request) -> httpx.Response:
+        name = req.url.path.rsplit("/", 1)[-1]
+        if name in fake_files:
+            return httpx.Response(200, content=fake_files[name])
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(_ok_handler)) as ok_client:
+        assert engine.install_phonon(client=ok_client) is True
+
+    assert engine.is_phonon_installed() is True
+    st = engine.status_dict()
+    assert st["engine"] == "phonon"
+    assert st["backend_state"] == "phonon_ready"
+    assert st["neural_installed"] is True
+    assert st["engines"]["phonon"]["ready"] is True
+    assert st["default_voice"] == "Harper"
+
+    # Explicit phonon voice + offline fallback to bundled "default"
+    wav1, used1 = asyncio.run(engine.synthesize_wav("Tell me about caching.", voice="phonon:Hadley"))
+    assert used1 == "phonon"
+    assert wav1[:4] == b"RIFF"
+    assert phonon_stub.calls[-1] == ("Tell me about caching.", "Hadley")
+
+    phonon_stub.fail_catalog = True
+    wav2, used2 = asyncio.run(engine.synthesize_wav("Offline test.", engine="phonon"))
+    assert used2 == "phonon"
+    assert wav2[:4] == b"RIFF"
+    assert phonon_stub.calls[-2:] == [("Offline test.", "Harper"), ("Offline test.", "default")]
+    phonon_stub.fail_catalog = False
+
+    # Dual-engine coexistence: enable stubbed Kokoro alongside Phonon
+    monkeypatch.setattr(engine, "is_kokoro_installed", lambda: True)
+    monkeypatch.setattr(engine, "_ensure_kokoro_loaded", lambda: (setattr(engine, "_kokoro", kokoro_stub) or True))
+    st_both = engine.status_dict()
+    assert st_both["engines"]["kokoro"]["ready"] is True
+    assert st_both["engines"]["phonon"]["ready"] is True
+
+    _, used_k = asyncio.run(engine.synthesize_wav("Use studio voice.", voice="kokoro:bf_emma"))
+    assert used_k == "kokoro"
+    assert kokoro_stub.calls[-1][1] == "bf_emma"
+
+    _, used_p = asyncio.run(engine.synthesize_wav("Use fast voice.", voice="phonon:Miles"))
+    assert used_p == "phonon"
+    assert phonon_stub.calls[-1] == ("Use fast voice.", "Miles")
+
+    # Uninstall Phonon cleans up cleanly
+    assert engine.uninstall_phonon() is True
+    assert engine.is_phonon_installed() is False

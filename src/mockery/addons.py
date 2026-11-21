@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from .models import PARAKEET_CHECKPOINTS
 from .redactor import RAMPART_APPROX_MB, RAMPART_REPO_ID, RampartRedactor
-from .tts import KOKORO_APPROX_MB, KOKORO_REPO_ID
+from .tts import KOKORO_APPROX_MB, KOKORO_REPO_ID, PHONON_APPROX_MB, PHONON_REPO_ID
 from .state_machines import (
     AddonPackState,
     compute_allowed_addon_pack_events,
@@ -187,11 +187,29 @@ class AddonManager:
                 "available": True,
             },
             {
+                "id": "phonon_tts",
+                "name": "Phonon-31M Fast Voice (Local TTS)",
+                "category": "voice",
+                "size_mb": PHONON_APPROX_MB,
+                "description": "Ultra-compact 62 MB Apache 2.0 neural voice (~30× real-time on CPU) for instant offline interview speech.",
+                "repo_id": PHONON_REPO_ID,
+                "installed": (
+                    bool(self.extra_handlers["phonon_tts"]["is_installed"]())
+                    if "phonon_tts" in self.extra_handlers
+                    else False
+                ),
+                "available": (
+                    bool(self.extra_handlers["phonon_tts"]["available"]())
+                    if "phonon_tts" in self.extra_handlers
+                    else False
+                ),
+            },
+            {
                 "id": "kokoro_tts",
-                "name": "Kokoro-82M Neural Voice (Local TTS)",
+                "name": "Kokoro-82M Studio Voice (Local TTS)",
                 "category": "voice",
                 "size_mb": KOKORO_APPROX_MB,
-                "description": "Natural FP16 local neural voice so the AI interviewer speaks questions aloud with instant barge-in (macOS voices remain as zero-download fallback).",
+                "description": "Rich FP16 local neural voice with US & UK voices so the AI interviewer sounds natural with instant barge-in.",
                 "repo_id": KOKORO_REPO_ID,
                 "installed": (
                     bool(self.extra_handlers["kokoro_tts"]["is_installed"]())

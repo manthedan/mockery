@@ -714,7 +714,9 @@ def validate_profile_invariants(profile_state: CandidateProfileState) -> list[st
 
 class TTSBackendState(StrEnum):
     KOKORO_READY = "kokoro_ready"
+    PHONON_READY = "phonon_ready"
     KOKORO_FALLBACK_MACOS = "kokoro_fallback_macos"
+    PHONON_FALLBACK_MACOS = "phonon_fallback_macos"
     MACOS_SAY = "macos_say"
     BROWSER_FALLBACK = "browser_fallback"
 
@@ -725,11 +727,23 @@ def derive_tts_backend_state(
     kokoro_runtime: bool,
     kokoro_error: str | None,
     macos_say_available: bool,
+    phonon_installed: bool = False,
+    phonon_runtime: bool = False,
+    phonon_error: str | None = None,
+    preferred_engine: str | None = None,
 ) -> TTSBackendState:
-    if kokoro_installed and kokoro_runtime and not kokoro_error:
+    kokoro_ready = kokoro_installed and kokoro_runtime and not kokoro_error
+    phonon_ready = phonon_installed and phonon_runtime and not phonon_error
+    if preferred_engine == "phonon" and phonon_ready:
+        return TTSBackendState.PHONON_READY
+    if kokoro_ready:
         return TTSBackendState.KOKORO_READY
+    if phonon_ready:
+        return TTSBackendState.PHONON_READY
     if kokoro_installed and kokoro_runtime and kokoro_error and macos_say_available:
         return TTSBackendState.KOKORO_FALLBACK_MACOS
+    if phonon_installed and phonon_runtime and phonon_error and macos_say_available:
+        return TTSBackendState.PHONON_FALLBACK_MACOS
     if macos_say_available:
         return TTSBackendState.MACOS_SAY
     return TTSBackendState.BROWSER_FALLBACK
