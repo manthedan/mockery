@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -53,6 +53,7 @@ from .practice import (
     estimate_carl_heuristic,
 )
 from .profiles import CandidateProfileStore, ResumeRedactionPrefs
+from .pyodide_pack import PyodidePackManager
 from .redactor import (
     RampartRedactor,
     clean_job_listing_text,
@@ -297,6 +298,13 @@ def _merge_workspace_context(session: PracticeSession, patch: dict[str, Any] | N
             raise ValueError("diagram_graph.nodes must be a list.")
         if "edges" in dg and not isinstance(dg["edges"], list):
             raise ValueError("diagram_graph.edges must be a list.")
+    for map_key in ("code_by_lang", "tests_by_lang"):
+        if map_key in patch and patch[map_key] is not None:
+            m = patch[map_key]
+            if not isinstance(m, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str) for k, v in m.items()
+            ):
+                raise ValueError(f"{map_key} must be an object mapping language names to strings.")
     merged = {**session.workspace_context, **patch}
     try:
         encoded = json.dumps(merged, ensure_ascii=False).encode("utf-8")
@@ -323,6 +331,7 @@ class AppRuntime:
         self.banks = QuestionBankStore(project_root / "banks")
         self.addons = AddonManager(project_root, self.redactor)
         self.tts = LocalTTSEngine(project_root / "models")
+        self.pyodide = PyodidePackManager(project_root / "models" / "pyodide")
         self.practice_store = PracticeSessionStore(project_root / "practice")
         self._practice_locks: dict[str, list[Any]] = {}
         self._asr_http_sem = asyncio.Semaphore(1)
@@ -334,6 +343,13 @@ class AppRuntime:
             install=self.tts.install_kokoro,
             uninstall=self.tts.uninstall_kokoro,
             available=self.tts.is_kokoro_available(),
+        )
+        self.addons.register_pack_handler(
+            "pyodide_python",
+            is_installed=self.pyodide.is_installed,
+            install=lambda: asyncio.to_thread(self.pyodide.install),
+            uninstall=lambda: asyncio.to_thread(self.pyodide.uninstall),
+            available=True,
         )
 
         self.active_session = InterviewSession()
@@ -816,6 +832,51 @@ def create_app(
                 runtime.profiles.state.resume.prefs,
             )
         return {"addons": status, "profile": runtime.profiles.public_dict()}
+
+    @app.get("/api/addons/pyodide/{asset_path:path}")
+    async def serve_pyodide_asset(asset_path: str, request: Request) -> Response:
+        try:
+            opened = runtime.pyodide.open_asset(asset_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if opened is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Offline Python runner (Pyodide) is not installed or asset not found.",
+            )
+        file_obj, size_bytes, media_type, etag = opened
+        if_none_match = (request.headers.get("if-none-match") or "").strip()
+        if if_none_match and if_none_match == etag:
+            file_obj.close()
+            return Response(
+                status_code=304,
+                headers={
+                    "ETag": etag,
+                    "Cache-Control": "no-cache",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        def _stream_and_close():
+            try:
+                while True:
+                    chunk = file_obj.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                file_obj.close()
+
+        return StreamingResponse(
+            _stream_and_close(),
+            media_type=media_type,
+            headers={
+                "Content-Length": str(size_bytes),
+                "ETag": etag,
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     # ---------------- Milestone 2: Local TTS, Mic ASR & AI Practice Mode ----------------
 
@@ -2021,6 +2082,51 @@ def create_app(
                 runtime.pause_or_end_capture(mark_ended=False)
             await final_seg_queue.put(None)
             await seg_worker_task
+
+    @app.get("/static/js_sandbox_worker.js")
+    async def serve_js_sandbox_worker() -> FileResponse:
+        worker_path = STATIC_DIR / "js_sandbox_worker.js"
+        if not worker_path.is_file():
+            raise HTTPException(status_code=404, detail="JS sandbox worker not found.")
+        return FileResponse(
+            path=worker_path,
+            media_type="application/javascript; charset=utf-8",
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    "script-src 'unsafe-eval'; "
+                    "connect-src 'none'; "
+                    "worker-src 'none'; "
+                    "child-src 'none';"
+                ),
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/static/py_sandbox_worker.js")
+    async def serve_py_sandbox_worker(request: Request) -> FileResponse:
+        worker_path = STATIC_DIR / "py_sandbox_worker.js"
+        if not worker_path.is_file():
+            raise HTTPException(status_code=404, detail="Python sandbox worker not found.")
+        scheme = "https" if request.url.scheme == "https" else "http"
+        netloc = re.sub(r"[^A-Za-z0-9._:\[\]-]", "", request.url.netloc or "")
+        pyodide_prefix = f"{scheme}://{netloc}/api/addons/pyodide/" if netloc else "'none'"
+        return FileResponse(
+            path=worker_path,
+            media_type="application/javascript; charset=utf-8",
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    f"script-src {pyodide_prefix} 'unsafe-eval' 'wasm-unsafe-eval'; "
+                    f"connect-src {pyodide_prefix}; "
+                    "worker-src 'none'; "
+                    "child-src 'none';"
+                ),
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
