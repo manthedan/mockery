@@ -206,7 +206,9 @@ class SessionConfig(BaseModel):
     interview_type: InterviewType = "behavioral"
     mode: CaptureMode = "remote_meet"
     rubric_notes: str = ""
-    consent_confirmed: bool = False
+    # Legacy field: consent is handled verbally by the interviewer and no longer gates anything.
+    # Kept (defaulting to True) only so older saved `sessions/*.json` files still deserialize.
+    consent_confirmed: bool = True
     save_raw_audio: bool = False
     auto_diarize: bool = True
 

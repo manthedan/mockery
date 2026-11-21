@@ -242,12 +242,12 @@ def test_websocket_blind_calibration_jsonl_and_dual_exports(tmp_path: Path) -> N
         ws.send_json(
             {
                 "type": "configure_session",
-                "config": {"consent_confirmed": True, "save_raw_audio": True, "mode": "remote_meet"},
+                "config": {"save_raw_audio": True, "mode": "remote_meet"},
             }
         )
         _ = ws.receive_json()
 
-        # Stream a binary audio frame to verify consented WAV archiving
+        # Stream a binary audio frame to verify opt-in WAV archiving (gated only by `save_raw_audio`)
         ws.send_bytes(bytes([CHANNEL_INTERVIEWER]) + np.zeros(1600, dtype=np.int16).tobytes())
 
         ws.send_json(
@@ -307,7 +307,7 @@ def test_websocket_blind_calibration_jsonl_and_dual_exports(tmp_path: Path) -> N
         ws.send_json({"type": "flush_and_end"})
         _ = ws.receive_json()
 
-    # Verify append-only JSONL durability + consented WAV file + both Interviewer & Candidate exports
+    # Verify append-only JSONL durability + opt-in WAV file + both Interviewer & Candidate exports
     sessions_dir = tmp_path / "sessions"
     assert (sessions_dir / f"{session_id}.events.jsonl").exists()
     assert (sessions_dir / f"{session_id}_interviewer.wav").exists()
@@ -535,28 +535,28 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
     with client.websocket_connect("/ws/session") as ws:
         s0 = ws.receive_json()
         _ = ws.receive_json()  # asr_status
-        assert s0["session"]["state_machines"]["session"]["phase"] == "setup"
+        # A fresh session is immediately `ready`: live capture needs no consent gate or prior configuration
+        assert s0["session"]["state_machines"]["session"]["phase"] == "ready"
         assert s0["session"]["state_machines"]["invariants_ok"] is True
+        assert "start_capture" in s0["session"]["state_machines"]["session"]["allowed_events"]
+        assert "start_capture" not in s0["session"]["state_machines"]["session"]["blocked_reasons"]
 
-        # Starting live capture without consent emits structured `transition_rejected`
+        # `start_capture` -> transitions `ready` -> `capturing` straight away
+        ws.send_json({"type": "start_capture"})
+        s_cap = ws.receive_json()
+        assert s_cap["type"] == "session_state"
+        assert s_cap["session"]["state_machines"]["session"]["phase"] == "capturing"
+        assert "load_historical_session" not in s_cap["session"]["state_machines"]["session"]["allowed_events"]
+        assert "start_capture" not in s_cap["session"]["state_machines"]["session"]["allowed_events"]
+
+        # Starting capture while already capturing is still an invalid transition -> structured `transition_rejected`
         ws.send_json({"type": "start_capture"})
         rej = ws.receive_json()
         assert rej["type"] == "transition_rejected"
         assert rej["machine"] == "session_phase"
+        assert rej["state"] == "capturing"
         assert rej["event"] == "start_capture"
-        assert "consent_confirmed" in rej["remediation"]
-
-        # Confirm consent -> transitions `setup` -> `ready`
-        ws.send_json({"type": "configure_session", "config": {"consent_confirmed": True}})
-        s_ready = ws.receive_json()
-        assert s_ready["session"]["state_machines"]["session"]["phase"] == "ready"
-        assert "start_capture" in s_ready["session"]["state_machines"]["session"]["allowed_events"]
-
-        # `start_capture` -> transitions `ready` -> `capturing`
-        ws.send_json({"type": "start_capture"})
-        s_cap = ws.receive_json()
-        assert s_cap["session"]["state_machines"]["session"]["phase"] == "capturing"
-        assert "load_historical_session" not in s_cap["session"]["state_machines"]["session"]["allowed_events"]
+        assert "already active" in rej["remediation"]
 
         # Add Q&A turns
         ws.send_json(
@@ -635,6 +635,57 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
     sess.qa_groups[0].utterance_ids.append("utt_nonexistent")
     violations = validate_session_invariants(sess)
     assert any("Dangling utterance reference" in v for v in violations)
+
+    # 6. Consent no longer gates the session lifecycle: `ready` is the entry state and only an
+    #    already-active capture or a running calibration can block `start_capture`.
+    from mock_helper.state_machines import (
+        AsyncJobState,
+        SessionPhase,
+        compute_allowed_session_events,
+        derive_session_phase,
+    )
+
+    assert "setup" not in specs["machines"]["session_phase"]["states"]
+    assert "[*] --> ready" in specs["machines"]["session_phase"]["mermaid"]
+    assert "consent" not in specs["machines"]["session_phase"]["mermaid"]
+
+    # Older saved session JSON with `consent_confirmed: false` (or no such key) still deserializes
+    # and is treated exactly like any other fresh session.
+    legacy = InterviewSession.model_validate({"config": {"consent_confirmed": False, "save_raw_audio": True}})
+    assert SessionConfig().consent_confirmed is True
+    assert InterviewSession.model_validate({"config": {}}).config.consent_confirmed is True
+    legacy_phase = derive_session_phase(legacy, is_capturing=False, calibration_job=AsyncJobState.IDLE)
+    assert legacy_phase == SessionPhase.READY
+    allowed_idle, blocked_idle = compute_allowed_session_events(
+        legacy, phase=legacy_phase, regroup_job=AsyncJobState.IDLE
+    )
+    assert "start_capture" in allowed_idle and "start_capture" not in blocked_idle
+
+    for busy_phase, needle in (
+        (SessionPhase.CAPTURING, "already active"),
+        (SessionPhase.CALIBRATING, "calibration to finish"),
+    ):
+        allowed_busy, blocked_busy = compute_allowed_session_events(
+            legacy, phase=busy_phase, regroup_job=AsyncJobState.IDLE
+        )
+        assert "start_capture" not in allowed_busy
+        assert needle in blocked_busy["start_capture"]
+
+    # While calibration is running the server rejects an explicit `start_capture` command
+    runtime = app.state.runtime
+    runtime.calibration_job = AsyncJobState.RUNNING
+    try:
+        with client.websocket_connect("/ws/session") as ws:
+            _ = ws.receive_json()  # session_state
+            _ = ws.receive_json()  # asr_status
+            ws.send_json({"type": "start_capture"})
+            rej_cal = ws.receive_json()
+            assert rej_cal["type"] == "transition_rejected"
+            assert rej_cal["state"] == "calibrating"
+            assert rej_cal["event"] == "start_capture"
+            assert runtime.is_capturing is False
+    finally:
+        runtime.calibration_job = AsyncJobState.IDLE
 
 
 def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
@@ -832,7 +883,7 @@ def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
     assert all(seg.speaker == "interviewer" for seg in all_emitted)
     assert all(seg.start_ms >= 60_000 for seg in all_emitted)
 
-    # 6. Server-level WS & HTTP regressions: stale rev, empty dive_deeper, consent reset, GET vs POST /load, ASR exception
+    # 6. Server-level WS & HTTP regressions: stale rev, empty dive_deeper, new_session readiness, GET vs POST /load, ASR exception
     app = create_app(project_root=tmp_path / "srv", preload_asr=False)
     client = TestClient(app)
 
@@ -886,15 +937,16 @@ def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
         assert rej["machine"] == "card_probe"
         assert rej["event"] == "dive_deeper"
 
-        # Confirm consent on session 1, then create new_session -> consent_confirmed resets to False
-        ws.send_json({"type": "configure_session", "config": {"consent_confirmed": True}})
-        _ = ws.receive_json()
-        ws.send_json({"type": "new_session", "config": {"role_title": "Staff SWE"}})
+        # new_session yields a fresh session that is immediately ready to capture. A legacy client that
+        # still sends `consent_confirmed: false` is tolerated and never blocks `start_capture`.
+        ws.send_json({"type": "new_session", "config": {"role_title": "Staff SWE", "consent_confirmed": False}})
         s2 = ws.receive_json()
         sess2_id = s2["session"]["id"]
         assert sess2_id != sess1_id
-        assert s2["session"]["config"]["consent_confirmed"] is False
-        assert s2["session"]["state_machines"]["session"]["phase"] == "setup"
+        assert s2["session"]["config"]["role_title"] == "Staff SWE"
+        assert s2["session"]["state_machines"]["session"]["phase"] == "ready"
+        assert "start_capture" in s2["session"]["state_machines"]["session"]["allowed_events"]
+        assert "start_capture" not in s2["session"]["state_machines"]["session"]["blocked_reasons"]
 
     # GET /api/sessions/{sess1_id} is read-only (does NOT switch active_session away from sess2)
     get_res = client.get(f"/api/sessions/{sess1_id}")
@@ -921,8 +973,6 @@ def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
     with client.websocket_connect("/ws/session") as ws:
         _ = ws.receive_json()  # session_state
         _ = ws.receive_json()  # asr_status
-        ws.send_json({"type": "configure_session", "config": {"consent_confirmed": True}})
-        _ = ws.receive_json()
         ws.send_json({"type": "start_capture"})
         _ = ws.receive_json()
         # Push real speech PCM so Silero VAD enqueues a final segment that hits _boom

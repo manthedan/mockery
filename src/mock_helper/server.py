@@ -127,19 +127,25 @@ class AppRuntime:
         )
         return phase.value, allowed, blocked
 
-    def begin_capture(self, *, require_consent: bool = False, owner: Any | None = None) -> None:
-        phase_str, allowed, blocked = self.current_phase_and_actions()
-        if require_consent and "start_capture" not in allowed:
-            raise InvalidStateTransitionError(
-                machine="session_phase",
-                current_state=phase_str,
-                event="start_capture",
-                allowed_events=allowed,
-                remediation=blocked.get(
-                    "start_capture",
-                    "Set `consent_confirmed=true` via `configure_session` first.",
-                ),
-            )
+    def begin_capture(self, *, enforce_transition: bool = False, owner: Any | None = None) -> None:
+        """
+        Starts (or resumes) live capture. An explicit `start_capture` command passes
+        `enforce_transition=True` so it is rejected while capture is already active or
+        calibration is running; streamed audio frames call this idempotently without the check.
+        """
+        if enforce_transition:
+            phase_str, allowed, blocked = self.current_phase_and_actions()
+            if "start_capture" not in allowed:
+                raise InvalidStateTransitionError(
+                    machine="session_phase",
+                    current_state=phase_str,
+                    event="start_capture",
+                    allowed_events=allowed,
+                    remediation=blocked.get(
+                        "start_capture",
+                        "Live capture cannot start in the current session phase.",
+                    ),
+                )
         if not self.is_capturing:
             self.is_capturing = True
             self.capture_started_epoch_ms = int(time.time() * 1000)
@@ -168,7 +174,7 @@ class AppRuntime:
 
     def ensure_archive(self) -> SessionAudioArchive | None:
         cfg = self.active_session.config
-        if cfg.consent_confirmed and cfg.save_raw_audio:
+        if cfg.save_raw_audio:
             if self.audio_archive is None or self.audio_archive.session_id != self.active_session.id:
                 self.close_archive()
                 self.audio_archive = SessionAudioArchive(
@@ -749,7 +755,7 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                     break
 
                 if "bytes" in message and message["bytes"] is not None:
-                    runtime.begin_capture(require_consent=False, owner=send_json)
+                    runtime.begin_capture(owner=send_json)
                     raw_bytes = message["bytes"]
                     arch = runtime.ensure_archive()
                     if arch is not None:
@@ -829,8 +835,6 @@ async def _handle_ws_command(
     if action == "new_session":
         cfg_data = dict(cmd.get("config") or {})
         base_cfg = runtime.active_session.config.model_dump()
-        # Require explicit fresh consent for each new mock candidate unless explicitly confirmed in cmd
-        base_cfg["consent_confirmed"] = False
         cfg = SessionConfig.model_validate({**base_cfg, **cfg_data})
         runtime.switch_session(InterviewSession(config=cfg))
         await broadcast_session()
@@ -842,7 +846,7 @@ async def _handle_ws_command(
         runtime.active_session.config = cfg
         runtime.grouper.sync_card_kinds(runtime.active_session)
         runtime.audio_router.mode = cfg.mode
-        if not cfg.save_raw_audio or not cfg.consent_confirmed:
+        if not cfg.save_raw_audio:
             runtime.close_archive()
         if runtime.active_session.utterances:
             runtime.store.save(runtime.active_session)
@@ -850,7 +854,7 @@ async def _handle_ws_command(
         return
 
     if action == "start_capture":
-        runtime.begin_capture(require_consent=True, owner=send_json)
+        runtime.begin_capture(enforce_transition=True, owner=send_json)
         await broadcast_session()
         return
 
