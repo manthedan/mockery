@@ -37,7 +37,7 @@ const PHASE_LABELS = {
 };
 
 const MODE_NOTES = {
-  remote_meet: "Your mic and the Meet tab are recorded separately. Wear headphones.",
+  remote_meet: "Your mic and the Meet tab are captured separately. Wear headphones.",
   in_person: "For in-person or solo practice. Speakers are told apart automatically.",
 };
 
@@ -654,14 +654,29 @@ function isSessionCompleted() {
   return Boolean(state.session?.calibration_markdown) && state.captureState === "idle";
 }
 
+const INTERVIEW_LIMIT_SEC = 45 * 60;
+
 function renderTimerPill(elapsedSec) {
   const pill = el("timerPill");
   el("timerText").textContent = fmtClock(elapsedSec);
-  const pct = Math.min(100, Math.max(0, (elapsedSec / (45 * 60)) * 100));
+  const pct = Math.min(100, Math.max(0, (elapsedSec / INTERVIEW_LIMIT_SEC) * 100));
   el("timerProgress").style.width = `${pct.toFixed(1)}%`;
   const completed = isSessionCompleted();
+  // Calm until it matters: amber for the last five minutes, muted red for the last one and beyond.
+  const remaining = INTERVIEW_LIMIT_SEC - Math.floor(elapsedSec);
+  const over = !completed && remaining <= 60;
+  const warn = !completed && !over && remaining <= 5 * 60;
   pill.classList.toggle("completed", completed);
-  pill.classList.toggle("warn", !completed && elapsedSec >= 38 * 60);
+  pill.classList.toggle("warn", warn);
+  pill.classList.toggle("over", over);
+  pill.title =
+    over && remaining <= 0
+      ? "Past the 45-minute mark"
+      : over
+      ? "Less than a minute left of 45"
+      : warn
+      ? "Less than five minutes left of 45"
+      : "Elapsed of a 45-minute interview";
 }
 
 /* ---------------- Workspace Mode (Launchpad vs Active Split Studio) ---------------- */
@@ -720,7 +735,7 @@ function renderCaptureControls() {
   const phase = state.session?.state_machines?.session?.phase || "ready";
   const hasCalib = Boolean(state.session?.calibration_markdown);
   const completed = hasCalib && cs === "idle";
-  // Once a recording has been stopped the interview has ended, but it can still be picked back up.
+  // Once a recording has been stopped it reads "Stopped", and the interview can still be picked back up.
   const isResumable =
     phase === "awaiting_self_rating" || phase === "rated" || phase === "calibrated";
 
@@ -744,10 +759,10 @@ function renderCaptureControls() {
       label = "Waiting for permission…";
     } else if (phase === "calibrating") {
       tone = "busy";
-      label = "Ended";
+      label = "Stopped";
     } else if (isResumable) {
       tone = "ended";
-      label = "Ended";
+      label = "Stopped";
     }
     statusEl.className = `capture-state ${tone}`;
     statusText.textContent = label;
@@ -776,7 +791,7 @@ function renderCaptureControls() {
     startBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
     startBtn.disabled = phase === "calibrating";
-    startLabel.textContent = isResumable ? "Resume recording" : "Start recording";
+    startLabel.textContent = isResumable ? "Resume interview" : "Start recording";
     // Starting is the one solid-ink action; resuming an ended interview is a quiet outline so the
     // transcript and audit lead.
     startBtn.classList.toggle("btn-primary", !isResumable);
@@ -1010,11 +1025,29 @@ function highlightSearchHtml(rawText, query) {
   return safe.replace(re, "<mark>$1</mark>");
 }
 
-const BACKCHANNEL_RE = /^(um+|uh+|hmm+|mhm+|yeah|yep|ok(ay)?|right|sure|got it)\.?$/i;
+const BACKCHANNEL_RE = /^(um+|uh+|hmm+|mhm+|yeah|yep|ok(ay)?|right|sure|got it)[.,…]*$/i;
 
 function isBackchannelFiller(text) {
   const t = String(text || "").trim();
   return t.length <= 10 && BACKCHANNEL_RE.test(t);
+}
+
+// Hesitation sounds get one treatment wherever they fall — opening a turn, mid-sentence, or as a
+// turn of their own — so a transcript never shows one "um" dimmed and the next one not.
+// Real words that double as backchannels ("yeah", "right") are only dimmed as a whole turn.
+const FILLER_WORD_RE =
+  /(^|[^\p{L}\p{N}'’-])((?:u+h+m*|u+m+|h+m+|mhm+|erm+|uh-huh|mm-hmm)(?![\p{L}\p{N}'’-])[,.…]*)/giu;
+
+function dimFillersHtml(rawText) {
+  const text = String(rawText || "");
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(FILLER_WORD_RE)) {
+    const start = m.index + m[1].length;
+    out += `${escapeHtml(text.slice(last, start))}<span class="utt-filler">${escapeHtml(m[2])}</span>`;
+    last = start + m[2].length;
+  }
+  return out + escapeHtml(text.slice(last));
 }
 
 function renderUtteranceRowsHtml(utts, { qaId = null, canSplitAny = false } = {}) {
@@ -1093,10 +1126,11 @@ function renderUtteranceRowsHtml(utts, { qaId = null, canSplitAny = false } = {}
           const spansHtml = para
             .map(({ u, text, isFiller }, sIdx) => {
               const isSelectedCite = state.activeCitationUttId === u.id;
-              const fillerCls = isFiller && para.length > 1 ? " utt-filler-inline" : "";
+              const fillerCls = isFiller && para.length > 1 ? " utt-filler" : "";
               const citeCls = isSelectedCite ? " cite-selected" : "";
               const draftCls = u.final ? "" : " draft-utt";
-              const body = highlightSearchHtml(text, q);
+              // While searching, the marker highlight is the only inline treatment.
+              const body = q ? highlightSearchHtml(text, q) : dimFillersHtml(text);
               const space = sIdx < para.length - 1 ? " " : "";
               return `<span class="utt-seg${fillerCls}${citeCls}${draftCls}" data-utt-row="${escapeHtml(u.id)}" title="${fmtMs(u.start_ms)}">${body}</span>${space}`;
             })
@@ -1178,8 +1212,23 @@ function shortPhaseKeyword(title) {
   return pick;
 }
 
+// The calibration phase table mirrors whichever phase is open in the transcript.
+function syncPhaseTableActive() {
+  const table = el("phaseSignalsStrip");
+  if (!table) return;
+  const qas = state.session?.qa_groups_resolved || [];
+  const openBadge = String(qas.find((q) => q.id === state.selectedQaId)?.badge || "").toUpperCase();
+  for (const row of table.querySelectorAll("[data-jump-badge]")) {
+    const isOpen = Boolean(openBadge) && row.getAttribute("data-jump-badge") === openBadge;
+    row.classList.toggle("active", isOpen);
+    if (isOpen) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
+}
+
 function renderPhaseNavStrip(qas) {
   const strip = el("phaseNavStrip");
+  syncPhaseTableActive();
   if (!qas.length) {
     strip.innerHTML = "";
     return;
@@ -1356,21 +1405,28 @@ function sentenceCase(str) {
     .join(" ");
 }
 
-// The probe keys of the follow-ups currently on screen, in order (used by the 1–3 hotkeys).
-function visibleProbeKeys() {
-  return [...el("probesContent").querySelectorAll("[data-probe-asked]")].map((n) =>
-    n.getAttribute("data-probe-asked")
+// A follow-up keeps its number for life: 1–3 always mean the same question, wherever it sits on
+// screen, so the key that marked it asked is also the key that brings it back.
+function probeKeyForNumber(num) {
+  return (
+    el("probesContent")
+      .querySelector(`[data-probe-num="${Number(num)}"]`)
+      ?.getAttribute("data-probe-asked") || null
   );
 }
 
 function toggleProbeAsked(key) {
   if (!key) return;
+  const hadFocus = document.activeElement?.getAttribute?.("data-probe-asked") === key;
   if (state.askedProbes.has(key)) {
     state.askedProbes.delete(key);
   } else {
     state.askedProbes.add(key);
   }
   renderProbesPanel();
+  if (hadFocus) {
+    el("probesContent").querySelector(`[data-probe-asked="${CSS.escape(key)}"]`)?.focus();
+  }
 }
 
 function renderProbesPanel() {
@@ -1456,23 +1512,51 @@ function renderProbesPanel() {
   setState(pState === "ready_cached" ? "new ones ready" : pState === "warming" ? "writing new ones…" : "", pState === "ready_cached");
   setDiveBtn(pState === "ready_cached" ? "Show new" : "New angles");
 
-  const rowsHtml = (latest.probes || [])
-    .map((p, idx) => {
-      const probeKey = `${qa.id}:${history.length}:${idx}`;
-      const isAsked = state.askedProbes.has(probeKey);
-      return `
+  // Unasked questions keep their order at the top of the pane; asked ones sink below them and fold
+  // down to a single checked line, so the next thing to ask always sits on the eye-line.
+  const probes = (latest.probes || []).map((p, idx) => {
+    const key = `${qa.id}:${history.length}:${idx}`;
+    return { p, num: idx + 1, key, isAsked: state.askedProbes.has(key) };
+  });
+  const ordered = [...probes.filter((r) => !r.isAsked), ...probes.filter((r) => r.isAsked)];
+
+  const rowsHtml = ordered
+    .map(({ p, num, key, isAsked }) => {
+      const hotkey = num <= 9 ? ` or press ${num}` : "";
+      if (isAsked) {
+        return `
         <li
-          class="probe${isAsked ? " asked" : ""}"
-          data-probe-asked="${escapeHtml(probeKey)}"
+          class="probe asked"
+          data-probe-asked="${escapeHtml(key)}"
+          data-probe-num="${num}"
           role="button"
           tabindex="0"
-          aria-pressed="${isAsked}"
-          title="${isAsked ? "Asked — click to undo" : "Click once you've asked it"}"
+          aria-pressed="true"
+          title="Asked — click${hotkey} to bring it back"
         >
-          <span class="probe-num">${isAsked ? ICON_CHECK : idx + 1}</span>
+          <span class="probe-num">${ICON_CHECK}</span>
           <div class="probe-body">
             <p class="probe-question">${escapeHtml(p.question)}</p>
-            <p class="probe-why"><span class="probe-angle">${escapeHtml(sentenceCase(p.angle))}.</span> ${escapeHtml(p.why)}</p>
+          </div>
+        </li>
+      `;
+      }
+      const angle = sentenceCase(p.angle);
+      return `
+        <li
+          class="probe"
+          data-probe-asked="${escapeHtml(key)}"
+          data-probe-num="${num}"
+          role="button"
+          tabindex="0"
+          aria-pressed="false"
+          title="Click${hotkey} once you've asked it"
+        >
+          <span class="probe-num">${num}</span>
+          <div class="probe-body">
+            ${angle ? `<p class="probe-angle">${escapeHtml(angle)}</p>` : ""}
+            <p class="probe-question">${escapeHtml(p.question)}</p>
+            ${p.why ? `<p class="probe-why">${escapeHtml(p.why)}</p>` : ""}
           </div>
           <button type="button" class="probe-copy" data-probe-copy="${escapeHtml(p.question)}" title="Copy question" aria-label="Copy question">${ICON_COPY}</button>
         </li>
@@ -1480,11 +1564,21 @@ function renderProbesPanel() {
     })
     .join("");
 
+  // The header button already offers new angles; this line only teaches the number keys.
+  const keysHtml = probes
+    .slice(0, 9)
+    .map((r) => `<kbd>${r.num}</kbd>`)
+    .join(" ");
+  const allAsked = probes.length > 0 && probes.every((r) => r.isAsked);
+  const hintHtml = allAsked
+    ? `All asked. ${keysHtml} bring one back.`
+    : `${keysHtml} mark as asked`;
+
   content.innerHTML = `
     <p class="probe-read">${escapeHtml(latest.quick_read)}</p>
     ${isStale ? `<p class="probe-stale">The candidate has said more since these were written.</p>` : ""}
     <ol class="probe-list" title="Written by ${escapeHtml(latest.model_used || "the default model")}">${rowsHtml}</ol>
-    <p class="probe-hint"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> mark a question as asked &nbsp;·&nbsp; <kbd>D</kbd> new angles</p>
+    ${probes.length ? `<p class="probe-hint">${hintHtml}</p>` : ""}
   `;
 }
 
@@ -2026,7 +2120,7 @@ function renderPhaseTable(insights) {
         ? `${fmtClock(stats.span_seconds)} · candidate ${stats.candidate_words} words · you ${stats.interviewer_words} words`
         : "";
       return `
-        <button type="button" class="phase-row" data-jump-badge="${escapeHtml(badge)}" title="${escapeHtml(detail || title)}">
+        <button type="button" class="phase-row" data-jump-badge="${escapeHtml(badge)}" title="${escapeHtml(detail ? `Show ${badge} in the transcript — ${detail}` : `Show ${badge} in the transcript`)}">
           <span class="phase-row-code">${escapeHtml(badge)}</span>
           <span class="phase-row-title">${escapeHtml(title)}</span>
           <span class="phase-row-rating ${sig ? sig.tone : ""}">${sig ? escapeHtml(sig.rating) : ""}</span>
@@ -2035,6 +2129,7 @@ function renderPhaseTable(insights) {
       `;
     })
     .join("");
+  syncPhaseTableActive();
 }
 
 // Keep the pinned section tabs in sync with whichever audit section is currently being read
@@ -2129,13 +2224,33 @@ function activateRightTab(which) {
 
 /* ---------------- Settings & History Modals ---------------- */
 
-function syncActiveModelChips() {
+// Model choosers. With named presets on offer (the agy tool), the chips are the single source of
+// truth and the raw model ID only appears under "Custom". Providers without presets just show the ID.
+// `redetect` re-derives preset-vs-custom from the current value (on open and on provider change);
+// otherwise Custom stays put while the ID is being typed, even if it happens to spell a preset.
+function syncModelChoosers({ redetect = false } = {}) {
   for (const group of document.querySelectorAll(".quick-chips[data-target-input]")) {
     const input = el(group.getAttribute("data-target-input"));
-    const curVal = (input?.value || "").trim();
-    for (const chip of group.querySelectorAll("[data-chip-val]")) {
-      chip.classList.toggle("active", chip.getAttribute("data-chip-val") === curVal);
+    if (!input) continue;
+    const hasPresets = !group.classList.contains("hidden");
+    const curVal = input.value.trim();
+    const presetChips = [...group.querySelectorAll("[data-chip-val]")];
+    const matchesPreset = presetChips.some((c) => c.getAttribute("data-chip-val") === curVal);
+    if (redetect) {
+      group.dataset.custom = String(!matchesPreset);
     }
+    const isCustom = group.dataset.custom === "true";
+    for (const chip of presetChips) {
+      const active = !isCustom && chip.getAttribute("data-chip-val") === curVal;
+      chip.classList.toggle("active", active);
+      chip.setAttribute("aria-pressed", String(active));
+    }
+    const customChip = group.querySelector("[data-chip-custom]");
+    if (customChip) {
+      customChip.classList.toggle("active", isCustom);
+      customChip.setAttribute("aria-pressed", String(isCustom));
+    }
+    input.classList.toggle("hidden", hasPresets && !isCustom);
   }
 }
 
@@ -2189,7 +2304,7 @@ async function openSettingsModal() {
     }
   };
   updateProviderFields(presetSelect.value);
-  syncActiveModelChips();
+  syncModelChoosers({ redetect: true });
 
   presetSelect.onchange = () => {
     const p = presets[presetSelect.value];
@@ -2199,7 +2314,7 @@ async function openSettingsModal() {
       el("llmCalibModelInput").value = p.calibration_model;
     }
     updateProviderFields(presetSelect.value);
-    syncActiveModelChips();
+    syncModelChoosers({ redetect: true });
   };
 
   setModalState("settings");
@@ -2250,19 +2365,38 @@ function fmtDayLabel(isoStr) {
   return d.toLocaleDateString(undefined, { month: "long", day: "numeric" });
 }
 
-function sessionMetaLine(s, { withDay = false } = {}) {
+function fmtDurationShort(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  if (total < 60) return "<1m";
+  const mins = Math.round(total / 60);
+  if (mins < 60) return `${mins}m`;
+  const rem = mins % 60;
+  return rem ? `${Math.floor(mins / 60)}h ${rem}m` : `${Math.floor(mins / 60)}h`;
+}
+
+// What tells two interviews for the same role apart: the format, how far it got, how long it ran —
+// and, in its own column, when it happened. (`/api/sessions` carries no card titles to quote.)
+function sessionMetaParts(s, { withDay = false } = {}) {
   const d = new Date(s.created_at_iso);
-  const time = Number.isNaN(d.getTime())
+  const clock = Number.isNaN(d.getTime())
     ? ""
     : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  const mins = Math.round((s.duration_seconds || 0) / 60);
-  return [
+  const cards = Number(s.qa_count) || 0;
+  const main = [
     TYPE_SHORT_LABELS[s.interview_type] || s.interview_type,
-    withDay ? `${fmtDayLabel(s.created_at_iso)}, ${time}` : time,
-    mins >= 1 ? `${mins} min` : "under a minute",
+    cards > 0 ? `${cards} card${cards === 1 ? "" : "s"}` : "No cards",
+    fmtDurationShort(s.duration_seconds),
   ]
     .filter(Boolean)
     .join(" · ");
+  const time = withDay && clock ? `${fmtDayLabel(s.created_at_iso)}, ${clock}` : clock;
+  return { main, time };
+}
+
+function sessionDotHtml(s) {
+  return s.has_calibration
+    ? `<span class="session-dot" role="img" aria-label="Calibrated" title="Calibrated — the verdict and audit are saved"></span>`
+    : "";
 }
 
 async function fetchSavedSessions() {
@@ -2291,10 +2425,17 @@ async function refreshHomeSessions() {
       const day = fmtDayLabel(s.created_at_iso);
       const head = day !== lastDay ? `<div class="home-group">${escapeHtml(day)}</div>` : "";
       lastDay = day;
+      const meta = sessionMetaParts(s);
       return `${head}
         <button type="button" class="home-item" data-load-session="${escapeHtml(s.id)}">
-          <span class="home-item-title">${escapeHtml(s.role_title || "Untitled interview")}</span>
-          <span class="home-item-meta">${escapeHtml(sessionMetaLine(s))}</span>
+          <span class="home-item-top">
+            <span class="home-item-title">${escapeHtml(s.role_title || "Untitled interview")}</span>
+            ${sessionDotHtml(s)}
+          </span>
+          <span class="home-item-meta">
+            <span class="session-meta-main">${escapeHtml(meta.main)}</span>
+            <span class="session-time">${escapeHtml(meta.time)}</span>
+          </span>
         </button>`;
     })
     .join("");
@@ -2308,20 +2449,24 @@ async function openHistoryModal() {
     list.innerHTML = `<div class="history-empty">No interviews saved yet.</div>`;
   } else {
     list.innerHTML = sessions
-      .map(
-        (s) => `
+      .map((s) => {
+        const meta = sessionMetaParts(s, { withDay: true });
+        return `
         <div class="history-item">
           <button type="button" class="history-open" data-load-session="${escapeHtml(s.id)}">
-            <span class="history-title">${escapeHtml(s.role_title || "Untitled interview")}</span>
-            <span class="history-meta">${escapeHtml(sessionMetaLine(s, { withDay: true }))}</span>
+            <span class="history-top">
+              <span class="history-title">${escapeHtml(s.role_title || "Untitled interview")}</span>
+              ${sessionDotHtml(s)}
+            </span>
+            <span class="history-meta">${escapeHtml([meta.time, meta.main].filter(Boolean).join(" · "))}</span>
           </button>
           <span class="history-actions">
             <a class="link-quiet" href="/api/sessions/${encodeURIComponent(s.id)}/markdown?audience=interviewer" title="Download the full debrief as Markdown">Debrief</a>
             <a class="link-quiet" href="/api/sessions/${encodeURIComponent(s.id)}/markdown?audience=candidate" title="Download a clean transcript for the candidate">Candidate copy</a>
           </span>
         </div>
-      `
-      )
+      `;
+      })
       .join("");
   }
   setModalState("history");
@@ -2353,6 +2498,10 @@ async function loadSavedSession(id) {
   renderSpeakerToggle();
   renderPhaseAndControls();
   renderQAList();
+  // A reopened interview starts on its first phase, so show the top of the transcript to match
+  // the highlighted phase tab (and the phase table in Calibration).
+  el("qaList").scrollTop = 0;
+  updateJumpToBottomVisibility();
   renderProbesPanel();
   renderCalibrationPanel();
   renderMetricsBar();
@@ -2732,21 +2881,29 @@ function initEvents() {
   el("closeSettingsBtn").onclick = () => setModalState("none");
   el("cancelSettingsBtn").onclick = () => setModalState("none");
   el("saveSettingsBtn").onclick = saveSettings;
-  el("llmFastModelInput").oninput = syncActiveModelChips;
-  el("llmCalibModelInput").oninput = syncActiveModelChips;
+  el("llmFastModelInput").oninput = () => syncModelChoosers();
+  el("llmCalibModelInput").oninput = () => syncModelChoosers();
 
   el("settingsModal").onclick = (ev) => {
     if (ev.target === el("settingsModal")) {
       setModalState("none");
       return;
     }
-    const chip = ev.target.closest("[data-chip-val]");
+    const chip = ev.target.closest("[data-chip-val], [data-chip-custom]");
     if (chip) {
       const group = chip.closest("[data-target-input]");
-      const targetId = group?.getAttribute("data-target-input");
-      if (targetId && el(targetId)) {
-        el(targetId).value = chip.getAttribute("data-chip-val");
-        syncActiveModelChips();
+      const input = el(group?.getAttribute("data-target-input"));
+      if (!input) return;
+      if (chip.hasAttribute("data-chip-custom")) {
+        // Custom starts from whatever was selected, ready to be edited or replaced.
+        group.dataset.custom = "true";
+        syncModelChoosers();
+        input.focus();
+        input.select();
+      } else {
+        group.dataset.custom = "false";
+        input.value = chip.getAttribute("data-chip-val");
+        syncModelChoosers();
       }
     }
   };
@@ -2907,7 +3064,7 @@ function initEvents() {
         sendCmd({ type: "dive_deeper", qa_id: state.selectedQaId, force_refresh: false });
       }
     } else if (/^[1-9]$/.test(ev.key) && !ev.metaKey && !ev.ctrlKey && !ev.altKey && state.rightTab === "probes") {
-      const key = visibleProbeKeys()[Number(ev.key) - 1];
+      const key = probeKeyForNumber(ev.key);
       if (key) {
         ev.preventDefault();
         toggleProbeAsked(key);
