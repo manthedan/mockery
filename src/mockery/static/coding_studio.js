@@ -4,7 +4,7 @@
  * served with strict Worker CSP headers, and Python loads strictly from `/api/addons/pyodide/`.
  */
 
-import { createPackOpTracker, formatApiDetail } from "./state_machines.js";
+import { createMachine, createPackOpTracker, formatApiDetail } from "./state_machines.js";
 
 const JS_TIMEOUT_MS = 3500;
 const PY_BOOT_TIMEOUT_MS = 20000;
@@ -201,9 +201,256 @@ function shortRunId() {
   return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+/* ---------------- Canonical Coding Runner State Derivation ---------------- */
+
+export function deriveCodingRunnerState({
+  language = "javascript",
+  activeRun = null,
+  matchingResult = null,
+  cancelled = false,
+  staleResult = false,
+  testsPresent = false,
+  pyodideInstalled = false,
+  pyodideInstalling = false,
+  pyodideUninstalling = false,
+} = {}) {
+  const baseActions = ["switch_language", "edit_code", "reset_starter", "ask_ai_review"];
+
+  if (activeRun) {
+    const runLang = activeRun.language || "javascript";
+    const runLangLabel = runLang === "python" ? "Python" : "JS";
+    if (runLang === language) {
+      if (language === "python" && !activeRun.booted) {
+        return {
+          status: "booting_pyodide",
+          pillText: activeRun.phase === "loading" ? "Loading Python…" : "Starting Python…",
+          pillTone: "running",
+          canRun: false,
+          canCancel: true,
+          runButtonText: "Running…",
+          consoleMeta: "Starting isolated local Pyodide runtime…",
+          consoleBodyDefault: "Booting local Python WASM runtime…",
+          consoleTone: "neutral",
+          allowedActions: ["cancel_run", ...baseActions],
+        };
+      }
+      return {
+        status: "running",
+        pillText: "Running…",
+        pillTone: "running",
+        canRun: false,
+        canCancel: true,
+        runButtonText: "Running…",
+        consoleMeta: "Running inside isolated sandbox…",
+        consoleBodyDefault: "Executing tests…",
+        consoleTone: "neutral",
+        allowedActions: ["cancel_run", ...baseActions],
+      };
+    }
+    const otherActions = ["cancel_run", ...baseActions];
+    if (language === "python" && !pyodideInstalled && !pyodideInstalling && !pyodideUninstalling) {
+      otherActions.splice(1, 0, "install_pyodide");
+    }
+    return {
+      status: "running_other_lang",
+      pillText: `Running ${runLangLabel}…`,
+      pillTone: "running",
+      canRun: false,
+      canCancel: true,
+      runButtonText: "Running…",
+      consoleMeta: `${runLangLabel} test run is still in progress — cancel or wait to run here`,
+      consoleBodyDefault: `Waiting for active ${runLangLabel} sandbox run to finish (or click Cancel).`,
+      consoleTone: "neutral",
+      allowedActions: otherActions,
+    };
+  }
+
+  if (language === "pseudocode") {
+    return {
+      status: "pseudocode",
+      pillText: "Whiteboard Mode",
+      pillTone: "neutral",
+      canRun: false,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Whiteboard pseudocode mode (no test runner)",
+      consoleBodyDefault: "Talk through your approach and click “Ask AI to review code” for feedback.",
+      consoleTone: "neutral",
+      allowedActions: baseActions,
+    };
+  }
+
+  if (language === "python" && pyodideUninstalling) {
+    return {
+      status: "pyodide_uninstalling",
+      pillText: "Removing Python…",
+      pillTone: "running",
+      canRun: false,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Offline Python runner is being removed…",
+      consoleBodyDefault: "Offline Python runner is currently being uninstalled.",
+      consoleTone: "neutral",
+      allowedActions: baseActions,
+    };
+  }
+
+  if (language === "python" && pyodideInstalling) {
+    return {
+      status: "pyodide_installing",
+      pillText: "Installing Python…",
+      pillTone: "running",
+      canRun: false,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Downloading local Pyodide WASM pack…",
+      consoleBodyDefault: "Installing offline Python runtime (~14 MB)…",
+      consoleTone: "neutral",
+      allowedActions: baseActions,
+    };
+  }
+
+  if (language === "python" && !pyodideInstalled) {
+    return {
+      status: "pyodide_missing",
+      pillText: "Python Not Installed",
+      pillTone: "neutral",
+      canRun: false,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Install Offline Python above to run tests locally",
+      consoleBodyDefault: "Offline Python runner is not installed.",
+      consoleTone: "neutral",
+      allowedActions: ["install_pyodide", ...baseActions],
+    };
+  }
+
+  if (!testsPresent) {
+    return {
+      status: "no_tests",
+      pillText: "No Tests",
+      pillTone: "neutral",
+      canRun: false,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "No tests to run",
+      consoleBodyDefault: "Add executable assertions in the Test Suite tab to run tests.",
+      consoleTone: "neutral",
+      allowedActions: baseActions,
+    };
+  }
+
+  if (cancelled || matchingResult?.status === "cancelled") {
+    return {
+      status: "cancelled",
+      pillText: "Cancelled",
+      pillTone: "neutral",
+      canRun: true,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Test run cancelled — press Run Tests to run again",
+      consoleBodyDefault: "Test execution was cancelled before completion.",
+      consoleTone: "neutral",
+      allowedActions: ["run_tests", ...baseActions],
+    };
+  }
+
+  if (matchingResult?.status === "passed") {
+    const msPill = Number.isFinite(matchingResult.durationMs) ? ` · ${matchingResult.durationMs} ms` : "";
+    const msMeta = Number.isFinite(matchingResult.durationMs) ? ` in ${matchingResult.durationMs} ms` : "";
+    return {
+      status: "passed",
+      pillText: `Tests Passed${msPill}`,
+      pillTone: "pass",
+      canRun: true,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: `All assertions passed${msMeta}`,
+      consoleBodyDefault: "Completed with no output.",
+      consoleTone: "pass",
+      allowedActions: ["run_tests", ...baseActions],
+    };
+  }
+
+  if (matchingResult?.status === "timeout") {
+    return {
+      status: "timeout",
+      pillText: "Timed Out",
+      pillTone: "fail",
+      canRun: true,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Execution terminated (timeout)",
+      consoleBodyDefault: "Execution timed out.",
+      consoleTone: "fail",
+      allowedActions: ["run_tests", ...baseActions],
+    };
+  }
+
+  if (matchingResult?.status === "failed") {
+    const msMeta = Number.isFinite(matchingResult.durationMs) ? ` after ${matchingResult.durationMs} ms` : "";
+    return {
+      status: "failed",
+      pillText: "Tests Failed",
+      pillTone: "fail",
+      canRun: true,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: `Test failure${msMeta}`,
+      consoleBodyDefault: "Tests failed.",
+      consoleTone: "fail",
+      allowedActions: ["run_tests", ...baseActions],
+    };
+  }
+
+  if (matchingResult?.status === "saved") {
+    return {
+      status: "saved",
+      pillText: "Ready",
+      pillTone: "neutral",
+      canRun: true,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Saved output",
+      consoleBodyDefault: "Saved output.",
+      consoleTone: "neutral",
+      allowedActions: ["run_tests", ...baseActions],
+    };
+  }
+
+  if (staleResult) {
+    return {
+      status: "stale",
+      pillText: "Modified",
+      pillTone: "neutral",
+      canRun: true,
+      canCancel: false,
+      runButtonText: "Run Tests",
+      consoleMeta: "Buffer edited since last run — press Run Tests to re-verify",
+      consoleBodyDefault: "Previous test output cleared because the code or test suite changed.",
+      consoleTone: "neutral",
+      allowedActions: ["run_tests", ...baseActions],
+    };
+  }
+
+  return {
+    status: "ready",
+    pillText: "Ready",
+    pillTone: "neutral",
+    canRun: true,
+    canCancel: false,
+    runButtonText: "Run Tests",
+    consoleMeta: "Press Run Tests or ⌘/Ctrl+Enter",
+    consoleBodyDefault: "No test runs yet for this language.",
+    consoleTone: "neutral",
+    allowedActions: ["run_tests", ...baseActions],
+  };
+}
+
 export function createCodingStudioPlugin({
   escapeHtml,
   showToast,
+  clientMachines = null,
   getAddons,
   onAddonsUpdated,
   packOps = null,
@@ -256,6 +503,7 @@ export function createCodingStudioPlugin({
       codeByLang: initialWs.codeByLang,
       testsByLang: initialWs.testsByLang,
       resultsByLang: initialResultsByLang,
+      cancelledByLang: { javascript: null, python: null },
       installingPyodide: false,
       hintsOpen: false,
       revealedHints: 0,
@@ -264,8 +512,19 @@ export function createCodingStudioPlugin({
       destroyed: false,
     };
 
+    const runnerMachine = createMachine({
+      name: "codingStudio",
+      initial: "idle",
+      transitions: {
+        idle: ["booting_pyodide", "running"],
+        booting_pyodide: ["running", "idle"],
+        running: ["idle"],
+      },
+      registry: clientMachines,
+    });
+
     // Unified single-use worker handle for the currently running test (JS or Python)
-    // { id, worker, timer, booted, language, codeSnap, testsSnap } | null
+    // { id, worker, timer, booted, phase, language, codeSnap, testsSnap } | null
     let activeRun = null;
 
     function q(sel) {
@@ -285,6 +544,13 @@ export function createCodingStudioPlugin({
       return matches ? rec : null;
     }
 
+    function isCancelledForCurrentBuffer(lang = state.language) {
+      if (lang !== "javascript" && lang !== "python") return false;
+      const rec = state.cancelledByLang[lang];
+      if (!rec) return false;
+      return rec.codeSnap === state.codeByLang[lang] && rec.testsSnap === state.testsByLang[lang];
+    }
+
     function hasStaleResult(lang = state.language) {
       if (lang !== "javascript" && lang !== "python") return false;
       const rec = state.resultsByLang[lang];
@@ -292,8 +558,35 @@ export function createCodingStudioPlugin({
       return rec.codeSnap !== state.codeByLang[lang] || rec.testsSnap !== state.testsByLang[lang];
     }
 
-    function terminateActiveRun() {
-      if (!activeRun) return;
+    function getPyodidePackFlags() {
+      const pyPack = (state.addons?.packs || []).find((p) => p && p.id === "pyodide_python");
+      const installing = sharedPackOps.isInstalling("pyodide_python") || pyPack?.state === "installing";
+      const uninstalling =
+        sharedPackOps.isUninstalling("pyodide_python") || pyPack?.state === "uninstalling";
+      return {
+        installed: isPyodidePackInstalled(state.addons),
+        installing,
+        uninstalling,
+      };
+    }
+
+    function getDerivedRunnerState() {
+      const pyFlags = getPyodidePackFlags();
+      return deriveCodingRunnerState({
+        language: state.language,
+        activeRun,
+        matchingResult: getMatchingResult(state.language),
+        cancelled: isCancelledForCurrentBuffer(state.language),
+        staleResult: hasStaleResult(state.language),
+        testsPresent: hasExecutableTests(state.testsByLang[state.language], state.language),
+        pyodideInstalled: pyFlags.installed,
+        pyodideInstalling: pyFlags.installing,
+        pyodideUninstalling: pyFlags.uninstalling,
+      });
+    }
+
+    function terminateActiveRun(reason = "terminate") {
+      if (!activeRun) return null;
       const run = activeRun;
       activeRun = null;
       if (run.timer) {
@@ -308,6 +601,25 @@ export function createCodingStudioPlugin({
           /* ignore */
         }
       }
+      clientMachines?.endOp?.("coding_test_run");
+      if (runnerMachine.state !== "idle") {
+        runnerMachine.transition("idle", { event: reason });
+      }
+      return run;
+    }
+
+    function cancelActiveRun() {
+      const run = terminateActiveRun("cancel_run");
+      if (!run) return;
+      state.cancelledByLang[run.language] = {
+        codeSnap: run.codeSnap,
+        testsSnap: run.testsSnap,
+      };
+      if (!state.destroyed) {
+        renderStatusPill();
+        renderConsole();
+        showToast("Cancelled running tests.", 2000);
+      }
     }
 
     function activeEditorText() {
@@ -319,6 +631,9 @@ export function createCodingStudioPlugin({
 
     function setActiveEditorText(val) {
       const clipped = safeClipText(val, MAX_CODE_UTF8_BYTES);
+      if (state.language === "javascript" || state.language === "python") {
+        state.cancelledByLang[state.language] = null;
+      }
       if (state.activeTab === "tests") {
         state.testsByLang[state.language] = clipped;
       } else {
@@ -345,6 +660,7 @@ export function createCodingStudioPlugin({
               <button type="button" class="btn btn-quiet btn-xs" data-cs-hints-toggle>Hints</button>
               <button type="button" class="btn btn-quiet btn-xs" data-cs-reset title="Restore starter template for this language">Reset Starter</button>
               <button type="button" class="btn btn-quiet btn-xs" data-cs-run title="Run unit tests (⌘/Ctrl+Enter)">Run Tests</button>
+              <button type="button" class="btn btn-quiet btn-xs cs-cancel-btn hidden" data-cs-cancel title="Cancel active sandbox run">Cancel</button>
               <button type="button" class="btn btn-ink btn-xs" data-cs-review>Ask AI to review code</button>
             </div>
           </div>
@@ -374,7 +690,7 @@ export function createCodingStudioPlugin({
               aria-label="Code editor (press Escape then Tab to move focus out of the editor)"
             ></textarea>
           </div>
-          <div class="cs-editor-hint">Tab indents · Press <strong>Esc</strong> then <strong>Tab</strong> to leave editor · <strong>⌘/Ctrl+Enter</strong> runs tests</div>
+          <div class="cs-editor-hint" data-cs-editor-hint aria-live="polite">Tab indents · Press <strong>Esc</strong> then <strong>Tab</strong> to leave editor · <strong>⌘/Ctrl+Enter</strong> runs tests</div>
 
           <div class="cs-console" data-cs-console>
             <div class="cs-console-head">
@@ -398,47 +714,48 @@ export function createCodingStudioPlugin({
       gutter.textContent = nums.join("\n");
     }
 
+    function renderEditorHint() {
+      const hint = q("[data-cs-editor-hint]");
+      if (!hint) return;
+      hint.classList.toggle("is-escaped", state.tabEscaped);
+      if (state.tabEscaped) {
+        hint.innerHTML =
+          "Escape armed — press <strong>Tab</strong> or <strong>Shift+Tab</strong> to move focus out of editor (type any key to resume indenting)";
+      } else {
+        hint.innerHTML =
+          "Tab indents · Press <strong>Esc</strong> then <strong>Tab</strong> to leave editor · <strong>⌘/Ctrl+Enter</strong> runs tests";
+      }
+    }
+
+    function setTabEscaped(next) {
+      const val = Boolean(next);
+      if (state.tabEscaped === val) return;
+      state.tabEscaped = val;
+      renderEditorHint();
+    }
+
     function renderStatusPill() {
       const pill = q("[data-cs-status]");
       const runBtn = q("[data-cs-run]");
-      if (!pill) return;
-      pill.classList.remove("is-pass", "is-fail", "is-running");
+      const cancelBtn = q("[data-cs-cancel]");
+      const derived = getDerivedRunnerState();
 
-      const runningForThisLang = Boolean(activeRun && activeRun.language === state.language);
-      const currentRes = getMatchingResult(state.language);
-      const testsPresent = hasExecutableTests(state.testsByLang[state.language], state.language);
-
-      if (runningForThisLang) {
-        pill.textContent = "Running…";
-        pill.classList.add("is-running");
-      } else if (state.language === "pseudocode") {
-        pill.textContent = "Whiteboard Mode";
-      } else if (currentRes?.status === "passed") {
-        const ms = Number.isFinite(currentRes.durationMs) ? ` · ${currentRes.durationMs} ms` : "";
-        pill.textContent = `Tests Passed${ms}`;
-        pill.classList.add("is-pass");
-      } else if (currentRes?.status === "timeout") {
-        pill.textContent = "Timed Out";
-        pill.classList.add("is-fail");
-      } else if (currentRes?.status === "failed") {
-        pill.textContent = "Tests Failed";
-        pill.classList.add("is-fail");
-      } else if (hasStaleResult(state.language)) {
-        pill.textContent = "Modified";
-      } else if (!testsPresent) {
-        pill.textContent = "No Tests";
-      } else {
-        pill.textContent = "Ready";
+      if (pill) {
+        pill.classList.remove("is-pass", "is-fail", "is-running");
+        pill.textContent = derived.pillText;
+        if (derived.pillTone === "running") pill.classList.add("is-running");
+        else if (derived.pillTone === "pass") pill.classList.add("is-pass");
+        else if (derived.pillTone === "fail") pill.classList.add("is-fail");
       }
 
       if (runBtn) {
-        const canRun =
-          !activeRun &&
-          state.language !== "pseudocode" &&
-          testsPresent &&
-          (state.language !== "python" || isPyodidePackInstalled(state.addons));
-        runBtn.disabled = !canRun;
-        runBtn.textContent = activeRun ? "Running…" : "Run Tests";
+        runBtn.disabled = !derived.canRun;
+        runBtn.textContent = derived.runButtonText;
+      }
+
+      if (cancelBtn) {
+        cancelBtn.classList.toggle("hidden", !derived.canCancel);
+        cancelBtn.disabled = !derived.canCancel;
       }
     }
 
@@ -486,12 +803,9 @@ export function createCodingStudioPlugin({
     function renderPyBanner() {
       const banner = q("[data-cs-py-banner]");
       if (!banner) return;
-      const pyPack = (state.addons?.packs || []).find((p) => p && p.id === "pyodide_python");
-      const installing = sharedPackOps.isInstalling("pyodide_python") || pyPack?.state === "installing";
-      const uninstalling =
-        sharedPackOps.isUninstalling("pyodide_python") || pyPack?.state === "uninstalling";
+      const { installed, installing, uninstalling } = getPyodidePackFlags();
       const busy = installing || uninstalling;
-      const needsPyodide = state.language === "python" && (!isPyodidePackInstalled(state.addons) || busy);
+      const needsPyodide = state.language === "python" && (!installed || busy);
       banner.classList.toggle("hidden", !needsPyodide);
       if (!needsPyodide) {
         banner.innerHTML = "";
@@ -553,67 +867,28 @@ export function createCodingStudioPlugin({
       if (!body || !meta) return;
 
       body.classList.remove("is-pass", "is-fail");
+      const derived = getDerivedRunnerState();
+      meta.textContent = derived.consoleMeta;
 
-      if (activeRun && activeRun.language === state.language) {
-        meta.textContent =
-          state.language === "python" && !activeRun.booted
-            ? "Starting isolated local Pyodide runtime…"
-            : "Running inside isolated sandbox…";
-        body.textContent = "Executing tests…";
+      if (derived.consoleTone === "pass") body.classList.add("is-pass");
+      else if (derived.consoleTone === "fail") body.classList.add("is-fail");
+
+      if (
+        derived.status === "passed" ||
+        derived.status === "failed" ||
+        derived.status === "timeout" ||
+        derived.status === "saved"
+      ) {
+        const currentRes = getMatchingResult(state.language);
+        const parts = [];
+        if (currentRes?.stdout) parts.push(currentRes.stdout);
+        if (currentRes?.error) parts.push(currentRes.error);
+        body.textContent =
+          parts.join("\n\n").trim() || currentRes?.summary || derived.consoleBodyDefault;
         return;
       }
 
-      if (state.language === "pseudocode") {
-        meta.textContent = "Whiteboard pseudocode mode (no test runner)";
-        body.textContent = "Talk through your approach and click “Ask AI to review code” for feedback.";
-        return;
-      }
-
-      if (state.language === "python" && !isPyodidePackInstalled(state.addons)) {
-        meta.textContent = "Install Offline Python above to run tests locally";
-        body.textContent = "Offline Python runner is not installed.";
-        return;
-      }
-
-      const testsPresent = hasExecutableTests(state.testsByLang[state.language], state.language);
-      if (!testsPresent) {
-        meta.textContent = "No tests to run";
-        body.textContent = "Add executable assertions in the Test Suite tab to run tests.";
-        return;
-      }
-
-      const currentRes = getMatchingResult(state.language);
-      if (!currentRes) {
-        if (hasStaleResult(state.language)) {
-          meta.textContent = "Buffer edited since last run — press Run Tests to re-verify";
-          body.textContent = "Previous test output cleared because the code or test suite changed.";
-        } else {
-          meta.textContent = "Press Run Tests or ⌘/Ctrl+Enter";
-          body.textContent = "No test runs yet for this language.";
-        }
-        return;
-      }
-
-      const parts = [];
-      if (currentRes.stdout) parts.push(currentRes.stdout);
-      if (currentRes.error) parts.push(currentRes.error);
-      const display = parts.join("\n\n").trim() || currentRes.summary || "Completed with no output.";
-
-      if (currentRes.status === "passed") {
-        const ms = Number.isFinite(currentRes.durationMs) ? ` in ${currentRes.durationMs} ms` : "";
-        meta.textContent = `All assertions passed${ms}`;
-        body.classList.add("is-pass");
-      } else if (currentRes.status === "timeout") {
-        meta.textContent = "Execution terminated (timeout)";
-        body.classList.add("is-fail");
-      } else if (currentRes.status === "failed") {
-        const ms = Number.isFinite(currentRes.durationMs) ? ` after ${currentRes.durationMs} ms` : "";
-        meta.textContent = `Test failure${ms}`;
-        body.classList.add("is-fail");
-      } else {
-        meta.textContent = "Saved output";
-      }
-      body.textContent = display;
+      body.textContent = derived.consoleBodyDefault;
     }
 
     function renderAll(opts = {}) {
@@ -621,6 +896,7 @@ export function createCodingStudioPlugin({
       renderHints();
       renderPyBanner();
       renderToolbarAndEditor(opts);
+      renderEditorHint();
       renderConsole();
     }
 
@@ -628,7 +904,7 @@ export function createCodingStudioPlugin({
 
     function finishRun(runRef, { ok, stdout, error, durationMs, timedOut = false }) {
       if (state.destroyed || activeRun !== runRef) return;
-      terminateActiveRun();
+      terminateActiveRun(timedOut ? "timeout" : ok ? "passed" : "failed");
 
       const cleanStdout = safeClipText(stdout || "", 3000);
       const cleanError = safeClipText(error || "", 1800);
@@ -641,6 +917,7 @@ export function createCodingStudioPlugin({
         timedOut,
       });
 
+      state.cancelledByLang[runRef.language] = null;
       state.resultsByLang[runRef.language] = {
         status: timedOut ? "timeout" : ok ? "passed" : "failed",
         durationMs: Number.isFinite(durationMs) ? Math.max(0, Math.round(durationMs)) : null,
@@ -657,7 +934,8 @@ export function createCodingStudioPlugin({
     }
 
     function launchIsolatedWorker(language, code, tests) {
-      terminateActiveRun();
+      terminateActiveRun("restart");
+      state.cancelledByLang[language] = null;
 
       const runId = shortRunId();
       const workerUrl =
@@ -671,6 +949,7 @@ export function createCodingStudioPlugin({
           worker: null,
           timer: null,
           booted: true,
+          phase: "running",
           language,
           codeSnap: code,
           testsSnap: tests,
@@ -690,11 +969,17 @@ export function createCodingStudioPlugin({
         worker,
         timer: null,
         booted: language === "javascript",
+        phase: language === "python" ? "starting" : "running",
         language,
         codeSnap: code,
         testsSnap: tests,
       };
       activeRun = runRef;
+      clientMachines?.beginOp?.("coding_test_run", { language, runId });
+      runnerMachine.transition(language === "python" ? "booting_pyodide" : "running", {
+        event: "launch_worker",
+        reason: language,
+      });
 
       function armTimer(ms, timeoutMsg) {
         if (runRef.timer) clearTimeout(runRef.timer);
@@ -726,10 +1011,22 @@ export function createCodingStudioPlugin({
         const msg = ev.data || {};
         if (msg.runId !== runId) return;
 
+        if (language === "python" && msg.type === "status") {
+          if (!runRef.booted && typeof msg.status === "string" && msg.status.trim()) {
+            runRef.phase = msg.status.trim();
+            renderStatusPill();
+            renderConsole();
+          }
+          return;
+        }
+
         if (language === "python" && msg.type === "ready") {
           // One-time transition from boot timeout to strict execution timeout
           if (runRef.booted) return;
           runRef.booted = true;
+          runRef.phase = "running";
+          runnerMachine.transition("running", { event: "pyodide_ready" });
+          renderStatusPill();
           renderConsole();
           armTimer(
             PY_RUN_TIMEOUT_MS,
@@ -769,9 +1066,21 @@ export function createCodingStudioPlugin({
         showToast("Switch to JavaScript or Python to execute unit tests.", 2400);
         return;
       }
-      if (state.language === "python" && !isPyodidePackInstalled(state.addons)) {
-        showToast("Install Offline Python (~14 MB) above to run Python tests locally.", 2800);
-        return;
+      if (state.language === "python") {
+        const pyFlags = getPyodidePackFlags();
+        if (pyFlags.installing || pyFlags.uninstalling) {
+          showToast(
+            pyFlags.uninstalling
+              ? "Offline Python runner is currently being removed."
+              : "Offline Python runner is still installing.",
+            2400
+          );
+          return;
+        }
+        if (!pyFlags.installed) {
+          showToast("Install Offline Python (~14 MB) above to run Python tests locally.", 2800);
+          return;
+        }
       }
       const code = state.codeByLang[state.language] || "";
       const tests = state.testsByLang[state.language] || "";
@@ -786,6 +1095,8 @@ export function createCodingStudioPlugin({
       if (!sharedPackOps.begin("pyodide_python", "installing")) return;
       state.installingPyodide = true;
       renderPyBanner();
+      renderStatusPill();
+      renderConsole();
       let refreshedFromResponse = false;
       try {
         const res = await fetch("/api/addons/pyodide_python/install", { method: "POST" });
@@ -836,6 +1147,9 @@ export function createCodingStudioPlugin({
 
     function resetStarterForActiveTab() {
       const curQ = getCurrentQuestion();
+      if (state.language === "javascript" || state.language === "python") {
+        state.cancelledByLang[state.language] = null;
+      }
       if (state.activeTab === "tests") {
         const curated = curQ?.tests?.[state.language];
         state.testsByLang[state.language] = safeClipText(
@@ -911,6 +1225,11 @@ export function createCodingStudioPlugin({
         return;
       }
 
+      if (ev.target.closest("[data-cs-cancel]")) {
+        cancelActiveRun();
+        return;
+      }
+
       if (ev.target.closest("[data-cs-install-pyodide]")) {
         installPyodideInline();
         return;
@@ -943,7 +1262,7 @@ export function createCodingStudioPlugin({
 
     function onInput(ev) {
       if (!ev.target.matches("[data-cs-editor]")) return;
-      state.tabEscaped = false;
+      setTabEscaped(false);
       setActiveEditorText(ev.target.value);
       syncGutter(ev.target.value);
       renderStatusPill();
@@ -959,7 +1278,7 @@ export function createCodingStudioPlugin({
 
     function onFocusOut(ev) {
       if (ev.target?.matches?.("[data-cs-editor]")) {
-        state.tabEscaped = false;
+        setTabEscaped(false);
       }
     }
 
@@ -969,14 +1288,24 @@ export function createCodingStudioPlugin({
 
       // WCAG 2.1.2 keyboard-trap escape: press Escape, then Tab/Shift+Tab navigates normally
       if (ev.key === "Escape") {
-        state.tabEscaped = true;
+        setTabEscaped(true);
+        return;
+      }
+
+      // Preserve armed escape across modifier keys so Esc then Shift+Tab works cleanly
+      if (
+        ev.key === "Shift" ||
+        ev.key === "Control" ||
+        ev.key === "Alt" ||
+        ev.key === "Meta"
+      ) {
         return;
       }
 
       // Cmd/Ctrl+Enter inside the editor runs the unit test suite
       if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") {
         ev.preventDefault();
-        state.tabEscaped = false;
+        setTabEscaped(false);
         runTests();
         return;
       }
@@ -987,7 +1316,7 @@ export function createCodingStudioPlugin({
       if (ev.key === "Tab") {
         if (state.tabEscaped) {
           // Let browser perform standard keyboard focus traversal out of the textarea
-          state.tabEscaped = false;
+          setTabEscaped(false);
           return;
         }
         ev.preventDefault();
@@ -1033,7 +1362,7 @@ export function createCodingStudioPlugin({
         return;
       }
 
-      state.tabEscaped = false;
+      setTabEscaped(false);
 
       if (ev.key === "Enter") {
         const start = ta.selectionStart;
@@ -1074,6 +1403,7 @@ export function createCodingStudioPlugin({
       if (state.destroyed || packId !== "pyodide_python") return;
       renderPyBanner();
       renderStatusPill();
+      renderConsole();
     });
 
     return {
@@ -1094,6 +1424,25 @@ export function createCodingStudioPlugin({
           },
         };
       },
+      getStateSnapshot() {
+        const derived = getDerivedRunnerState();
+        return {
+          studio: "coding",
+          language: state.language,
+          activeTab: state.activeTab,
+          runnerState: runnerMachine.state,
+          derivedStatus: derived.status,
+          activeRunLanguage: activeRun?.language || null,
+          activeRunPhase: activeRun?.phase || null,
+          tabEscaped: state.tabEscaped,
+          hintsOpen: state.hintsOpen,
+          revealedHints: state.revealedHints,
+          pyodideInstalled: isPyodidePackInstalled(state.addons),
+          canRun: derived.canRun,
+          canCancel: derived.canCancel,
+          allowedActions: derived.allowedActions,
+        };
+      },
       updateSession(nextSession) {
         state.session = nextSession;
         renderHints();
@@ -1103,7 +1452,7 @@ export function createCodingStudioPlugin({
         state.addons = nextAddons;
         const nowInstalled = isPyodidePackInstalled(nextAddons);
         if (wasInstalled && !nowInstalled && activeRun?.language === "python") {
-          terminateActiveRun();
+          terminateActiveRun("pyodide_uninstalled");
         }
         renderStatusPill();
         renderPyBanner();
@@ -1112,7 +1461,8 @@ export function createCodingStudioPlugin({
       destroy() {
         state.destroyed = true;
         unsubscribePackOps?.();
-        terminateActiveRun();
+        terminateActiveRun("destroy");
+        clientMachines?.unregister?.("codingStudio");
         containerEl.removeEventListener("click", onClick);
         containerEl.removeEventListener("input", onInput);
         containerEl.removeEventListener("keydown", onKeyDown);

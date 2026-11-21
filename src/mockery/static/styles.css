@@ -4592,6 +4592,16 @@ kbd {
   line-height: 1.35;
 }
 
+.cs-editor-hint.is-escaped {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.cs-cancel-btn {
+  color: var(--bad, #b42318);
+  border-color: color-mix(in srgb, var(--bad, #b42318) 38%, var(--line));
+}
+
 .cs-gutter {
   margin: 0;
   padding: 10px 8px 10px 4px;

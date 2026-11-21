@@ -7,6 +7,7 @@ import {
   createMachineRegistry,
   createModalTokenController,
   createPackOpTracker,
+  deriveAppAllowedActions,
   deriveAppRoute,
   formatApiDetail,
 } from "./state_machines.js";
@@ -136,6 +137,9 @@ let practiceStudio = null;
 const _mockeryStateDescriptor = {
   get() {
     const regSnap = clientMachines.snapshot();
+    const practiceSnap = practiceStudio?.getStateSnapshot?.() || null;
+    const serverMachines = state.session?.state_machines || null;
+    const serverAllowedEvents = serverMachines?.session?.allowed_events || [];
     return {
       wsState: state.wsState,
       captureState: state.captureState,
@@ -150,13 +154,21 @@ const _mockeryStateDescriptor = {
       addons: state.addons,
       profileSummary: state.profileSummary,
       practiceActive: state.practiceActive,
-      serverMachines: state.session?.state_machines || null,
+      serverMachines,
       route: state.route,
-      practice: practiceStudio?.getStateSnapshot?.() || null,
+      practice: practiceSnap,
       profileAddons: profileAddons?.getStateSnapshot?.() || null,
       activeOps: regSnap.activeOps,
       recentTransitions: regSnap.recentTransitions,
       clientMachines: regSnap.machines,
+      allowedActions: deriveAppAllowedActions({
+        route: state.route,
+        modalState: state.modalState,
+        captureState: state.captureState,
+        wsState: state.wsState,
+        serverAllowedEvents,
+        practice: practiceSnap,
+      }),
     };
   },
 };
