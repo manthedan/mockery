@@ -1,5 +1,6 @@
 import { createProfileAddonsController } from "./profile_addons.js";
 import { createPracticeStudioController } from "./practice_studio.js";
+import { createSystemDesignStudioPlugin } from "./design_studio.js";
 
 const CHANNEL_INTERVIEWER = 0x01;
 const CHANNEL_CANDIDATE = 0x02;
@@ -4009,6 +4010,10 @@ practiceStudio = createPracticeStudioController({
     renderWorkspaceMode();
   },
 });
+practiceStudio.registerStudioPlugin(
+  "system_design",
+  createSystemDesignStudioPlugin({ escapeHtml, showToast })
+);
 renderSpeakerToggle();
 renderCaptureControls();
 connectWS();
