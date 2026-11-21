@@ -17,7 +17,7 @@
         document.documentElement.setAttribute("data-theme", resolved);
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=iter8" />
+    <link rel="stylesheet" href="/static/styles.css?v=iter9" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -151,15 +151,21 @@
         <section class="home-main">
           <div class="home-form">
             <label class="home-kicker" for="setupRoleInput">New interview</label>
-            <input
-              id="setupRoleInput"
-              class="home-role"
-              type="text"
-              value="Senior Software Engineer"
-              placeholder="Role and level"
-              spellcheck="false"
-              autocomplete="off"
-            />
+            <div class="home-role-wrap">
+              <input
+                id="setupRoleInput"
+                class="home-role"
+                type="text"
+                value="Senior Software Engineer"
+                placeholder="Role and level"
+                title="Click to edit the role"
+                spellcheck="false"
+                autocomplete="off"
+              />
+              <svg class="home-role-cue" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M10.6 3.2l2.2 2.2M3.25 12.75l.5-2.6 7.1-7.1a1.1 1.1 0 011.55 0l.55.55a1.1 1.1 0 010 1.55l-7.1 7.1-2.6.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </div>
 
             <div class="props">
               <div class="prop">
@@ -180,7 +186,7 @@
                     <button type="button" class="seg-opt" data-setup-mode="in_person">One microphone</button>
                   </div>
                   <p id="setupModeDesc" class="prop-note">
-                    Your mic and the Meet tab are recorded separately. Wear headphones.
+                    Your mic and the Meet tab are captured separately. Wear headphones.
                   </p>
                 </div>
               </div>
@@ -214,10 +220,7 @@
           </div>
 
           <footer class="home-foot">
-            <span class="home-foot-note">
-              Speech is transcribed on this Mac.
-              <span id="asrBadge" class="asr-status hidden"><span id="asrBadgeText"></span></span>
-            </span>
+            <span id="asrBadge" class="asr-status hidden"><span id="asrBadgeText"></span></span>
             <button id="setupSimulateBtn" class="link-quiet" type="button" title="Open the workspace and type turns by hand">
               Try it without audio
             </button>
@@ -367,10 +370,10 @@
           <div id="calibrationView" class="copilot-body hidden">
             <section id="verdictCompareCard" class="verdict hidden">
               <h2 id="verdictHeadline" class="verdict-headline"></h2>
-              <p class="verdict-sub">
-                <span id="verdictSub"></span>
+              <div class="verdict-sub">
+                <p id="verdictSub" class="verdict-sub-text"></p>
                 <button id="editSelfRatingBtn" class="link-quiet" type="button">Change my call</button>
-              </p>
+              </div>
               <div id="phaseSignalsStrip" class="phase-table"></div>
             </section>
 
@@ -479,23 +482,25 @@
               <div class="set-row">
                 <label class="set-label" for="llmFastModelInput">Follow-ups</label>
                 <span class="set-value">
-                  <span class="quick-chips seg" data-target-input="llmFastModelInput">
+                  <span class="quick-chips seg" role="group" aria-label="Follow-ups model" data-target-input="llmFastModelInput">
                     <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-hydrogen:low">Hydrogen · low</button>
                     <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-neon:low">Neon · low</button>
+                    <button type="button" class="seg-opt quick-chip" data-chip-custom="true" title="Type any model ID">Custom</button>
                   </span>
-                  <input id="llmFastModelInput" class="field-input field-input-mono" type="text" aria-label="Follow-ups model ID" spellcheck="false" />
+                  <input id="llmFastModelInput" class="field-input field-input-mono" type="text" placeholder="Model ID" aria-label="Follow-ups model ID" spellcheck="false" autocomplete="off" />
                 </span>
               </div>
 
               <div class="set-row">
                 <label class="set-label" for="llmCalibModelInput">Calibration</label>
                 <span class="set-value">
-                  <span class="quick-chips seg" data-target-input="llmCalibModelInput">
+                  <span class="quick-chips seg" role="group" aria-label="Calibration model" data-target-input="llmCalibModelInput">
                     <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-hydrogen:high">Hydrogen · high</button>
                     <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-neon:medium">Neon · medium</button>
                     <button type="button" class="seg-opt quick-chip" data-chip-val="claude-opus-5-5:high">Opus 5.5 · high</button>
+                    <button type="button" class="seg-opt quick-chip" data-chip-custom="true" title="Type any model ID">Custom</button>
                   </span>
-                  <input id="llmCalibModelInput" class="field-input field-input-mono" type="text" aria-label="Calibration model ID" spellcheck="false" />
+                  <input id="llmCalibModelInput" class="field-input field-input-mono" type="text" placeholder="Model ID" aria-label="Calibration model ID" spellcheck="false" autocomplete="off" />
                 </span>
               </div>
             </div>
@@ -527,6 +532,6 @@
       </div>
     </div>
 
-    <script type="module" src="/static/app.js?v=iter8"></script>
+    <script type="module" src="/static/app.js?v=iter9"></script>
   </body>
 </html>
