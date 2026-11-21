@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import io
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import wave
+from collections import OrderedDict
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -98,34 +102,133 @@ PHONON_PREFERRED_VOICES: tuple[str, ...] = (
 )
 
 MAX_TTS_CHARS = 1600
+MAX_TTS_CACHE_ENTRIES = 32
+MAX_TTS_CACHE_BYTES = 16 * 1024 * 1024
+KOKORO_INTER_SENTENCE_SILENCE_MS = 140
 
 # Curated crisp macOS local voices (fallback when no neural voice pack is installed)
 MACOS_PREFERRED_VOICES = ("Samantha", "Daniel", "Karen", "Moira", "Tessa", "Alex")
 
+_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_ITALIC_RE = re.compile(r"\*([^*]+)\*")
+_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_HEADING_RE = re.compile(r"^\s*#+\s*", flags=re.MULTILINE)
+_MULTI_WS_RE = re.compile(r"\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_SPLIT_RE = re.compile(r"(?<=[,;:])\s+")
+_KOKORO_VOICE_ID_RE = re.compile(r"[ab][fm]_[a-z]{2,16}")
+_PHONON_VOICE_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{1,31}")
+
+
+@functools.lru_cache(maxsize=1)
+def optimal_ort_threads() -> int:
+    """
+    Pick the optimal ONNX Runtime CPU intra-op thread count.
+    Empirically on Apple Silicon (e.g. M4 4P+6E), using all logical cores causes ~35% slowdown
+    from barrier contention, while `min(8, max(p_cores, min(6, total - 2)))` hits the throughput peak
+    for both Kokoro-82M and Rampart Q4 ONNX.
+    """
+    total = os.cpu_count() or 4
+    if sys.platform == "darwin":
+        try:
+            proc = subprocess.run(
+                ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            p_cores = int((proc.stdout or "").strip())
+            if 1 <= p_cores <= 16:
+                return max(1, min(8, max(p_cores, min(6, max(1, total - 2)))))
+        except Exception:
+            pass
+    return max(1, min(6, total))
+
 
 def _clean_text_for_speech(text: str) -> str:
     """Strip markdown formatting and clamp length so spoken questions sound natural."""
-    cleaned = re.sub(r"```[\s\S]*?```", " ", text or "")
-    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
-    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
-    cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
-    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
-    cleaned = re.sub(r"^\s*#+\s*", "", cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = _CODE_BLOCK_RE.sub(" ", text or "")
+    cleaned = _INLINE_CODE_RE.sub(r"\1", cleaned)
+    cleaned = _BOLD_RE.sub(r"\1", cleaned)
+    cleaned = _ITALIC_RE.sub(r"\1", cleaned)
+    cleaned = _LINK_RE.sub(r"\1", cleaned)
+    cleaned = _HEADING_RE.sub("", cleaned)
+    cleaned = _MULTI_WS_RE.sub(" ", cleaned).strip()
     return cleaned[:MAX_TTS_CHARS]
 
 
-def _float32_to_wav_bytes(samples: np.ndarray, sample_rate: int = 24000) -> bytes:
+def _split_speech_sentences(text: str, *, min_chunk_chars: int = 24, max_chunk_chars: int = 220) -> list[str]:
+    """
+    Split cleaned speech into natural sentence chunks for low Time-To-First-Audio streaming.
+    Merges short opening fragments (< min_chunk_chars) with the following sentence to preserve
+    natural prosody, and splits unusually long single sentences at clause boundaries.
+    """
+    clean = (text or "").strip()
+    if not clean:
+        return []
+    raw_parts = [p.strip() for p in _SENTENCE_SPLIT_RE.split(clean) if p.strip()]
+    if not raw_parts:
+        return [clean]
+
+    expanded: list[str] = []
+    for part in raw_parts:
+        if len(part) <= max_chunk_chars:
+            expanded.append(part)
+            continue
+        clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(part) if c.strip()]
+        buf = ""
+        for cl in clauses:
+            cand = f"{buf} {cl}".strip() if buf else cl
+            if buf and len(cand) > max_chunk_chars:
+                expanded.append(buf)
+                buf = cl
+            else:
+                buf = cand
+        if buf:
+            expanded.append(buf)
+
+    merged: list[str] = []
+    pending = ""
+    for chunk in expanded:
+        if pending:
+            chunk = f"{pending} {chunk}".strip()
+            pending = ""
+        if len(chunk) < min_chunk_chars:
+            pending = chunk
+        else:
+            merged.append(chunk)
+    if pending:
+        if merged:
+            merged[-1] = f"{merged[-1]} {pending}".strip()
+        else:
+            merged.append(pending)
+    return merged
+
+
+def _float32_to_pcm16_bytes(samples: np.ndarray) -> bytes:
     arr = np.asarray(samples, dtype=np.float32).reshape(-1)
-    arr = np.clip(arr, -1.0, 1.0)
-    pcm16 = (arr * 32767.0).astype(np.int16)
+    if arr.size == 0:
+        return b""
+    np.clip(arr, -1.0, 1.0, out=arr) if arr.flags.writeable else None
+    clipped = arr if arr.flags.writeable else np.clip(arr, -1.0, 1.0)
+    return (clipped * 32767.0).astype("<i2").tobytes()
+
+
+def _pcm16_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes(pcm16.tobytes())
+        wf.writeframes(pcm_bytes)
     return buf.getvalue()
+
+
+def _float32_to_wav_bytes(samples: np.ndarray, sample_rate: int = 24000) -> bytes:
+    return _pcm16_to_wav_bytes(_float32_to_pcm16_bytes(samples), sample_rate=sample_rate)
 
 
 def _sha256_file(path: Path) -> str:
@@ -202,6 +305,41 @@ class LocalTTSEngine:
         self._phonon_error: str | None = None
         self._phonon_lock = threading.Lock()
         self._cached_macos_voices: list[str] | None = None
+        self._cache_lock = threading.Lock()
+        self._pcm_cache: OrderedDict[tuple[str, str, int, str], tuple[bytes, int]] = OrderedDict()
+        self._pcm_cache_bytes: int = 0
+
+    def _cache_get(self, key: tuple[str, str, int, str]) -> tuple[bytes, int] | None:
+        with self._cache_lock:
+            hit = self._pcm_cache.get(key)
+            if hit is not None:
+                self._pcm_cache.move_to_end(key)
+            return hit
+
+    def _cache_put(self, key: tuple[str, str, int, str], pcm_bytes: bytes, sample_rate: int) -> None:
+        size = len(pcm_bytes)
+        if size == 0 or size > MAX_TTS_CACHE_BYTES // 2:
+            return
+        with self._cache_lock:
+            old = self._pcm_cache.pop(key, None)
+            if old is not None:
+                self._pcm_cache_bytes -= len(old[0])
+            self._pcm_cache[key] = (pcm_bytes, sample_rate)
+            self._pcm_cache_bytes += size
+            while (
+                len(self._pcm_cache) > MAX_TTS_CACHE_ENTRIES
+                or self._pcm_cache_bytes > MAX_TTS_CACHE_BYTES
+            ):
+                _, (evicted, _) = self._pcm_cache.popitem(last=False)
+                self._pcm_cache_bytes -= len(evicted)
+
+    def _cache_clear_engine(self, engine_name: str) -> None:
+        with self._cache_lock:
+            drop_keys = [k for k in self._pcm_cache if k[0] == engine_name]
+            for k in drop_keys:
+                old = self._pcm_cache.pop(k, None)
+                if old is not None:
+                    self._pcm_cache_bytes -= len(old[0])
 
     def _has_kokoro_runtime(self) -> bool:
         try:
@@ -265,6 +403,7 @@ class LocalTTSEngine:
         return True
 
     def uninstall_kokoro(self) -> bool:
+        self._cache_clear_engine("kokoro")
         with self._kokoro_lock:
             self._kokoro = None
             self._kokoro_error = None
@@ -291,6 +430,7 @@ class LocalTTSEngine:
         return True
 
     def uninstall_phonon(self) -> bool:
+        self._cache_clear_engine("phonon")
         with self._phonon_lock:
             self._phonon = None
             self._phonon_error = None
@@ -312,7 +452,26 @@ class LocalTTSEngine:
                 from kokoro_onnx import Kokoro
 
                 ort.set_default_logger_severity(3)
-                self._kokoro = Kokoro(str(model_path), str(voices_path))
+                if hasattr(Kokoro, "from_session"):
+                    opts = ort.SessionOptions()
+                    opts.intra_op_num_threads = optimal_ort_threads()
+                    opts.inter_op_num_threads = 1
+                    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    # Explicitly stay on CPUExecutionProvider (CoreML segfaults on Kokoro FP16 ONNX)
+                    sess = ort.InferenceSession(
+                        str(model_path),
+                        sess_options=opts,
+                        providers=["CPUExecutionProvider"],
+                    )
+                    kokoro = Kokoro.from_session(sess, str(voices_path))
+                else:
+                    kokoro = Kokoro(str(model_path), str(voices_path))
+                # Pre-warm the espeak phonemizer once so the ~580ms init never stalls an interactive turn
+                try:
+                    kokoro.tokenizer.phonemize("Ready.", lang="en-us")
+                except Exception:
+                    pass
+                self._kokoro = kokoro
                 self._kokoro_error = None
                 return True
             except Exception as exc:
@@ -340,6 +499,17 @@ class LocalTTSEngine:
                 self._phonon_error = str(exc)
                 logger.warning("Failed to initialize Phonon-31M TTS: %s", exc)
                 return False
+
+    def warm_up_installed(self) -> list[str]:
+        """Pre-load installed local neural TTS models off the event loop to eliminate cold-start stalls."""
+        warmed: list[str] = []
+        if self.is_phonon_installed() and self._has_phonon_runtime():
+            if self._ensure_phonon_loaded():
+                warmed.append("phonon")
+        if self.is_kokoro_installed() and self._has_kokoro_runtime():
+            if self._ensure_kokoro_loaded():
+                warmed.append("kokoro")
+        return warmed
 
     def list_macos_voices(self) -> list[str]:
         if sys.platform != "darwin" or not shutil.which("say"):
@@ -445,23 +615,74 @@ class LocalTTSEngine:
             "error": self._kokoro_error or self._phonon_error,
         }
 
-    async def _try_kokoro(self, speech: str, *, voice: str | None, clamped_rate: float) -> bytes | None:
-        if not (self.is_kokoro_installed() and self._has_kokoro_runtime() and not self._kokoro_error):
-            return None
-        if not await asyncio.to_thread(self._ensure_kokoro_loaded):
-            return None
+    @staticmethod
+    def _resolve_kokoro_voice(voice: str | None) -> tuple[str, str]:
         kokoro_voice = (
             voice
             if voice and voice in KOKORO_PREFERRED_VOICES
             else (
                 voice
-                if voice and re.fullmatch(r"[ab][fm]_[a-z]{2,16}", voice)
+                if voice and _KOKORO_VOICE_ID_RE.fullmatch(voice)
                 else KOKORO_PREFERRED_VOICES[0]
             )
         )
         lang = "en-gb" if kokoro_voice.startswith(("bf_", "bm_")) else "en-us"
+        return kokoro_voice, lang
 
-        def _run_kokoro() -> bytes:
+    @staticmethod
+    def _resolve_phonon_voice(voice: str | None) -> str:
+        is_kokoro_id = bool(voice and _KOKORO_VOICE_ID_RE.fullmatch(voice))
+        return (
+            voice
+            if voice
+            and not is_kokoro_id
+            and (voice in PHONON_PREFERRED_VOICES or _PHONON_VOICE_ID_RE.fullmatch(voice))
+            else PHONON_PREFERRED_VOICES[0]
+        )
+
+    @staticmethod
+    def _parse_request(
+        text: str,
+        *,
+        voice: str | None,
+        rate: float,
+        engine: str | None,
+    ) -> tuple[str, float, str | None, tuple[str, str]]:
+        speech = _clean_text_for_speech(text)
+        if not speech:
+            raise ValueError("Cannot synthesize empty text.")
+        clamped_rate = max(0.75, min(1.35, float(rate or 1.0)))
+
+        requested_engine = (engine or "").strip().lower()
+        clean_voice = (voice or "").strip() or None
+        if clean_voice and ":" in clean_voice:
+            prefix, rest = clean_voice.split(":", 1)
+            if prefix.lower() in ("kokoro", "phonon") and rest.strip():
+                if not requested_engine:
+                    requested_engine = prefix.lower()
+                clean_voice = rest.strip()
+
+        if not requested_engine and clean_voice:
+            if clean_voice in PHONON_PREFERRED_VOICES:
+                requested_engine = "phonon"
+            elif clean_voice in KOKORO_PREFERRED_VOICES or _KOKORO_VOICE_ID_RE.fullmatch(clean_voice):
+                requested_engine = "kokoro"
+
+        order = ("phonon", "kokoro") if requested_engine == "phonon" else ("kokoro", "phonon")
+        return speech, clamped_rate, clean_voice, order
+
+    async def _try_kokoro(self, speech: str, *, voice: str | None, clamped_rate: float) -> bytes | None:
+        if not (self.is_kokoro_installed() and self._has_kokoro_runtime() and not self._kokoro_error):
+            return None
+        if not await asyncio.to_thread(self._ensure_kokoro_loaded):
+            return None
+        kokoro_voice, lang = self._resolve_kokoro_voice(voice)
+        cache_key = ("kokoro", kokoro_voice, int(round(clamped_rate * 100)), speech)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return _pcm16_to_wav_bytes(cached[0], sample_rate=cached[1])
+
+        def _run_kokoro() -> tuple[bytes, int]:
             with self._kokoro_lock:
                 if self._kokoro is None:
                     raise RuntimeError("Kokoro-82M engine was unloaded.")
@@ -471,10 +692,12 @@ class LocalTTSEngine:
                     speed=clamped_rate,
                     lang=lang,
                 )
-            return _float32_to_wav_bytes(samples, sample_rate=int(sr))
+            return _float32_to_pcm16_bytes(samples), int(sr)
 
         try:
-            return await asyncio.to_thread(_run_kokoro)
+            pcm_bytes, sr = await asyncio.to_thread(_run_kokoro)
+            self._cache_put(cache_key, pcm_bytes, sr)
+            return _pcm16_to_wav_bytes(pcm_bytes, sample_rate=sr)
         except Exception as exc:
             with self._kokoro_lock:
                 self._kokoro_error = str(exc)
@@ -487,16 +710,13 @@ class LocalTTSEngine:
             return None
         if not await asyncio.to_thread(self._ensure_phonon_loaded):
             return None
-        is_kokoro_id = bool(voice and re.fullmatch(r"[ab][fm]_[a-z]{2,16}", voice))
-        phonon_voice = (
-            voice
-            if voice
-            and not is_kokoro_id
-            and (voice in PHONON_PREFERRED_VOICES or re.fullmatch(r"[A-Za-z][A-Za-z0-9_\-]{1,31}", voice))
-            else PHONON_PREFERRED_VOICES[0]
-        )
+        phonon_voice = self._resolve_phonon_voice(voice)
+        cache_key = ("phonon", phonon_voice, 100, speech)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return _pcm16_to_wav_bytes(cached[0], sample_rate=cached[1])
 
-        def _run_phonon() -> bytes:
+        def _run_phonon() -> tuple[bytes, int]:
             with self._phonon_lock:
                 if self._phonon is None:
                     raise RuntimeError("Phonon-31M engine was unloaded.")
@@ -513,10 +733,12 @@ class LocalTTSEngine:
                         voice_exc,
                     )
                     samples = self._phonon.synth(speech, voice="default")
-            return _float32_to_wav_bytes(samples, sample_rate=sr)
+            return _float32_to_pcm16_bytes(samples), sr
 
         try:
-            return await asyncio.to_thread(_run_phonon)
+            pcm_bytes, sr = await asyncio.to_thread(_run_phonon)
+            self._cache_put(cache_key, pcm_bytes, sr)
+            return _pcm16_to_wav_bytes(pcm_bytes, sample_rate=sr)
         except Exception as exc:
             with self._phonon_lock:
                 self._phonon_error = str(exc)
@@ -524,48 +746,249 @@ class LocalTTSEngine:
             logger.warning("Phonon-31M synthesis failed; falling back to next voice engine: %s", exc)
             return None
 
-    async def synthesize_wav(
+    async def _try_kokoro_stream(
+        self,
+        speech: str,
+        *,
+        voice: str | None,
+        clamped_rate: float,
+    ) -> tuple[int, AsyncIterator[bytes]] | None:
+        if not (self.is_kokoro_installed() and self._has_kokoro_runtime() and not self._kokoro_error):
+            return None
+        if not await asyncio.to_thread(self._ensure_kokoro_loaded):
+            return None
+        kokoro_voice, lang = self._resolve_kokoro_voice(voice)
+        cache_key = ("kokoro", kokoro_voice, int(round(clamped_rate * 100)), speech)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            pcm_bytes, sr = cached
+
+            async def _cached_gen() -> AsyncIterator[bytes]:
+                yield pcm_bytes
+
+            return sr, _cached_gen()
+
+        sentences = _split_speech_sentences(speech) or [speech]
+
+        def _synth_one(sent: str) -> tuple[bytes, int]:
+            with self._kokoro_lock:
+                if self._kokoro is None:
+                    raise RuntimeError("Kokoro-82M engine was unloaded.")
+                samples, sr = self._kokoro.create(
+                    sent,
+                    voice=kokoro_voice,
+                    speed=clamped_rate,
+                    lang=lang,
+                )
+            return _float32_to_pcm16_bytes(samples), int(sr)
+
+        # Synthesize first sentence eagerly so errors fall back before HTTP headers are sent
+        try:
+            first_pcm, sr = await asyncio.to_thread(_synth_one, sentences[0])
+        except Exception as exc:
+            with self._kokoro_lock:
+                self._kokoro_error = str(exc)
+                self._kokoro = None
+            logger.warning("Kokoro-82M stream failed on first sentence; falling back: %s", exc)
+            return None
+
+        silence_gap = b"\x00\x00" * int(sr * KOKORO_INTER_SENTENCE_SILENCE_MS / 1000)
+
+        async def _sentence_gen() -> AsyncIterator[bytes]:
+            collected: list[bytes] = [first_pcm]
+            yield first_pcm
+            completed = True
+            try:
+                for sent in sentences[1:]:
+                    chunk_pcm, _ = await asyncio.to_thread(_synth_one, sent)
+                    if not chunk_pcm:
+                        continue
+                    if silence_gap:
+                        collected.append(silence_gap)
+                        yield silence_gap
+                    collected.append(chunk_pcm)
+                    yield chunk_pcm
+            except asyncio.CancelledError:
+                completed = False
+                raise
+            except Exception as exc:
+                completed = False
+                logger.warning("Kokoro-82M stream aborted mid-utterance: %s", exc)
+            if completed:
+                self._cache_put(cache_key, b"".join(collected), sr)
+
+        return sr, _sentence_gen()
+
+    async def _try_phonon_stream(
+        self,
+        speech: str,
+        *,
+        voice: str | None,
+    ) -> tuple[int, AsyncIterator[bytes]] | None:
+        if not (self.is_phonon_installed() and self._has_phonon_runtime() and not self._phonon_error):
+            return None
+        if not await asyncio.to_thread(self._ensure_phonon_loaded):
+            return None
+        phonon_voice = self._resolve_phonon_voice(voice)
+        cache_key = ("phonon", phonon_voice, 100, speech)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            pcm_bytes, sr = cached
+
+            async def _cached_gen() -> AsyncIterator[bytes]:
+                yield pcm_bytes
+
+            return sr, _cached_gen()
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=6)
+        stop_event = threading.Event()
+        sr = int(getattr(self._phonon, "sample_rate", 24000))
+
+        def _put_sync(item: tuple[str, Any]) -> bool:
+            if stop_event.is_set():
+                return False
+            fut = asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+            while not stop_event.is_set():
+                try:
+                    fut.result(timeout=0.05)
+                    return True
+                except TimeoutError:
+                    continue
+                except Exception:
+                    return False
+            fut.cancel()
+            return False
+
+        def _producer() -> None:
+            try:
+                with self._phonon_lock:
+                    if self._phonon is None:
+                        raise RuntimeError("Phonon-31M engine was unloaded.")
+                    has_stream = hasattr(self._phonon, "stream") and callable(self._phonon.stream)
+                    voice_to_use = phonon_voice
+
+                    def _iter_voice(vname: str):
+                        if has_stream:
+                            for arr in self._phonon.stream(speech, voice=vname):
+                                yield arr
+                        else:
+                            yield self._phonon.synth(speech, voice=vname)
+
+                    yielded_any = False
+                    try:
+                        for arr in _iter_voice(voice_to_use):
+                            if stop_event.is_set():
+                                break
+                            pcm = _float32_to_pcm16_bytes(arr)
+                            if pcm:
+                                yielded_any = True
+                                if not _put_sync(("chunk", pcm)):
+                                    break
+                    except Exception as voice_exc:
+                        if yielded_any or voice_to_use == "default" or stop_event.is_set():
+                            raise
+                        logger.info(
+                            "Phonon stream voice %r unavailable (%s); falling back to bundled 'default' voice.",
+                            voice_to_use,
+                            voice_exc,
+                        )
+                        for arr in _iter_voice("default"):
+                            if stop_event.is_set():
+                                break
+                            pcm = _float32_to_pcm16_bytes(arr)
+                            if pcm:
+                                if not _put_sync(("chunk", pcm)):
+                                    break
+                _put_sync(("done", None))
+            except Exception as exc:
+                _put_sync(("error", exc))
+
+        worker = threading.Thread(target=_producer, name="phonon-tts-stream", daemon=True)
+        worker.start()
+
+        # Pull the very first chunk eagerly (~29ms) so startup errors fall back cleanly before headers are sent
+        kind, payload = await queue.get()
+        if kind == "error":
+            stop_event.set()
+            with self._phonon_lock:
+                self._phonon_error = str(payload)
+                self._phonon = None
+            logger.warning("Phonon-31M stream failed on first chunk; falling back: %s", payload)
+            return None
+        if kind == "done":
+            return None
+
+        first_chunk: bytes = payload
+
+        async def _phonon_gen() -> AsyncIterator[bytes]:
+            collected: list[bytes] = [first_chunk]
+            completed = False
+            try:
+                yield first_chunk
+                while True:
+                    k, val = await queue.get()
+                    if k == "chunk":
+                        collected.append(val)
+                        yield val
+                    elif k == "done":
+                        completed = True
+                        break
+                    else:
+                        logger.warning("Phonon-31M stream errored mid-utterance: %s", val)
+                        break
+            finally:
+                stop_event.set()
+            if completed:
+                self._cache_put(cache_key, b"".join(collected), sr)
+
+        return sr, _phonon_gen()
+
+    async def open_pcm_stream(
         self,
         text: str,
         *,
         voice: str | None = None,
         rate: float = 1.0,
         engine: str | None = None,
-    ) -> tuple[bytes, str]:
-        """Synthesize natural local speech to WAV bytes. Returns `(wav_bytes, engine_used)`."""
-        speech = _clean_text_for_speech(text)
-        if not speech:
-            raise ValueError("Cannot synthesize empty text.")
-        clamped_rate = max(0.75, min(1.35, float(rate or 1.0)))
-
-        requested_engine = (engine or "").strip().lower()
-        clean_voice = (voice or "").strip() or None
-        if clean_voice and ":" in clean_voice:
-            prefix, rest = clean_voice.split(":", 1)
-            if prefix.lower() in ("kokoro", "phonon") and rest.strip():
-                if not requested_engine:
-                    requested_engine = prefix.lower()
-                clean_voice = rest.strip()
-
-        # Infer engine from voice name when caller passes a specific voice without explicit engine
-        if not requested_engine and clean_voice:
-            if clean_voice in PHONON_PREFERRED_VOICES:
-                requested_engine = "phonon"
-            elif clean_voice in KOKORO_PREFERRED_VOICES or re.fullmatch(r"[ab][fm]_[a-z]{2,16}", clean_voice):
-                requested_engine = "kokoro"
-
-        order = ("phonon", "kokoro") if requested_engine == "phonon" else ("kokoro", "phonon")
+    ) -> tuple[str, int, AsyncIterator[bytes]]:
+        """
+        Open a low-TTFA streaming PCM16 (mono little-endian int16) synthesis stream.
+        Returns `(engine_used, sample_rate, async_chunk_iterator)`.
+        """
+        speech, clamped_rate, clean_voice, order = self._parse_request(
+            text, voice=voice, rate=rate, engine=engine
+        )
         for eng_name in order:
-            if eng_name == "kokoro":
-                wav = await self._try_kokoro(speech, voice=clean_voice, clamped_rate=clamped_rate)
-                if wav is not None:
-                    return wav, "kokoro"
-            elif eng_name == "phonon":
-                wav = await self._try_phonon(speech, voice=clean_voice)
-                if wav is not None:
-                    return wav, "phonon"
+            if eng_name == "phonon":
+                res = await self._try_phonon_stream(speech, voice=clean_voice)
+                if res is not None:
+                    sr, gen = res
+                    return "phonon", sr, gen
+            elif eng_name == "kokoro":
+                res = await self._try_kokoro_stream(speech, voice=clean_voice, clamped_rate=clamped_rate)
+                if res is not None:
+                    sr, gen = res
+                    return "kokoro", sr, gen
 
-        # 2. Zero-download macOS native `say` + `afconvert`
+        # Fallback: macOS native `say` WAV -> strip header and yield raw PCM16 frames
+        wav_bytes, used = await self._synthesize_macos_wav(speech, voice=voice, clamped_rate=clamped_rate)
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            sr = wf.getframerate()
+            pcm = wf.readframes(wf.getnframes())
+
+        async def _single_gen() -> AsyncIterator[bytes]:
+            yield pcm
+
+        return used, sr, _single_gen()
+
+    async def _synthesize_macos_wav(
+        self,
+        speech: str,
+        *,
+        voice: str | None,
+        clamped_rate: float,
+    ) -> tuple[bytes, str]:
         if sys.platform == "darwin" and shutil.which("say") and shutil.which("afconvert"):
             macos_voices = await asyncio.to_thread(self.list_macos_voices)
             allowed_voices = set(macos_voices)
@@ -617,3 +1040,27 @@ class LocalTTSEngine:
                 return Path(wav_path).read_bytes(), "macos_say"
 
         raise RuntimeError("No server-side local TTS backend available on this platform; use browser speech synthesis.")
+
+    async def synthesize_wav(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        rate: float = 1.0,
+        engine: str | None = None,
+    ) -> tuple[bytes, str]:
+        """Synthesize natural local speech to WAV bytes. Returns `(wav_bytes, engine_used)`."""
+        speech, clamped_rate, clean_voice, order = self._parse_request(
+            text, voice=voice, rate=rate, engine=engine
+        )
+        for eng_name in order:
+            if eng_name == "kokoro":
+                wav = await self._try_kokoro(speech, voice=clean_voice, clamped_rate=clamped_rate)
+                if wav is not None:
+                    return wav, "kokoro"
+            elif eng_name == "phonon":
+                wav = await self._try_phonon(speech, voice=clean_voice)
+                if wav is not None:
+                    return wav, "phonon"
+
+        return await self._synthesize_macos_wav(speech, voice=voice, clamped_rate=clamped_rate)

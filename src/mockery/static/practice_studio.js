@@ -147,13 +147,16 @@ export function createPracticeStudioController({
     ttsStatus: null,
     busy: false,
 
-    // Voice playback state (with generation token + AbortController)
+    // Voice playback state (with generation token + AbortController + Web Audio streaming)
     voiceEnabled: true,
     selectedVoice: savedVoice,
     isSpeaking: false,
     speakingPreviewEngine: null, // null | "picker" | "phonon" | "kokoro"
     speakGen: 0,
     ttsAbort: null,
+    ttsAudioCtx: null,
+    activeStreamSources: [],
+    streamDoneTimer: null,
     activeAudio: null,
     activeAudioUrl: null,
 
@@ -587,8 +590,32 @@ export function createPracticeStudioController({
     }
   }
 
+  async function getTtsAudioContext() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!local.ttsAudioCtx || local.ttsAudioCtx.state === "closed") {
+      try {
+        local.ttsAudioCtx = new AudioCtx();
+      } catch {
+        return null;
+      }
+    }
+    if (local.ttsAudioCtx.state === "suspended") {
+      try {
+        await local.ttsAudioCtx.resume();
+      } catch {
+        /* autoplay policy may block until user gesture; caller can fall back */
+      }
+    }
+    return local.ttsAudioCtx;
+  }
+
   function stopSpeaking() {
     local.speakGen += 1;
+    if (local.streamDoneTimer) {
+      window.clearTimeout(local.streamDoneTimer);
+      local.streamDoneTimer = null;
+    }
     if (local.ttsAbort) {
       try {
         local.ttsAbort.abort();
@@ -596,6 +623,18 @@ export function createPracticeStudioController({
         /* ignore */
       }
       local.ttsAbort = null;
+    }
+    if (local.activeStreamSources.length > 0) {
+      const nodes = local.activeStreamSources.splice(0, local.activeStreamSources.length);
+      for (const src of nodes) {
+        try {
+          src.onended = null;
+          src.stop();
+          src.disconnect();
+        } catch {
+          /* ignore */
+        }
+      }
     }
     if (local.activeAudio) {
       try {
@@ -624,6 +663,120 @@ export function createPracticeStudioController({
     setSpeakingUI(false, null);
   }
 
+  async function tryStreamSpeak(payload, myGen, ctrl) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx || typeof ReadableStream === "undefined") return false;
+
+    const res = await fetch("/api/tts/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctrl?.signal,
+    });
+    if (myGen !== local.speakGen) {
+      try {
+        res.body?.cancel();
+      } catch {
+        /* ignore */
+      }
+      return true;
+    }
+    if (!res.ok || !res.body) return false;
+
+    const sampleRate = parseInt(res.headers.get("X-TTS-Sample-Rate") || "24000", 10) || 24000;
+    const ctx = await getTtsAudioContext();
+    if (!ctx || myGen !== local.speakGen) {
+      try {
+        res.body.cancel();
+      } catch {
+        /* ignore */
+      }
+      return myGen !== local.speakGen;
+    }
+
+    const reader = res.body.getReader();
+    let carryByte = null;
+    let nextStartTime = 0;
+    let scheduledCount = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (myGen !== local.speakGen) {
+          reader.cancel().catch(() => {});
+          return true;
+        }
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+
+        let chunk = value;
+        if (carryByte !== null) {
+          const merged = new Uint8Array(1 + value.byteLength);
+          merged[0] = carryByte;
+          merged.set(value, 1);
+          chunk = merged;
+          carryByte = null;
+        }
+        if ((chunk.byteLength & 1) === 1) {
+          carryByte = chunk[chunk.byteLength - 1];
+          chunk = chunk.subarray(0, chunk.byteLength - 1);
+        }
+        const numSamples = chunk.byteLength >> 1;
+        if (numSamples === 0) continue;
+
+        const floats = new Float32Array(numSamples);
+        const dv = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        for (let i = 0; i < numSamples; i++) {
+          floats[i] = dv.getInt16(i * 2, true) / 32768.0;
+        }
+
+        const audioBuf = ctx.createBuffer(1, numSamples, sampleRate);
+        audioBuf.copyToChannel(floats, 0);
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(ctx.destination);
+
+        if (ctx.state === "suspended") {
+          try {
+            await ctx.resume();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (myGen !== local.speakGen) {
+          reader.cancel().catch(() => {});
+          return true;
+        }
+
+        const startAt = Math.max(ctx.currentTime + 0.015, nextStartTime);
+        nextStartTime = startAt + audioBuf.duration;
+        local.activeStreamSources.push(src);
+        src.onended = () => {
+          const idx = local.activeStreamSources.indexOf(src);
+          if (idx >= 0) local.activeStreamSources.splice(idx, 1);
+          try {
+            src.disconnect();
+          } catch {
+            /* ignore */
+          }
+        };
+        src.start(startAt);
+        scheduledCount += 1;
+      }
+    } finally {
+      if (local.ttsAbort === ctrl) local.ttsAbort = null;
+    }
+
+    if (myGen !== local.speakGen) return true;
+    if (scheduledCount === 0) return false;
+
+    const remainingMs = Math.max(0, Math.ceil((nextStartTime - ctx.currentTime) * 1000)) + 40;
+    local.streamDoneTimer = window.setTimeout(() => {
+      if (myGen === local.speakGen) stopSpeaking();
+    }, remainingMs);
+    return true;
+  }
+
   async function speakText(text, { force = false, voice = null, engine = null, previewTag = null } = {}) {
     const clean = String(text || "").trim();
     if (!clean) return;
@@ -644,15 +797,29 @@ export function createPracticeStudioController({
       if (chosenVoice) payload.voice = chosenVoice;
     }
 
+    // 1. Primary path: low-TTFA streaming PCM16 via Web Audio API
+    try {
+      const handled = await tryStreamSpeak(payload, myGen, ctrl);
+      if (handled || myGen !== local.speakGen) return;
+    } catch (err) {
+      if (local.ttsAbort === ctrl) local.ttsAbort = null;
+      if (err?.name === "AbortError" || myGen !== local.speakGen) return;
+      /* fall through to buffered /api/tts/speak */
+    }
+
+    // 2. Fallback path: buffered WAV via /api/tts/speak
+    if (myGen !== local.speakGen) return;
+    const wavCtrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    local.ttsAbort = wavCtrl;
     try {
       const res = await fetch("/api/tts/speak", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: ctrl?.signal,
+        signal: wavCtrl?.signal,
       });
       if (myGen !== local.speakGen) return;
-      if (local.ttsAbort === ctrl) local.ttsAbort = null;
+      if (local.ttsAbort === wavCtrl) local.ttsAbort = null;
       if (res.ok) {
         const blob = await res.blob();
         if (myGen !== local.speakGen) return;
@@ -670,7 +837,7 @@ export function createPracticeStudioController({
         return;
       }
     } catch (err) {
-      if (local.ttsAbort === ctrl) local.ttsAbort = null;
+      if (local.ttsAbort === wavCtrl) local.ttsAbort = null;
       if (err?.name === "AbortError" || myGen !== local.speakGen) return;
       /* fall through to browser speech synthesis */
     }
