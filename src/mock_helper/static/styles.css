@@ -1,5 +1,5 @@
 /* ============================================================================
-   Mock Helper — Ink & Paper (iteration 8)
+   Mock Helper — Ink & Paper (iteration 9)
 
    One neutral ramp, two lightings. Ink on paper in light, ink on graphite in
    dark; the same warm undertone in both so they read as one product.
@@ -23,28 +23,32 @@
   --raised: #1d1d1b;
 
   --hover: rgba(255, 253, 245, 0.055);
-  --selected: rgba(255, 253, 245, 0.095);
+  --selected: rgba(255, 253, 245, 0.125);
+  --selected-ring: rgba(255, 253, 245, 0.09);
   --line: rgba(255, 253, 245, 0.08);
   --line-strong: rgba(255, 253, 245, 0.16);
 
+  /* Graphite swallows quiet text faster than paper does, so the two muted
+     steps sit a notch brighter here than their light-mode counterparts. */
   --ink: #efeeea;
   --ink-2: #b4b2ab;
-  --ink-3: #807e77;
-  --ink-4: #56544f;
+  --ink-3: #939189;
+  --ink-4: #68665f;
   --on-ink: #161615;
 
   --rec: #ee5d50;
   --good: #62c08d;
   --mixed: #d8a544;
   --bad: #ea6c5e;
+  --late: #d98478;
 
   --mark: rgba(244, 196, 64, 0.2);
   --mark-strong: rgba(244, 196, 64, 0.38);
 
   --shadow-pop: 0 0 0 1px var(--line-strong), 0 14px 36px rgba(0, 0, 0, 0.5);
-  --scrim: rgba(0, 0, 0, 0.5);
+  --scrim: rgba(0, 0, 0, 0.66);
 
-  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5' stroke='%23807e77' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5' stroke='%23939189' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 
   --radius-sm: 5px;
   --radius: 7px;
@@ -68,6 +72,7 @@
 
   --hover: rgba(26, 24, 16, 0.05);
   --selected: rgba(26, 24, 16, 0.08);
+  --selected-ring: transparent;
   --line: rgba(26, 24, 16, 0.09);
   --line-strong: rgba(26, 24, 16, 0.18);
 
@@ -81,12 +86,13 @@
   --good: #26804f;
   --mixed: #a8720c;
   --bad: #c6402f;
+  --late: #b9503f;
 
   --mark: rgba(250, 206, 62, 0.36);
   --mark-strong: rgba(250, 206, 62, 0.62);
 
   --shadow-pop: 0 0 0 1px var(--line), 0 14px 36px rgba(26, 24, 16, 0.13);
-  --scrim: rgba(26, 24, 16, 0.24);
+  --scrim: rgba(26, 24, 16, 0.34);
 
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5' stroke='%23807d75' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
@@ -416,6 +422,7 @@ kbd {
 
 .seg-opt.active {
   background: var(--selected);
+  box-shadow: inset 0 0 0 1px var(--selected-ring);
   color: var(--ink);
   font-weight: 550;
 }
@@ -659,10 +666,17 @@ kbd {
 .clock-now {
   color: var(--ink);
   font-weight: 550;
+  transition: color 0.6s ease;
 }
 
+/* Calm until it matters: amber for the last five minutes, a muted red for the
+   last one and anything past the limit. */
 .clock.warn .clock-now {
   color: var(--mixed);
+}
+
+.clock.over .clock-now {
+  color: var(--late);
 }
 
 /* 45 minutes, drawn along the bottom edge of the title bar. */
@@ -680,12 +694,15 @@ kbd {
   width: 0;
   height: 100%;
   background: var(--ink-3);
-  transition: width 0.5s linear;
+  transition: width 0.5s linear, background-color 0.6s ease;
 }
 
-.clock.warn ~ .pacing-line .pacing-fill,
 .topbar:has(.clock.warn) .pacing-fill {
   background: var(--mixed);
+}
+
+.topbar:has(.clock.over) .pacing-fill {
+  background: var(--late);
 }
 
 .topbar-utils {
@@ -882,23 +899,52 @@ kbd {
   background: var(--hover);
 }
 
-.home-item-title {
-  display: block;
+.home-item-top,
+.home-item-meta,
+.history-top,
+.history-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.home-item-title,
+.session-meta-main {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.home-item-title {
   font-weight: 500;
 }
 
 .home-item-meta {
-  display: block;
   margin-top: 1px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--ink-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+/* The time of day is what tells two same-titled interviews apart, so it gets
+   its own right-hand column. */
+.session-time {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* A calibrated interview carries the same quiet dot as the Calibration tab. */
+.session-dot {
+  flex-shrink: 0;
+  align-self: center;
+  width: 5px;
+  height: 5px;
+  margin-right: 1px;
+  border-radius: 50%;
+  background: var(--ink-3);
 }
 
 .home-empty {
@@ -930,11 +976,16 @@ kbd {
   font-size: 13px;
 }
 
+.home-role-wrap {
+  position: relative;
+  margin: 4px 0 0;
+}
+
 .home-role {
   display: block;
   width: 100%;
-  margin: 4px 0 0;
-  padding: 2px 0 14px;
+  margin: 0;
+  padding: 2px 30px 14px 0;
   border: 0;
   border-bottom: 1px solid var(--line);
   background: transparent;
@@ -944,6 +995,7 @@ kbd {
   font-weight: 500;
   letter-spacing: -0.012em;
   line-height: 1.2;
+  text-overflow: ellipsis;
   transition: border-color 0.15s ease;
 }
 
@@ -951,8 +1003,32 @@ kbd {
   color: var(--ink-4);
 }
 
+.home-role:hover {
+  border-bottom-color: var(--line-strong);
+}
+
 .home-role:focus {
   border-bottom-color: var(--ink-3);
+}
+
+/* A pencil at rest says "this is a field"; it steps aside once you're typing. */
+.home-role-cue {
+  position: absolute;
+  right: 2px;
+  top: 15px;
+  width: 15px;
+  height: 15px;
+  color: var(--ink-4);
+  pointer-events: none;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.home-role-wrap:hover .home-role-cue {
+  color: var(--ink-3);
+}
+
+.home-role-wrap:focus-within .home-role-cue {
+  opacity: 0;
 }
 
 .props {
@@ -995,8 +1071,19 @@ kbd {
   padding: 0;
   border: 0;
   background: transparent;
+  box-shadow: inset 0 -1px 0 var(--line);
   color: var(--ink);
   font-size: 13px;
+  text-overflow: ellipsis;
+  transition: box-shadow 0.15s ease;
+}
+
+.prop-input:hover {
+  box-shadow: inset 0 -1px 0 var(--line-strong);
+}
+
+.prop-input:focus {
+  box-shadow: inset 0 -1px 0 var(--ink-3);
 }
 
 .home-cta {
@@ -1024,10 +1111,8 @@ kbd {
   font-size: 12.5px;
 }
 
-.asr-status::before {
-  content: "·";
-  margin: 0 6px 0 4px;
-  color: var(--ink-4);
+.home-foot .link-quiet {
+  margin-left: auto;
 }
 
 .asr-status.error {
@@ -1239,7 +1324,7 @@ kbd {
   min-width: 0;
   overflow-y: auto;
   padding: 0 0 72px;
-  scroll-padding-top: 52px;
+  scroll-padding-top: 58px;
   display: flex;
   flex-direction: column;
 }
@@ -1256,8 +1341,9 @@ kbd {
   display: grid;
   grid-template-columns: var(--gutter) minmax(0, 1fr) auto;
   align-items: baseline;
-  padding: 16px var(--pad-x) 8px;
+  padding: 14px var(--pad-x) 10px;
   background: var(--bg);
+  border-bottom: 1px solid var(--line);
 }
 
 .qa-badge {
@@ -1413,9 +1499,10 @@ kbd {
   color: var(--ink-2);
 }
 
-.utt-filler-inline {
+/* Fillers ("um", "uh", a lone "yeah") all step back the same way: one shade
+   quieter, never italic, wherever they fall in a turn. */
+.utt-filler {
   color: var(--ink-3);
-  font-style: italic;
 }
 
 .draft-utt {
@@ -1658,7 +1745,7 @@ kbd {
   position: relative;
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr);
-  padding: 20px 0 18px;
+  padding: 18px 0 18px;
   cursor: pointer;
 }
 
@@ -1666,21 +1753,31 @@ kbd {
   border-top: 1px solid var(--line);
 }
 
+/* The number shares a baseline with the angle, so the eye reads
+   "2 · Trade-offs" and then drops straight into the question. */
 .probe-num {
-  padding-top: 5px;
   color: var(--ink-3);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
+  line-height: 18px;
 }
 
 .probe-num svg {
   display: block;
   width: 13px;
   height: 13px;
-  margin-top: 2px;
+  margin-top: 4px;
+}
+
+.probe-angle {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 18px;
 }
 
 .probe-question {
+  margin-top: 3px;
   color: var(--ink);
   font-family: var(--font-serif);
   font-size: 20px;
@@ -1692,32 +1789,42 @@ kbd {
 }
 
 .probe-why {
-  margin-top: 8px;
+  margin-top: 7px;
   color: var(--ink-3);
   font-size: 12.5px;
   line-height: 1.5;
+  text-wrap: pretty;
 }
 
-.probe-angle {
-  color: var(--ink-2);
-  font-weight: 550;
+/* Asked questions sink to the bottom as one quiet, checked line each, so the
+   next thing to ask always owns the top of the pane. */
+.probe.asked {
+  padding: 9px 0;
+}
+
+.probe.asked .probe-num {
+  line-height: 21px;
 }
 
 .probe.asked .probe-question {
+  margin-top: 0;
+  overflow: hidden;
   color: var(--ink-3);
+  font-size: 14.5px;
+  letter-spacing: -0.004em;
+  line-height: 21px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.probe.asked .probe-why {
-  color: var(--ink-4);
-}
-
-.probe.asked .probe-angle {
-  color: var(--ink-3);
+.probe.asked:hover .probe-question,
+.probe.asked:focus-visible .probe-question {
+  color: var(--ink-2);
 }
 
 .probe-copy {
   position: absolute;
-  top: 18px;
+  top: 14px;
   right: -6px;
   display: grid;
   place-items: center;
@@ -1807,11 +1914,18 @@ kbd {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
+  gap: 24px;
   margin-top: 10px;
   color: var(--ink-2);
   font-size: 13.5px;
   line-height: 1.5;
+}
+
+/* Balanced lines, so a sentence that almost fits never strands one word. */
+.verdict-sub-text {
+  flex: 1;
+  min-width: 0;
+  text-wrap: balance;
 }
 
 .phase-table {
@@ -1823,6 +1937,8 @@ kbd {
 }
 
 .phase-row {
+  position: relative;
+  isolation: isolate;
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr) 76px 46px;
   align-items: baseline;
@@ -1836,16 +1952,45 @@ kbd {
   text-align: left;
   font-size: 13px;
   line-height: 32px;
+  transition: border-color 0.12s ease;
 }
 
 .phase-row:first-child {
-  border-top: 0;
+  border-top-color: transparent;
 }
 
-.phase-row:hover .phase-row-title {
-  text-decoration: underline;
-  text-decoration-color: var(--ink-4);
-  text-underline-offset: 3px;
+/* The tint bleeds a little past the text column, like the phase tabs do, so
+   the columns themselves never shift. */
+.phase-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 -8px;
+  z-index: -1;
+  border-radius: 6px;
+  background: transparent;
+  transition: background-color 0.12s ease;
+}
+
+.phase-row:hover::before {
+  background: var(--hover);
+}
+
+/* The phase that is open in the transcript. */
+.phase-row.active::before {
+  background: var(--selected);
+}
+
+.phase-row.active,
+.phase-row.active + .phase-row {
+  border-top-color: transparent;
+}
+
+.phase-row.active .phase-row-code {
+  color: var(--ink);
+}
+
+.phase-row.active .phase-row-title {
+  font-weight: 550;
 }
 
 .phase-row-code {
@@ -2205,13 +2350,15 @@ kbd {
   justify-content: center;
   padding: 24px;
   background: var(--scrim);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
 }
 
 .modal-card {
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 540px;
+  max-width: 580px;
   max-height: min(86vh, 720px);
   border-radius: 13px;
   background: var(--raised);
@@ -2243,6 +2390,22 @@ kbd {
   min-height: 0;
   overflow-y: auto;
   padding: 6px 24px 16px;
+}
+
+/* Model presets and "Custom" are one choice and stay on one line; the raw
+   model ID only appears once Custom is picked. */
+.quick-chips {
+  flex-wrap: nowrap;
+}
+
+.quick-chips .seg-opt {
+  padding: 0 8px;
+}
+
+@media (max-width: 600px) {
+  .quick-chips {
+    flex-wrap: wrap;
+  }
 }
 
 .set-section {
@@ -2309,8 +2472,12 @@ kbd {
   text-align: left;
 }
 
+.history-top {
+  gap: 8px;
+}
+
 .history-title {
-  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2318,7 +2485,6 @@ kbd {
 }
 
 .history-meta {
-  display: block;
   margin-top: 1px;
   color: var(--ink-3);
   font-size: 12px;
