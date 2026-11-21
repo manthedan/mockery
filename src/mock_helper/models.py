@@ -293,11 +293,17 @@ class InterviewSession(BaseModel):
         self.qa_groups = non_empty_cards
         return removed
 
-    def utterances_for_card(self, qa: QAGroup, *, include_drafts: bool = True) -> list[Utterance]:
-        umap = self.utterance_map()
+    def utterances_for_card(
+        self,
+        qa: QAGroup,
+        *,
+        include_drafts: bool = True,
+        umap: dict[str, Utterance] | None = None,
+    ) -> list[Utterance]:
+        lookup = umap if umap is not None else self.utterance_map()
         out: list[Utterance] = []
         for uid in qa.utterance_ids:
-            u = umap.get(uid)
+            u = lookup.get(uid)
             if u is not None and (include_drafts or u.final):
                 out.append(u)
         return out
@@ -305,9 +311,9 @@ class InterviewSession(BaseModel):
     def card_revision_sum(self, qa: QAGroup) -> int:
         return sum(u.rev for u in self.utterances_for_card(qa, include_drafts=True))
 
-    def warmup_utterances(self) -> list[Utterance]:
-        umap = self.utterance_map()
-        return [umap[uid] for uid in self.warmup_utterance_ids if uid in umap]
+    def warmup_utterances(self, *, umap: dict[str, Utterance] | None = None) -> list[Utterance]:
+        lookup = umap if umap is not None else self.utterance_map()
+        return [lookup[uid] for uid in self.warmup_utterance_ids if uid in lookup]
 
     def card_word_counts(self, qa: QAGroup) -> dict[SpeakerRole, int]:
         counts: dict[SpeakerRole, int] = {"interviewer": 0, "candidate": 0}
@@ -316,40 +322,65 @@ class InterviewSession(BaseModel):
         return counts
 
     def compute_metrics(self) -> SessionMetrics:
-        iw = sum(len(u.text.split()) for u in self.utterances if u.speaker == "interviewer")
-        cw = sum(len(u.text.split()) for u in self.utterances if u.speaker == "candidate")
+        iw = 0
+        cw = 0
+        i_ms = 0
+        c_ms = 0
+        min_start: int | None = None
+        max_end: int | None = None
+        umap: dict[str, Utterance] = {}
+
+        for u in self.utterances:
+            umap[u.id] = u
+            words = len(u.text.split())
+            dur = max(0, u.end_ms - u.start_ms)
+            if u.speaker == "interviewer":
+                iw += words
+                i_ms += dur
+            else:
+                cw += words
+                c_ms += dur
+            if min_start is None or u.start_ms < min_start:
+                min_start = u.start_ms
+            if max_end is None or u.end_ms > max_end:
+                max_end = u.end_ms
+
         total_w = iw + cw
-
-        i_ms = sum(max(0, u.end_ms - u.start_ms) for u in self.utterances if u.speaker == "interviewer")
-        c_ms = sum(max(0, u.end_ms - u.start_ms) for u in self.utterances if u.speaker == "candidate")
         total_speak_ms = i_ms + c_ms
-
-        if self.utterances:
-            dur_s = max(0.0, (max(u.end_ms for u in self.utterances) - min(u.start_ms for u in self.utterances)) / 1000.0)
-        else:
-            dur_s = 0.0
+        dur_s = max(0.0, (max_end - min_start) / 1000.0) if (min_start is not None and max_end is not None) else 0.0
 
         per_card: list[CardTimingStat] = []
         probes_requested = 0
         for qa in self.qa_groups:
             probes_requested += len(qa.dive_deeper_history)
-            utts = self.utterances_for_card(qa)
+            utts = self.utterances_for_card(qa, umap=umap)
             if utts:
-                span_s = max(0.0, (max(u.end_ms for u in utts) - min(u.start_ms for u in utts)) / 1000.0)
+                c_min = min(u.start_ms for u in utts)
+                c_max = max(u.end_ms for u in utts)
+                span_s = max(0.0, (c_max - c_min) / 1000.0)
             else:
                 span_s = 0.0
-            card_i_s = sum(max(0, u.end_ms - u.start_ms) for u in utts if u.speaker == "interviewer") / 1000.0
-            card_c_s = sum(max(0, u.end_ms - u.start_ms) for u in utts if u.speaker == "candidate") / 1000.0
-            card_iw = sum(len(u.text.split()) for u in utts if u.speaker == "interviewer")
-            card_cw = sum(len(u.text.split()) for u in utts if u.speaker == "candidate")
+            card_i_ms = 0
+            card_c_ms = 0
+            card_iw = 0
+            card_cw = 0
+            for u in utts:
+                w = len(u.text.split())
+                d = max(0, u.end_ms - u.start_ms)
+                if u.speaker == "interviewer":
+                    card_i_ms += d
+                    card_iw += w
+                else:
+                    card_c_ms += d
+                    card_cw += w
             per_card.append(
                 CardTimingStat(
                     qa_id=qa.id,
                     badge=f"{qa.badge_prefix()}{qa.index}",
                     title=qa.title,
                     span_seconds=round(span_s, 1),
-                    interviewer_speak_seconds=round(card_i_s, 1),
-                    candidate_speak_seconds=round(card_c_s, 1),
+                    interviewer_speak_seconds=round(card_i_ms / 1000.0, 1),
+                    candidate_speak_seconds=round(card_c_ms / 1000.0, 1),
                     interviewer_words=card_iw,
                     candidate_words=card_cw,
                 )
@@ -374,8 +405,14 @@ class InterviewSession(BaseModel):
             per_card=per_card,
         )
 
-    def to_markdown(self, *, audience: Literal["interviewer", "candidate"] = "interviewer") -> str:
-        metrics = self.compute_metrics()
+    def to_markdown(
+        self,
+        *,
+        audience: Literal["interviewer", "candidate"] = "interviewer",
+        metrics: SessionMetrics | None = None,
+    ) -> str:
+        metrics = metrics if metrics is not None else self.compute_metrics()
+        umap = self.utterance_map()
         mins = int(metrics.duration_seconds // 60)
         secs = int(metrics.duration_seconds % 60)
         heading = (
@@ -406,7 +443,7 @@ class InterviewSession(BaseModel):
                 ]
             )
 
-        warm = self.warmup_utterances()
+        warm = self.warmup_utterances(umap=umap)
         if warm:
             lines.append("## Warm-up / Intro")
             for u in warm:
@@ -419,7 +456,7 @@ class InterviewSession(BaseModel):
             lines.append(
                 f"### {stat.badge}: {qa.title} *(Span: {stat.span_seconds}s | Candidate: {stat.candidate_words}w)*"
             )
-            for u in self.utterances_for_card(qa):
+            for u in self.utterances_for_card(qa, umap=umap):
                 role = "Interviewer" if u.speaker == "interviewer" else "Candidate"
                 draft_tag = " *(in-progress)*" if not u.final else ""
                 lines.append(f"- **[{fmt_ms(u.start_ms)} · `{u.id}`] {role}:** {u.text}{draft_tag}")

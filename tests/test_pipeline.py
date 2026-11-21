@@ -1427,4 +1427,103 @@ def test_diarizer_swap_roles_and_ws_command(tmp_path: Path) -> None:
     assert rt.active_session.id in rt.role_orientation_checked
 
 
+def test_fast_kaldi_fbank_and_sliding_windows_equivalence() -> None:
+    from mock_helper.diarizer import WeSpeakerEmbedder, extract_kaldi_fbank80
+
+    embedder = WeSpeakerEmbedder()
+    embedder.ensure_loaded()
+
+    rng = np.random.default_rng(42)
+    # 4.23s audio (deliberately non-multiple of 160 so tail window tests fallback branch too)
+    audio = (rng.standard_normal(67683) * 0.05).astype(np.float32)
+    win_n = 24000  # 1.5s
+    hop_n = 9600   # 0.6s (exact multiple of 160)
+    starts = list(range(0, len(audio) - win_n + 1, hop_n))
+    starts.append(len(audio) - win_n)  # non-aligned tail start
+
+    # Verify individual fbank shape & finite output
+    fb = extract_kaldi_fbank80(audio[:win_n])
+    assert fb.shape == (148, 80)
+    assert np.isfinite(fb).all()
+
+    embs_fast = embedder.embed_sliding_windows(audio, starts, win_n)
+    embs_ref = embedder.embed_batch([audio[st : st + win_n] for st in starts])
+    assert embs_fast.shape == embs_ref.shape == (len(starts), 256)
+    cos_sims = np.sum(embs_fast * embs_ref, axis=1)
+    assert float(cos_sims.min()) > 0.9999
+
+
+def test_parakeet_fast_tdt_decoder_and_optimization_parity() -> None:
+    import mlx.core as mx
+    from parakeet_mlx.audio import get_logmel
+    from mock_helper.asr import CONTROL_TOKEN_RE, WHITESPACE_RE, ParakeetEngine
+
+    engine = ParakeetEngine()
+    model = engine.ensure_loaded()
+    assert engine._fast_decoder is not None
+    assert "amx-tdt" in engine._optimization_mode
+
+    pcm_bytes = _synthesize_pcm16(
+        "We migrated the checkout queue to Redis and cut p99 latency in half.",
+        trailing_silence_s=0.3,
+    )
+    pcm_f32 = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    fast_res = engine.transcribe_pcm(pcm_f32)
+    assert fast_res.text
+
+    # Compare FastTDTGreedyDecoder directly against upstream model.generate() on the same padded audio
+    pad_n = int(model.preprocessor_config.sample_rate * 0.2)
+    padded = np.zeros(pcm_f32.size + 2 * pad_n, dtype=np.float32)
+    padded[pad_n : pad_n + pcm_f32.size] = pcm_f32
+    mel = get_logmel(mx.array(padded), model.preprocessor_config)
+    upstream_raw = model.generate(mel)[0].text
+    upstream_clean = WHITESPACE_RE.sub(" ", CONTROL_TOKEN_RE.sub("", upstream_raw)).strip()
+
+    assert fast_res.text == upstream_clean
+
+
+def test_storage_debounced_wav_and_fast_list_recent_parity(tmp_path: Path) -> None:
+    import time as _time
+    import wave
+    from mock_helper.storage import SessionAudioArchive, SessionStore
+
+    arch = SessionAudioArchive(tmp_path, "sess_debounce", header_sync_interval_s=0.05)
+    chunk = np.ones(800, dtype=np.int16).tobytes()
+    for _ in range(3):
+        arch.append_frame(bytes([CHANNEL_INTERVIEWER]) + chunk)
+    _time.sleep(0.06)
+    arch.append_frame(bytes([CHANNEL_INTERVIEWER]) + chunk)
+    # Periodic sync should have flushed valid header even before close()
+    with wave.open(str(tmp_path / "sess_debounce_interviewer.wav"), "rb") as wf:
+        assert wf.getnframes() == 3200
+    arch.append_frame(bytes([CHANNEL_INTERVIEWER]) + chunk)
+    arch.close()
+    with wave.open(str(tmp_path / "sess_debounce_interviewer.wav"), "rb") as wf:
+        assert wf.getnframes() == 4000
+
+    store = SessionStore(tmp_path)
+    sess = InterviewSession(
+        id="20261120_999999_perf",
+        config=SessionConfig(role_title="Staff Engineer", interview_type="system_design", mode="in_person"),
+    )
+    grouper = QAGrouper()
+    grouper.ingest_utterance(sess, speaker="interviewer", text="Design a rate limiter.", start_ms=1000, end_ms=3500)
+    grouper.ingest_utterance(sess, speaker="candidate", text="I would use token buckets.", start_ms=4000, end_ms=9200)
+    sess.calibration_markdown = "## Verdict\nStrong Hire"
+    store.save(sess)
+
+    recent = store.list_recent()
+    assert len(recent) == 1
+    item = recent[0]
+    metrics = sess.compute_metrics()
+    assert item["id"] == sess.id
+    assert item["role_title"] == "Staff Engineer"
+    assert item["interview_type"] == "system_design"
+    assert item["mode"] == "in_person"
+    assert item["qa_count"] == metrics.qa_count
+    assert item["duration_seconds"] == metrics.duration_seconds
+    assert item["has_calibration"] is True
+
+
+
 
