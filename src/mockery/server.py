@@ -289,8 +289,19 @@ def _merge_workspace_context(session: PracticeSession, patch: dict[str, Any] | N
         return
     if not isinstance(patch, dict):
         raise ValueError("workspace_context must be a JSON object.")
+    if "diagram_graph" in patch and patch["diagram_graph"] is not None:
+        dg = patch["diagram_graph"]
+        if not isinstance(dg, dict):
+            raise ValueError("diagram_graph must be a JSON object.")
+        if "nodes" in dg and not isinstance(dg["nodes"], list):
+            raise ValueError("diagram_graph.nodes must be a list.")
+        if "edges" in dg and not isinstance(dg["edges"], list):
+            raise ValueError("diagram_graph.edges must be a list.")
     merged = {**session.workspace_context, **patch}
-    encoded = json.dumps(merged, ensure_ascii=False).encode("utf-8")
+    try:
+        encoded = json.dumps(merged, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError(f"Workspace context contains invalid text or data: {exc}") from exc
     if len(encoded) > MAX_WORKSPACE_CONTEXT_BYTES:
         raise ValueError("Workspace context exceeds size limit (200 KB).")
     session.workspace_context = merged
