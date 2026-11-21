@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,6 +19,9 @@ from .state_machines import (
 )
 
 logger = logging.getLogger("mockery.addons")
+
+_HF_CACHE_TTL_SECONDS = 2.0
+_hf_repo_status_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
 DEFAULT_MODULES: dict[str, bool] = {
@@ -42,39 +46,95 @@ MODULE_DESCRIPTIONS: dict[str, dict[str, str]] = {
 }
 
 
-def _hf_repo_cached(repo_id: str) -> bool:
-    try:
-        from huggingface_hub import scan_cache_dir
-
-        cache = scan_cache_dir()
-        for repo in cache.repos:
-            if repo.repo_id == repo_id and repo.size_on_disk > 0:
-                return True
-    except Exception:
-        pass
+def _hf_hub_dir() -> Path:
+    hub_env = os.getenv("HUGGINGFACE_HUB_CACHE")
+    if hub_env:
+        return Path(hub_env)
     hf_home = Path(os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface"))
-    repo_dir = hf_home / "hub" / f"models--{repo_id.replace('/', '--')}"
-    return repo_dir.is_dir() and any(repo_dir.iterdir())
+    return hf_home / "hub"
+
+
+def _invalidate_hf_repo_cache(repo_id: str | None = None) -> None:
+    if repo_id is None:
+        _hf_repo_status_cache.clear()
+        return
+    for key in [k for k in _hf_repo_status_cache if k[1] == repo_id]:
+        _hf_repo_status_cache.pop(key, None)
+
+
+def _hf_repo_has_files(repo_dir: Path) -> bool:
+    if not repo_dir.is_dir():
+        return False
+    snapshots_dir = repo_dir / "snapshots"
+    if snapshots_dir.is_dir():
+        try:
+            with os.scandir(snapshots_dir) as snap_it:
+                for snap in snap_it:
+                    if not snap.is_dir():
+                        continue
+                    try:
+                        with os.scandir(snap.path) as file_it:
+                            for entry in file_it:
+                                try:
+                                    if entry.is_file(follow_symlinks=True) and entry.stat(follow_symlinks=True).st_size > 0:
+                                        return True
+                                except OSError:
+                                    continue
+                    except OSError:
+                        continue
+        except OSError:
+            return False
+        return False
+    # Fallback for non-standard or minimal cache dirs without a snapshots/ subdirectory
+    try:
+        with os.scandir(repo_dir) as it:
+            for entry in it:
+                try:
+                    if entry.is_file(follow_symlinks=True) and entry.stat(follow_symlinks=True).st_size > 0:
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def _hf_repo_cached(repo_id: str, *, bypass_cache: bool = False) -> bool:
+    hub_dir = _hf_hub_dir()
+    cache_key = (str(hub_dir), repo_id)
+    now = time.monotonic()
+    if not bypass_cache:
+        cached = _hf_repo_status_cache.get(cache_key)
+        if cached is not None and (now - cached[0]) < _HF_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    repo_dir = hub_dir / f"models--{repo_id.replace('/', '--')}"
+    result = _hf_repo_has_files(repo_dir)
+    _hf_repo_status_cache[cache_key] = (now, result)
+    return result
 
 
 def _hf_repo_delete(repo_id: str) -> bool:
+    _invalidate_hf_repo_cache(repo_id)
+    hub_dir = _hf_hub_dir()
     try:
         from huggingface_hub import scan_cache_dir
 
-        cache = scan_cache_dir()
+        cache = scan_cache_dir(cache_dir=hub_dir)
         revs = []
         for repo in cache.repos:
             if repo.repo_id == repo_id:
                 revs.extend(r.commit_hash for r in repo.revisions)
         if revs:
             cache.delete_revisions(*revs).execute()
+            _invalidate_hf_repo_cache(repo_id)
             return True
     except Exception as exc:
         logger.warning("Failed to delete HF repo %s via scan_cache_dir: %s", repo_id, exc)
-    hf_home = Path(os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface"))
-    repo_dir = hf_home / "hub" / f"models--{repo_id.replace('/', '--')}"
+    repo_dir = hub_dir / f"models--{repo_id.replace('/', '--')}"
     if repo_dir.exists():
         shutil.rmtree(repo_dir, ignore_errors=True)
+        _invalidate_hf_repo_cache(repo_id)
         return True
     return False
 
@@ -346,6 +406,7 @@ class AddonManager:
                     from huggingface_hub import snapshot_download
 
                     await self._await_uninterruptible(asyncio.to_thread(snapshot_download, repo_id))
+                    _invalidate_hf_repo_cache(repo_id)
                 else:
                     fn = self.extra_handlers[pack_id]["install"]
                     res = fn()
@@ -357,6 +418,8 @@ class AddonManager:
                 self._errors[pack_id] = str(exc)
                 raise
             finally:
+                if pack_id in ("parakeet_v2", "parakeet_v3"):
+                    _invalidate_hf_repo_cache()
                 self._installing.pop(pack_id, None)
 
     async def install_pack(self, pack_id: str) -> dict[str, Any]:
@@ -404,5 +467,7 @@ class AddonManager:
                 self._errors[pack_id] = str(exc)
                 raise
             finally:
+                if pack_id in ("parakeet_v2", "parakeet_v3"):
+                    _invalidate_hf_repo_cache()
                 self._uninstalling.pop(pack_id, None)
         return self.status_dict()
