@@ -1525,5 +1525,158 @@ def test_storage_debounced_wav_and_fast_list_recent_parity(tmp_path: Path) -> No
     assert item["has_calibration"] is True
 
 
+def test_incremental_utterance_draft_ws_patch_and_jsonl_throttling(tmp_path: Path) -> None:
+    import json
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/session") as ws:
+        init = ws.receive_json()
+        session_id = init["session"]["id"]
+        _ = ws.receive_json()  # asr_status
+
+        # Open Q1
+        ws.send_json(
+            {
+                "type": "inject_utterance",
+                "id": "utt_q1",
+                "speaker": "interviewer",
+                "text": "Walk me through a large distributed cache migration you led.",
+                "start_ms": 0,
+                "end_ms": 3500,
+            }
+        )
+        m_q1 = ws.receive_json()
+        assert m_q1["type"] == "session_state"
+        qa_id = m_q1["session"]["qa_groups_resolved"][0]["id"]
+
+        # rev=1 draft (brand-new utterance) -> full session_state so the card/row is created
+        ws.send_json(
+            {
+                "type": "inject_utterance",
+                "id": "utt_ans",
+                "rev": 1,
+                "final": False,
+                "speaker": "candidate",
+                "text": "We started by",
+                "start_ms": 4000,
+                "end_ms": 5250,
+            }
+        )
+        m_rev1 = ws.receive_json()
+        assert m_rev1["type"] == "session_state"
+
+        # rev=2, 3, 4 in-place drafts -> lightweight utterance_draft patches!
+        for rev, txt in [
+            (2, "We started by dual-writing"),
+            (3, "We started by dual-writing to Redis cluster"),
+            (4, "We started by dual-writing to Redis cluster with shadow reads"),
+        ]:
+            ws.send_json(
+                {
+                    "type": "inject_utterance",
+                    "id": "utt_ans",
+                    "rev": rev,
+                    "final": False,
+                    "speaker": "candidate",
+                    "text": txt,
+                    "start_ms": 4000,
+                    "end_ms": 4000 + rev * 1250,
+                }
+            )
+            m_draft = ws.receive_json()
+            assert m_draft["type"] == "utterance_draft"
+            assert m_draft["session_id"] == session_id
+            assert m_draft["qa_id"] == qa_id
+            assert m_draft["utterance"]["id"] == "utt_ans"
+            assert m_draft["utterance"]["rev"] == rev
+            assert m_draft["utterance"]["text"] == txt
+            assert "probe_state" in m_draft
+
+        # rev=5 final -> full session_state + persisted
+        ws.send_json(
+            {
+                "type": "inject_utterance",
+                "id": "utt_ans",
+                "rev": 5,
+                "final": True,
+                "speaker": "candidate",
+                "text": "We started by dual-writing to Redis cluster with shadow reads and cut over at zero downtime.",
+                "start_ms": 4000,
+                "end_ms": 11000,
+            }
+        )
+        m_fin = ws.receive_json()
+        assert m_fin["type"] == "session_state"
+        utts = m_fin["session"]["qa_groups_resolved"][0]["utterances"]
+        assert utts[-1]["id"] == "utt_ans"
+        assert utts[-1]["rev"] == 5
+        assert utts[-1]["final"] is True
+
+    # Verify JSONL throttling: utt_q1 (final), utt_ans rev=1 (new), rev=4 (checkpoint), rev=5 (final)
+    events_path = tmp_path / "sessions" / f"{session_id}.events.jsonl"
+    logged = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    ans_revs = [
+        row["utterance"]["rev"]
+        for row in logged
+        if row.get("utterance", {}).get("id") == "utt_ans"
+    ]
+    assert ans_revs == [1, 4, 5]
+
+
+def test_vad_contiguous_buffer_and_ring_preroll_parity() -> None:
+    from mock_helper.vad import FRAME_MS, FRAME_SAMPLES, ChannelVADSegmenter
+
+    class _ScriptedVADRuntime:
+        def __init__(self, probs: list[float]) -> None:
+            self._probs = probs
+            self._idx = 0
+
+        def step(self, frame_with_context: np.ndarray, state: np.ndarray) -> tuple[float, np.ndarray]:
+            p = self._probs[self._idx] if self._idx < len(self._probs) else 0.0
+            self._idx += 1
+            return p, state
+
+    # 15 silence frames (forces pre-roll ring wrap-around for pre_roll_frames=6),
+    # then 20 speech frames (emits partial at frame 8 and 16), then 6 silence frames (finalizes)
+    probs = [0.1] * 15 + [0.9] * 20 + [0.1] * 6
+    seg = ChannelVADSegmenter(
+        _ScriptedVADRuntime(probs),  # type: ignore[arg-type]
+        pre_roll_frames=6,
+        min_speech_ms=3 * FRAME_MS,
+        min_silence_ms=5 * FRAME_MS,
+        partial_interval_ms=8 * FRAME_MS,
+    )
+
+    # Encode frame index into each frame's waveform so any ring wrap-around or copy bug is caught immediately
+    frames = [
+        np.full(FRAME_SAMPLES, fill_value=(i + 1) * 0.01, dtype=np.float32)
+        for i in range(len(probs))
+    ]
+    pcm = np.concatenate(frames)
+    events = seg.push_float32(pcm)
+
+    partials = [e for e in events if e.kind == "partial"]
+    finals = [e for e in events if e.kind == "final"]
+    assert len(partials) == 2
+    assert len(finals) == 1
+
+    # Onset occurred at frame 15 with pre_roll_frames=6 -> pre-roll covers frames [10..15] inclusive!
+    fin = finals[0]
+    assert fin.start_ms == 10 * FRAME_MS
+    assert fin.end_ms == 40 * FRAME_MS  # frames 10..39 (30 frames total: 5 prior + 20 speech + 5 trailing)
+    assert fin.audio.size == 30 * FRAME_SAMPLES
+    for local_idx, expected_frame_idx in enumerate(range(10, 40)):
+        sl = fin.audio[local_idx * FRAME_SAMPLES : (local_idx + 1) * FRAME_SAMPLES]
+        np.testing.assert_allclose(sl, (expected_frame_idx + 1) * 0.01, rtol=0, atol=1e-6)
+
+    # Ensure partial audio buffers were safely copied and NOT overwritten by subsequent frames
+    p1 = partials[0]
+    assert p1.audio.size == (6 + 8) * FRAME_SAMPLES
+    np.testing.assert_allclose(p1.audio[:FRAME_SAMPLES], 11 * 0.01, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(p1.audio[-FRAME_SAMPLES:], 24 * 0.01, rtol=0, atol=1e-6)
+
+
 
 
