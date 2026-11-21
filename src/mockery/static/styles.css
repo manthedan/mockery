@@ -1,5 +1,5 @@
 /* ============================================================================
-   Mock Helper — Ink & Paper (iteration 9)
+   Mockery — Ink & Paper
 
    One neutral ramp, two lightings. Ink on paper in light, ink on graphite in
    dark; the same warm undertone in both so they read as one product.
@@ -2414,6 +2414,13 @@ kbd {
   border-top: 1px solid var(--line);
 }
 
+.set-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .set-section-title {
   font-weight: 600;
 }
@@ -2422,6 +2429,170 @@ kbd {
   margin: 1px 0 6px;
   color: var(--ink-3);
   font-size: 12.5px;
+}
+
+.set-path-note {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.provider-hint-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.provider-signup-link {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 550;
+  text-decoration: underline;
+  text-decoration-color: var(--ink-4);
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
+.provider-signup-link:hover {
+  text-decoration-color: var(--ink);
+}
+
+.test-result {
+  margin: 8px 0 10px;
+  padding: 8px 11px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--hover);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.test-result.is-ok {
+  border-color: var(--good);
+  color: var(--good);
+}
+
+.test-result.is-err {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.advanced-details {
+  margin-top: 8px;
+}
+
+.advanced-summary {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+}
+
+.advanced-summary:hover {
+  color: var(--ink);
+}
+
+.advanced-body {
+  padding-top: 6px;
+}
+
+.home-foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.onboarding-card {
+  max-width: 600px;
+}
+
+.onboarding-intro {
+  margin: 2px 0 16px;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.onboard-group {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.onboard-group:first-of-type {
+  margin-top: 0;
+}
+
+.onboard-detected-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.onboard-detected-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--ink);
+  text-align: left;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.onboard-detected-btn:hover {
+  background: var(--hover);
+  border-color: var(--line-strong);
+}
+
+.onboard-detected-title {
+  font-size: 13.5px;
+  font-weight: 550;
+}
+
+.onboard-detected-sub {
+  margin-top: 1px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.onboard-detected-badge {
+  color: var(--good);
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.onboard-pills {
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.onboard-key-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.onboard-key-row .field-input {
+  flex: 1;
+}
+
+.onboard-sub-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
 }
 
 .modal-footer {

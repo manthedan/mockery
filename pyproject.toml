@@ -1,13 +1,16 @@
 [project]
-name = "mock-helper"
-version = "0.1.0"
-description = "Add your description here"
+name = "mockery"
+version = "0.2.0"
+description = "Mockery — Local-first Apple Silicon mock interview studio"
+readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "manthedan", email = "3868926+manthedan@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.163.1",
+    "httpx>=0.28.1",
     "numpy>=2.5.5",
     "onnxruntime>=1.32.0",
     "openai>=3.52.0",
@@ -18,8 +21,13 @@ dependencies = [
     "websockets>=17.4",
 ]
 
+[project.urls]
+Homepage = "https://github.com/manthedan/mockery"
+Repository = "https://github.com/manthedan/mockery"
+
 [project.scripts]
-mock-helper = "mock_helper:main"
+mockery = "mockery:main"
+mock-helper = "mockery:main"
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14.0"]
@@ -27,6 +35,5 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=9.2.0",
 ]

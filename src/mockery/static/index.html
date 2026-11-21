@@ -3,21 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Mock Helper</title>
+    <title>Mockery</title>
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231c1b18'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23fbfaf7'/%3E%3C/svg%3E"
     />
     <script>
       (() => {
-        const pref = localStorage.getItem("mock_helper_theme") || "auto";
+        const pref = localStorage.getItem("mockery_theme") || localStorage.getItem("mock_helper_theme") || "auto";
         const prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
         const resolved = pref === "auto" ? (prefersLight ? "light" : "dark") : pref;
         document.documentElement.setAttribute("data-theme-pref", pref);
         document.documentElement.setAttribute("data-theme", resolved);
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=perf2" />
+    <link rel="stylesheet" href="/static/styles.css?v=mockery1" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -26,7 +26,7 @@
         <div class="topbar-left">
           <div class="brand">
             <span id="brandDot" class="brand-dot" aria-hidden="true"></span>
-            <span class="brand-name setup-only">Mock Helper</span>
+            <span class="brand-name setup-only">Mockery</span>
           </div>
 
           <div class="popover-anchor session-only">
@@ -144,7 +144,7 @@
       <!-- Home: your past interviews on the left, the next one on the right. -->
       <main id="setupLaunchpad" class="home hidden">
         <aside class="home-sidebar" aria-label="Past interviews">
-          <div class="home-sidebar-head">Mock Helper</div>
+          <div class="home-sidebar-head">Mockery</div>
           <div id="homeSessionList" class="home-list"></div>
         </aside>
 
@@ -221,9 +221,14 @@
 
           <footer class="home-foot">
             <span id="asrBadge" class="asr-status hidden"><span id="asrBadgeText"></span></span>
-            <button id="setupSimulateBtn" class="link-quiet" type="button" title="Open the workspace and type turns by hand">
-              Try it without audio
-            </button>
+            <div class="home-foot-actions">
+              <button id="homeSetupAiBtn" class="link-quiet hidden" type="button" title="Connect an AI assistant for live follow-ups and calibration">
+                Connect AI assistant
+              </button>
+              <button id="setupSimulateBtn" class="link-quiet" type="button" title="Open the workspace and type turns by hand">
+                Try it without audio
+              </button>
+            </div>
           </footer>
         </section>
       </main>
@@ -452,57 +457,88 @@
           </div>
 
           <div class="set-section">
-            <div class="set-section-title">Assistant</div>
-            <p class="set-section-note">Writes the live follow-ups and the calibration audit.</p>
+            <div class="set-section-head">
+              <div>
+                <div class="set-section-title">AI Assistant</div>
+                <p class="set-section-note">Powers live follow-up probes and post-interview calibration. Speech transcription always runs 100% locally.</p>
+              </div>
+              <button id="testLlmBtn" class="btn btn-outline btn-sm" type="button">Test connection</button>
+            </div>
+
+            <div id="testLlmResult" class="test-result hidden" role="status" aria-live="polite"></div>
+
             <div class="set-rows">
               <label class="set-row">
                 <span class="set-label">Provider</span>
                 <span class="set-value">
                   <select id="llmPresetSelect" class="field-select"></select>
-                  <span id="cliAuthNotice" class="set-note hidden">
-                    <span id="cliAuthNoticeText">Signs in through the command-line tool on this Mac. No API key needed.</span>
+                  <span id="providerHintRow" class="set-note provider-hint-row">
+                    <span id="providerHintText"></span>
+                    <a id="providerSignupLink" class="provider-signup-link hidden" href="#" target="_blank" rel="noopener noreferrer">Get API key ↗</a>
                   </span>
                 </span>
               </label>
 
-              <div id="apiEndpointFields" class="set-rows-nested">
-                <label class="set-row">
-                  <span class="set-label">Base URL</span>
-                  <input id="llmBaseUrlInput" class="field-input field-input-mono" type="text" />
-                </label>
-                <label class="set-row">
-                  <span class="set-label">API key</span>
-                  <span class="set-value">
-                    <input id="llmApiKeyInput" class="field-input" type="password" placeholder="Paste a key, or leave blank to keep the saved one" />
-                    <span id="maskedKeyHint" class="set-note"></span>
-                  </span>
-                </label>
-              </div>
-
-              <div class="set-row">
-                <label class="set-label" for="llmFastModelInput">Follow-ups</label>
+              <div id="apiKeyRow" class="set-row">
+                <label class="set-label" for="llmApiKeyInput">API key</label>
                 <span class="set-value">
-                  <span class="quick-chips seg" role="group" aria-label="Follow-ups model" data-target-input="llmFastModelInput">
-                    <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-hydrogen:low">Hydrogen · low</button>
-                    <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-neon:low">Neon · low</button>
-                    <button type="button" class="seg-opt quick-chip" data-chip-custom="true" title="Type any model ID">Custom</button>
-                  </span>
-                  <input id="llmFastModelInput" class="field-input field-input-mono" type="text" placeholder="Model ID" aria-label="Follow-ups model ID" spellcheck="false" autocomplete="off" />
+                  <input id="llmApiKeyInput" class="field-input" type="password" placeholder="Paste a key, or leave blank to keep the saved one" autocomplete="off" />
+                  <span id="maskedKeyHint" class="set-note"></span>
                 </span>
               </div>
 
-              <div class="set-row">
-                <label class="set-label" for="llmCalibModelInput">Calibration</label>
+              <div id="localModelRow" class="set-row hidden">
+                <label class="set-label" for="localModelSelect">Local model</label>
                 <span class="set-value">
-                  <span class="quick-chips seg" role="group" aria-label="Calibration model" data-target-input="llmCalibModelInput">
-                    <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-hydrogen:high">Hydrogen · high</button>
-                    <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-neon:medium">Neon · medium</button>
-                    <button type="button" class="seg-opt quick-chip" data-chip-val="claude-opus-5-5:high">Opus 5.5 · high</button>
-                    <button type="button" class="seg-opt quick-chip" data-chip-custom="true" title="Type any model ID">Custom</button>
-                  </span>
-                  <input id="llmCalibModelInput" class="field-input field-input-mono" type="text" placeholder="Model ID" aria-label="Calibration model ID" spellcheck="false" autocomplete="off" />
+                  <select id="localModelSelect" class="field-select"></select>
+                  <span id="localRamNote" class="set-note"></span>
                 </span>
               </div>
+
+              <details id="advancedLlmDetails" class="advanced-details">
+                <summary class="advanced-summary">Model IDs &amp; endpoint (optional)</summary>
+                <div class="set-rows-nested advanced-body">
+                  <label id="baseUrlRow" class="set-row">
+                    <span class="set-label">Base URL</span>
+                    <input id="llmBaseUrlInput" class="field-input field-input-mono" type="text" />
+                  </label>
+
+                  <div class="set-row">
+                    <label class="set-label" for="llmFastModelInput">Follow-ups</label>
+                    <span class="set-value">
+                      <span class="quick-chips seg hidden" role="group" aria-label="Follow-ups model" data-target-input="llmFastModelInput">
+                        <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-hydrogen:low">Hydrogen · low</button>
+                        <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-neon:low">Neon · low</button>
+                        <button type="button" class="seg-opt quick-chip" data-chip-custom="true" title="Type any model ID">Custom</button>
+                      </span>
+                      <input id="llmFastModelInput" class="field-input field-input-mono" type="text" placeholder="Model ID" aria-label="Follow-ups model ID" spellcheck="false" autocomplete="off" />
+                    </span>
+                  </div>
+
+                  <div class="set-row">
+                    <label class="set-label" for="llmCalibModelInput">Calibration</label>
+                    <span class="set-value">
+                      <span class="quick-chips seg hidden" role="group" aria-label="Calibration model" data-target-input="llmCalibModelInput">
+                        <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-hydrogen:high">Hydrogen · high</button>
+                        <button type="button" class="seg-opt quick-chip" data-chip-val="gemini-4-neon:medium">Neon · medium</button>
+                        <button type="button" class="seg-opt quick-chip" data-chip-val="claude-opus-5-5:high">Opus 5.5 · high</button>
+                        <button type="button" class="seg-opt quick-chip" data-chip-custom="true" title="Type any model ID">Custom</button>
+                      </span>
+                      <input id="llmCalibModelInput" class="field-input field-input-mono" type="text" placeholder="Model ID" aria-label="Calibration model ID" spellcheck="false" autocomplete="off" />
+                    </span>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <div class="set-section">
+            <div class="set-section-head">
+              <div>
+                <div class="set-section-title">Saved interviews</div>
+                <p id="dataDirPath" class="set-section-note set-path-note">Stored locally on this Mac.</p>
+              </div>
+              <button id="openDataDirBtn" class="btn btn-outline btn-sm" type="button">Reveal in Finder</button>
             </div>
           </div>
         </div>
@@ -513,6 +549,56 @@
             <button id="cancelSettingsBtn" class="btn btn-ghost" type="button">Cancel</button>
             <button id="saveSettingsBtn" class="btn btn-primary" type="button">Save</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- First-run welcome / AI setup wizard -->
+    <div id="onboardingModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="onboardingModalTitle">
+      <div class="modal-card onboarding-card">
+        <div class="modal-header">
+          <h3 id="onboardingModalTitle">Welcome to Mockery</h3>
+          <button id="closeOnboardingBtn" class="btn btn-ghost btn-icon" type="button" aria-label="Close setup">
+            <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <p class="onboarding-intro">
+            Live speech transcription runs <strong>100% locally on your Mac</strong>. Choose an AI assistant for live follow-up probes and post-interview calibration — or skip to start with transcripts only.
+          </p>
+
+          <div id="onboardDetectedSection" class="onboard-group hidden">
+            <div class="set-section-title">Detected on your Mac (one click, no API key)</div>
+            <div id="onboardDetectedList" class="onboard-detected-list"></div>
+          </div>
+
+          <div class="onboard-group">
+            <div class="set-section-title">Or connect a cloud API key</div>
+            <div id="onboardCloudPills" class="seg onboard-pills" role="radiogroup" aria-label="Cloud provider">
+              <button type="button" class="seg-opt active" data-onboard-provider="gemini">Gemini · Free tier</button>
+              <button type="button" class="seg-opt" data-onboard-provider="anthropic">Claude</button>
+              <button type="button" class="seg-opt" data-onboard-provider="openai">OpenAI</button>
+              <button type="button" class="seg-opt" data-onboard-provider="deepseek">DeepSeek</button>
+              <button type="button" class="seg-opt" data-onboard-provider="openrouter">OpenRouter</button>
+            </div>
+            <div class="onboard-key-row">
+              <input id="onboardApiKeyInput" class="field-input" type="password" placeholder="Paste your Google Gemini API key" autocomplete="off" />
+              <button id="onboardTestSaveBtn" class="btn btn-primary" type="button">Test &amp; Save</button>
+            </div>
+            <div class="onboard-sub-row">
+              <span id="onboardProviderHint" class="set-note"></span>
+              <a id="onboardSignupLink" class="provider-signup-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Get a free key ↗</a>
+            </div>
+            <div id="onboardStatus" class="test-result hidden" role="status" aria-live="polite"></div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="onboardSkipBtn" class="link-quiet" type="button">Skip — use Transcript-Only mode</button>
+          <button id="onboardMoreBtn" class="btn btn-ghost btn-sm" type="button">All Settings…</button>
         </div>
       </div>
     </div>
@@ -532,6 +618,6 @@
       </div>
     </div>
 
-    <script type="module" src="/static/app.js?v=perf4"></script>
+    <script type="module" src="/static/app.js?v=mockery1"></script>
   </body>
 </html>

@@ -99,9 +99,12 @@ const state = {
   homeVisible: false,
   streamingCalibrationMd: "",
   calibrationStreamRaf: null,
+  discovery: null,
+  onboardingChecked: false,
+  onboardProvider: "gemini",
 };
 
-Object.defineProperty(window, "__MOCK_HELPER_STATE__", {
+const _mockeryStateDescriptor = {
   get() {
     return {
       wsState: state.wsState,
@@ -117,7 +120,9 @@ Object.defineProperty(window, "__MOCK_HELPER_STATE__", {
       serverMachines: state.session?.state_machines || null,
     };
   },
-});
+};
+Object.defineProperty(window, "__MOCKERY_STATE__", _mockeryStateDescriptor);
+Object.defineProperty(window, "__MOCK_HELPER_STATE__", _mockeryStateDescriptor);
 
 const el = (id) => document.getElementById(id);
 
@@ -129,7 +134,7 @@ const colorSchemeMql = window.matchMedia
 
 function applyTheme(pref) {
   const validPref = pref === "light" || pref === "dark" || pref === "auto" ? pref : "auto";
-  localStorage.setItem("mock_helper_theme", validPref);
+  localStorage.setItem("mockery_theme", validPref);
   const resolved =
     validPref === "auto"
       ? colorSchemeMql && colorSchemeMql.matches
@@ -147,11 +152,12 @@ function applyTheme(pref) {
 }
 
 function initTheme() {
-  const initial = localStorage.getItem("mock_helper_theme") || "auto";
+  const initial = localStorage.getItem("mockery_theme") || localStorage.getItem("mock_helper_theme") || "auto";
   applyTheme(initial);
   if (colorSchemeMql && colorSchemeMql.addEventListener) {
     colorSchemeMql.addEventListener("change", () => {
-      if ((localStorage.getItem("mock_helper_theme") || "auto") === "auto") {
+      const saved = localStorage.getItem("mockery_theme") || localStorage.getItem("mock_helper_theme") || "auto";
+      if (saved === "auto") {
         applyTheme("auto");
       }
     });
@@ -192,6 +198,7 @@ function setModalState(next) {
   state.modalState = next;
   el("settingsModal").classList.toggle("hidden", next !== "settings");
   el("historyModal").classList.toggle("hidden", next !== "history");
+  el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
 }
 
 function closeAllPopovers() {
@@ -1018,7 +1025,7 @@ function renderAsrBadge() {
   badge.classList.toggle("error", failed);
   badge.removeAttribute("title");
   if (st === "loading") {
-    textEl.textContent = "The speech model is still loading.";
+    textEl.textContent = "Preparing offline speech engine (downloads once on first launch)…";
   } else if (st === "switching") {
     textEl.textContent = "Switching speech model…";
   } else if (failed) {
@@ -2631,11 +2638,55 @@ function syncModelChoosers({ redetect = false } = {}) {
   }
 }
 
+async function fetchDiscovery() {
+  try {
+    const res = await fetch("/api/providers/discover");
+    if (res.ok) {
+      state.discovery = await res.json();
+    }
+  } catch {
+    /* ignore */
+  }
+  return state.discovery || { detected_clis: [], local_servers: {}, env_keys_present: [], system_memory_gb: null };
+}
+
+function syncHomeAiPrompt(llm) {
+  const btn = el("homeSetupAiBtn");
+  if (!btn) return;
+  const unconfigured = !llm || !llm.is_configured;
+  btn.classList.toggle("hidden", !unconfigured);
+}
+
+function showInlineTestResult(targetEl, resObj) {
+  if (!targetEl) return;
+  targetEl.classList.remove("hidden", "is-ok", "is-err");
+  if (resObj.ok) {
+    targetEl.classList.add("is-ok");
+    targetEl.textContent = `✓ ${resObj.message || "Connected."}`;
+  } else {
+    targetEl.classList.add("is-err");
+    const detail = resObj.hint ? `${resObj.hint}` : (resObj.error || "Connection failed.");
+    targetEl.textContent = `✕ ${detail}`;
+  }
+}
+
 async function openSettingsModal() {
   closeAllPopovers();
-  const res = await fetch("/api/status");
-  const data = await res.json();
+  const [statusRes, disc] = await Promise.all([fetch("/api/status"), fetchDiscovery()]);
+  const data = await statusRes.json();
   state.llm = data.llm;
+  syncHomeAiPrompt(data.llm);
+
+  const testResultEl = el("testLlmResult");
+  if (testResultEl) {
+    testResultEl.classList.add("hidden");
+    testResultEl.textContent = "";
+  }
+
+  const dataDirEl = el("dataDirPath");
+  if (dataDirEl && data.sessions_dir) {
+    dataDirEl.textContent = data.sessions_dir;
+  }
 
   const ckptSelect = el("parakeetModelSelect");
   const ckpts = data.asr.checkpoints || {};
@@ -2648,53 +2699,206 @@ async function openSettingsModal() {
 
   const presetSelect = el("llmPresetSelect");
   const presets = data.llm.presets || {};
-  presetSelect.innerHTML = Object.entries(presets)
-    .map(([key, val]) => `<option value="${key}">${escapeHtml(String(val.label || key).replace(/\s*\(.*\)\s*$/, ""))}</option>`)
-    .join("");
+  const detectedCliIds = new Set((disc.detected_clis || []).map((c) => c.provider));
+  const localServers = disc.local_servers || {};
 
-  if (presets[data.llm.provider]) {
+  // Build categorized <optgroup>s: Detected CLIs (only those installed or currently active), Cloud APIs, Local Offline, Transcript-Only
+  const cliOpts = Object.entries(presets)
+    .filter(([key, val]) => val.category === "cli" && (detectedCliIds.has(key) || data.llm.provider === key))
+    .map(([key, val]) => {
+      const suffix = detectedCliIds.has(key) ? " · Detected" : " · Not installed";
+      return `<option value="${escapeHtml(key)}">${escapeHtml(val.label || key)}${suffix}</option>`;
+    });
+
+  const cloudOpts = Object.entries(presets)
+    .filter(([, val]) => val.category === "cloud")
+    .map(([key, val]) => {
+      const badge = val.badge ? ` · ${val.badge}` : "";
+      return `<option value="${escapeHtml(key)}">${escapeHtml(val.label || key)}${badge}</option>`;
+    });
+
+  const localOpts = Object.entries(presets)
+    .filter(([, val]) => val.category === "local")
+    .map(([key, val]) => {
+      const srv = localServers[key];
+      const badge = srv?.running ? ` · Running (${(srv.models || []).length} models)` : " · Offline";
+      return `<option value="${escapeHtml(key)}">${escapeHtml(val.label || key)}${badge}</option>`;
+    });
+
+  let html = "";
+  if (cliOpts.length) {
+    html += `<optgroup label="Detected on this Mac (No API Key)">${cliOpts.join("")}</optgroup>`;
+  }
+  html += `<optgroup label="Cloud APIs">${cloudOpts.join("")}</optgroup>`;
+  html += `<optgroup label="Local Models (100% Offline)">${localOpts.join("")}</optgroup>`;
+  html += `<optgroup label="No AI"><option value="none">Transcript-Only (Offline speech only)</option></optgroup>`;
+  presetSelect.innerHTML = html;
+
+  if (data.llm.provider === "none" || presets[data.llm.provider]) {
     presetSelect.value = data.llm.provider;
   }
+
   el("llmBaseUrlInput").value = data.llm.base_url || "";
   el("llmFastModelInput").value = data.llm.fast_model || "";
   el("llmCalibModelInput").value = data.llm.calibration_model || "";
   el("llmApiKeyInput").value = "";
 
+  const populateLocalModelPicker = (providerKey) => {
+    const localRow = el("localModelRow");
+    const localSelect = el("localModelSelect");
+    const ramNote = el("localRamNote");
+    const srv = localServers[providerKey];
+    const isLocal = providerKey === "ollama" || providerKey === "lmstudio";
+    localRow.classList.toggle("hidden", !isLocal);
+    if (!isLocal) return;
+
+    const models = srv?.models || [];
+    if (srv?.running && models.length) {
+      localSelect.disabled = false;
+      localSelect.innerHTML = models
+        .map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`)
+        .join("");
+      const cur = el("llmFastModelInput").value.trim();
+      if (models.includes(cur)) {
+        localSelect.value = cur;
+      } else {
+        localSelect.value = models[0];
+        el("llmFastModelInput").value = models[0];
+        el("llmCalibModelInput").value = models[0];
+      }
+      localSelect.onchange = () => {
+        el("llmFastModelInput").value = localSelect.value;
+        el("llmCalibModelInput").value = localSelect.value;
+      };
+    } else {
+      localSelect.disabled = true;
+      localSelect.innerHTML = `<option value="">${
+        srv?.running ? "No models pulled yet" : `${providerKey === "ollama" ? "Ollama" : "LM Studio"} is not running`
+      }</option>`;
+    }
+    const memGb = disc.system_memory_gb;
+    if (ramNote) {
+      ramNote.textContent = memGb
+        ? `Your Mac has ${memGb} GB unified memory${memGb >= 16 ? " (handles 7B–14B local models smoothly)." : " (8B or smaller models recommended, or use a Cloud API)."}`
+        : "16 GB+ unified memory recommended for local LLMs.";
+    }
+  };
+
   const updateProviderFields = (providerKey) => {
-    const isCli = providerKey === "agy" || providerKey === "pi";
-    el("cliAuthNotice").classList.toggle("hidden", !isCli);
-    el("apiEndpointFields").classList.toggle("hidden", isCli);
-    // Named presets only exist for the agy tool; every other provider just shows its model IDs.
+    const preset = presets[providerKey] || {};
+    const isNone = providerKey === "none";
+    const isCli = preset.category === "cli";
+    const isLocal = preset.category === "local";
+    const needsKey = Boolean(preset.requires_key);
+
+    el("apiKeyRow").classList.toggle("hidden", !needsKey);
+    el("advancedLlmDetails").classList.toggle("hidden", isNone);
+    el("baseUrlRow").classList.toggle("hidden", isCli);
+    el("testLlmBtn").classList.toggle("hidden", isNone);
+
     for (const group of document.querySelectorAll(".quick-chips")) {
       group.classList.toggle("hidden", providerKey !== "agy");
     }
-    if (isCli) {
-      el("cliAuthNoticeText").textContent = `Signs in through the ${providerKey} command-line tool on this Mac. No API key needed.`;
-    } else if (providerKey === "ollama") {
-      el("maskedKeyHint").textContent = "Ollama runs on this Mac and doesn't need a key.";
-      el("llmApiKeyInput").placeholder = "Not needed";
+
+    const hintEl = el("providerHintText");
+    const signupEl = el("providerSignupLink");
+    if (isNone) {
+      hintEl.textContent = "Offline transcription, diarization, cards, and Markdown export work with zero AI setup.";
+      signupEl.classList.add("hidden");
+    } else if (isCli) {
+      hintEl.textContent = preset.hint || "Uses your signed-in local CLI. No API key needed.";
+      signupEl.classList.add("hidden");
     } else {
-      el("maskedKeyHint").textContent = data.llm.has_api_key
-        ? `Saved key: ${data.llm.masked_api_key}`
-        : "No key saved yet.";
-      el("llmApiKeyInput").placeholder = "Paste a key, or leave blank to keep the saved one";
+      hintEl.textContent = preset.hint || "";
+      if (preset.signup_url) {
+        signupEl.href = preset.signup_url;
+        signupEl.textContent = isLocal ? `Download ${preset.label.split(" ")[0]} ↗` : "Get API key ↗";
+        signupEl.classList.remove("hidden");
+      } else {
+        signupEl.classList.add("hidden");
+      }
     }
+
+    if (needsKey) {
+      const sameProvider = providerKey === data.llm.provider;
+      el("maskedKeyHint").textContent =
+        sameProvider && data.llm.has_api_key
+          ? `Saved key: ${data.llm.masked_api_key}`
+          : "No key saved yet.";
+      el("llmApiKeyInput").placeholder =
+        sameProvider && data.llm.has_api_key
+          ? "Leave blank to keep saved key"
+          : `Paste your ${preset.label || providerKey} API key`;
+    }
+
+    populateLocalModelPicker(providerKey);
   };
+
   updateProviderFields(presetSelect.value);
   syncModelChoosers({ redetect: true });
 
   presetSelect.onchange = () => {
     const p = presets[presetSelect.value];
     if (p) {
-      el("llmBaseUrlInput").value = p.base_url;
-      el("llmFastModelInput").value = p.fast_model;
-      el("llmCalibModelInput").value = p.calibration_model;
+      el("llmBaseUrlInput").value = p.base_url || "";
+      el("llmFastModelInput").value = p.fast_model || "";
+      el("llmCalibModelInput").value = p.calibration_model || "";
+    } else if (presetSelect.value === "none") {
+      el("llmBaseUrlInput").value = "";
+      el("llmFastModelInput").value = "";
+      el("llmCalibModelInput").value = "";
+    }
+    if (testResultEl) {
+      testResultEl.classList.add("hidden");
     }
     updateProviderFields(presetSelect.value);
     syncModelChoosers({ redetect: true });
   };
 
   setModalState("settings");
+}
+
+async function testSettingsConnection() {
+  const btn = el("testLlmBtn");
+  const out = el("testLlmResult");
+  btn.disabled = true;
+  const origLabel = btn.textContent;
+  btn.textContent = "Testing…";
+  out.classList.remove("hidden", "is-ok", "is-err");
+  out.textContent = "Sending a quick test ping…";
+
+  try {
+    const res = await fetch("/api/settings/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: el("llmPresetSelect").value,
+        base_url: el("llmBaseUrlInput").value,
+        fast_model: el("llmFastModelInput").value,
+        calibration_model: el("llmCalibModelInput").value,
+        api_key: el("llmApiKeyInput").value || null,
+      }),
+    });
+    const data = await res.json();
+    showInlineTestResult(out, data);
+  } catch (err) {
+    showInlineTestResult(out, { ok: false, error: err.message || "Network error" });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
+  }
+}
+
+async function openDataDirectory() {
+  try {
+    const res = await fetch("/api/open-data-dir", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      showToast(data.detail || `Sessions folder: ${data.path || "local"}`, 3500);
+    }
+  } catch (err) {
+    showToast(`Could not open folder: ${err.message || "network error"}`);
+  }
 }
 
 async function saveSettings() {
@@ -2724,12 +2928,234 @@ async function saveSettings() {
     return;
   }
   const data = await res.json();
+  if (data.llm) {
+    state.llm = data.llm;
+    syncHomeAiPrompt(data.llm);
+  }
   if (data.asr) {
     state.asr = data.asr;
     renderAsrBadge();
   }
   showToast("Settings saved.", 2200);
   setModalState("none");
+}
+
+async function openOnboardingModal(statusData = null) {
+  const [data, disc] = await Promise.all([
+    statusData ? Promise.resolve(statusData) : fetch("/api/status").then((r) => r.json()),
+    fetchDiscovery(),
+  ]);
+  state.llm = data.llm;
+  const presets = data.llm.presets || {};
+
+  // 1. Detected local CLIs & running local LLM servers (1-click activation!)
+  const detectedItems = [];
+  for (const cli of disc.detected_clis || []) {
+    detectedItems.push({
+      provider: cli.provider,
+      label: cli.label,
+      sub: cli.hint || `Uses local ${cli.cli_bin} CLI`,
+      badge: "Use now →",
+      base_url: cli.base_url,
+      fast_model: cli.fast_model,
+      calibration_model: cli.calibration_model,
+    });
+  }
+  const localSrv = disc.local_servers || {};
+  for (const localKey of ["ollama", "lmstudio"]) {
+    const srv = localSrv[localKey];
+    if (srv?.running && (srv.models || []).length > 0) {
+      const m = srv.models[0];
+      const p = presets[localKey] || {};
+      detectedItems.push({
+        provider: localKey,
+        label: `${p.label || localKey} (${m})`,
+        sub: `${srv.models.length} local model${srv.models.length === 1 ? "" : "s"} ready offline on your Mac`,
+        badge: "Use offline →",
+        base_url: p.base_url || "",
+        fast_model: m,
+        calibration_model: m,
+      });
+    }
+  }
+
+  const detSection = el("onboardDetectedSection");
+  const detList = el("onboardDetectedList");
+  if (detectedItems.length > 0) {
+    detSection.classList.remove("hidden");
+    detList.innerHTML = detectedItems
+      .map(
+        (item, idx) => `
+          <button type="button" class="onboard-detected-btn" data-onboard-detected="${idx}">
+            <div>
+              <div class="onboard-detected-title">${escapeHtml(item.label)}</div>
+              <div class="onboard-detected-sub">${escapeHtml(item.sub)}</div>
+            </div>
+            <span class="onboard-detected-badge">${escapeHtml(item.badge)}</span>
+          </button>
+        `
+      )
+      .join("");
+    detList.onclick = async (ev) => {
+      const btn = ev.target.closest("[data-onboard-detected]");
+      if (!btn) return;
+      const chosen = detectedItems[Number(btn.getAttribute("data-onboard-detected"))];
+      if (!chosen) return;
+      btn.disabled = true;
+      const res = await fetch("/api/settings/llm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: chosen.provider,
+          base_url: chosen.base_url,
+          fast_model: chosen.fast_model,
+          calibration_model: chosen.calibration_model,
+        }),
+      });
+      if (res.ok) {
+        const saved = await res.json();
+        state.llm = saved.llm;
+        syncHomeAiPrompt(saved.llm);
+        setModalState("none");
+        showToast(`Connected ${chosen.label}.`, 2600);
+      } else {
+        btn.disabled = false;
+        showToast("Could not activate provider.");
+      }
+    };
+  } else {
+    detSection.classList.add("hidden");
+    detList.innerHTML = "";
+  }
+
+  // 2. Cloud API quick selector
+  const selectOnboardCloud = (provKey) => {
+    state.onboardProvider = provKey;
+    const p = presets[provKey] || {};
+    for (const pill of document.querySelectorAll("[data-onboard-provider]")) {
+      pill.classList.toggle("active", pill.getAttribute("data-onboard-provider") === provKey);
+    }
+    el("onboardApiKeyInput").placeholder = `Paste your ${p.label || provKey} API key`;
+    el("onboardProviderHint").textContent = p.hint || "";
+    const link = el("onboardSignupLink");
+    if (p.signup_url) {
+      link.href = p.signup_url;
+      link.textContent = provKey === "gemini" ? "Get a free key ↗" : "Get an API key ↗";
+      link.classList.remove("hidden");
+    } else {
+      link.classList.add("hidden");
+    }
+    el("onboardStatus").classList.add("hidden");
+  };
+  selectOnboardCloud(state.onboardProvider || "gemini");
+  el("onboardCloudPills").onclick = (ev) => {
+    const pill = ev.target.closest("[data-onboard-provider]");
+    if (pill) selectOnboardCloud(pill.getAttribute("data-onboard-provider"));
+  };
+
+  el("onboardApiKeyInput").value = "";
+  el("onboardStatus").classList.add("hidden");
+  setModalState("onboarding");
+}
+
+async function testAndSaveOnboardingKey() {
+  const provKey = state.onboardProvider || "gemini";
+  const presets = state.llm?.presets || {};
+  const p = presets[provKey] || {};
+  const apiKey = el("onboardApiKeyInput").value.trim();
+  const statusEl = el("onboardStatus");
+  if (!apiKey) {
+    showInlineTestResult(statusEl, { ok: false, hint: `Paste your ${p.label || provKey} API key first.` });
+    return;
+  }
+  const btn = el("onboardTestSaveBtn");
+  btn.disabled = true;
+  btn.textContent = "Testing…";
+  statusEl.classList.remove("hidden", "is-ok", "is-err");
+  statusEl.textContent = `Testing ${p.label || provKey}…`;
+  try {
+    const testRes = await fetch("/api/settings/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: provKey,
+        base_url: p.base_url || "",
+        fast_model: p.fast_model || "",
+        calibration_model: p.calibration_model || "",
+        api_key: apiKey,
+      }),
+    });
+    const result = await testRes.json();
+    showInlineTestResult(statusEl, result);
+    if (!result.ok) return;
+
+    const saveRes = await fetch("/api/settings/llm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: provKey,
+        base_url: p.base_url || "",
+        fast_model: p.fast_model || "",
+        calibration_model: p.calibration_model || "",
+        api_key: apiKey,
+      }),
+    });
+    if (saveRes.ok) {
+      const saved = await saveRes.json();
+      state.llm = saved.llm;
+      syncHomeAiPrompt(saved.llm);
+      setTimeout(() => {
+        setModalState("none");
+        showToast(`${p.label || provKey} connected and ready.`, 2600);
+      }, 450);
+    }
+  } catch (err) {
+    showInlineTestResult(statusEl, { ok: false, error: err.message || "Network error" });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Test & Save";
+  }
+}
+
+async function skipOnboardingTranscriptOnly() {
+  try {
+    const res = await fetch("/api/settings/llm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "none",
+        base_url: "",
+        fast_model: "",
+        calibration_model: "",
+      }),
+    });
+    if (res.ok) {
+      const saved = await res.json();
+      state.llm = saved.llm;
+      syncHomeAiPrompt(saved.llm);
+    }
+  } catch {
+    /* ignore */
+  }
+  setModalState("none");
+  showToast("Transcript-only mode enabled. You can connect an AI anytime in Settings.", 3200);
+}
+
+async function checkInitialOnboarding() {
+  if (state.onboardingChecked) return;
+  state.onboardingChecked = true;
+  try {
+    const res = await fetch("/api/status");
+    if (!res.ok) return;
+    const data = await res.json();
+    state.llm = data.llm;
+    syncHomeAiPrompt(data.llm);
+    if (data.llm?.needs_onboarding && state.modalState === "none") {
+      await openOnboardingModal(data);
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 function fmtDayLabel(isoStr) {
@@ -3258,6 +3684,8 @@ function initEvents() {
   el("closeSettingsBtn").onclick = () => setModalState("none");
   el("cancelSettingsBtn").onclick = () => setModalState("none");
   el("saveSettingsBtn").onclick = saveSettings;
+  el("testLlmBtn").onclick = testSettingsConnection;
+  el("openDataDirBtn").onclick = openDataDirectory;
   el("llmFastModelInput").oninput = () => syncModelChoosers();
   el("llmCalibModelInput").oninput = () => syncModelChoosers();
 
@@ -3284,6 +3712,24 @@ function initEvents() {
       }
     }
   };
+
+  // First-Run Onboarding Modal
+  el("homeSetupAiBtn")?.addEventListener("click", () => openOnboardingModal());
+  el("closeOnboardingBtn")?.addEventListener("click", () => setModalState("none"));
+  el("onboardTestSaveBtn")?.addEventListener("click", testAndSaveOnboardingKey);
+  el("onboardSkipBtn")?.addEventListener("click", skipOnboardingTranscriptOnly);
+  el("onboardMoreBtn")?.addEventListener("click", () => openSettingsModal());
+  el("onboardApiKeyInput")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      testAndSaveOnboardingKey();
+    }
+  });
+  el("onboardingModal")?.addEventListener("click", (ev) => {
+    if (ev.target === el("onboardingModal")) {
+      setModalState("none");
+    }
+  });
 
   // History Modal
   el("historyBtn").onclick = openHistoryModal;
@@ -3464,3 +3910,4 @@ initEvents();
 renderSpeakerToggle();
 renderCaptureControls();
 connectWS();
+checkInitialOnboarding();
