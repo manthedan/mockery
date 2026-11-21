@@ -996,7 +996,7 @@ export function createProfileAddonsController({
         local.addons = data.addons;
         state.addons = data.addons;
         refreshedFromResponse = true;
-        if (typeof onAddonsChange === "function") onAddonsChange(data.addons);
+        if (typeof onAddonsChange === "function") onAddonsChange(data.addons, data.tts || null);
       }
       if (data.profile) {
         local.profile = data.profile;
@@ -1004,11 +1004,13 @@ export function createProfileAddonsController({
       }
       if (!res.ok) {
         showToast(formatApiDetail(data.detail, `Install failed (${res.status})`), 4000);
-        return;
+        return false;
       }
       showToast("Add-on installed and ready.", 2400);
+      return true;
     } catch (err) {
       showToast(`Install failed: ${err.message || "network error"}`);
+      return false;
     } finally {
       sharedPackOps.end(packId);
       if (!refreshedFromResponse) {
@@ -1018,7 +1020,7 @@ export function createProfileAddonsController({
   }
 
   async function uninstallPack(packId) {
-    if (!packId || !sharedPackOps.begin(packId, "uninstalling")) return;
+    if (!packId || !sharedPackOps.begin(packId, "uninstalling")) return false;
     let refreshedFromResponse = false;
     try {
       const res = await fetch(`/api/addons/${encodeURIComponent(packId)}`, {
@@ -1029,7 +1031,7 @@ export function createProfileAddonsController({
         local.addons = data.addons;
         state.addons = data.addons;
         refreshedFromResponse = true;
-        if (typeof onAddonsChange === "function") onAddonsChange(data.addons);
+        if (typeof onAddonsChange === "function") onAddonsChange(data.addons, data.tts || null);
       }
       if (data.profile) {
         local.profile = data.profile;
@@ -1037,11 +1039,13 @@ export function createProfileAddonsController({
       }
       if (!res.ok) {
         showToast(formatApiDetail(data.detail, "Could not remove add-on."), 4000);
-        return;
+        return false;
       }
       showToast("Add-on removed from local cache.", 2200);
+      return true;
     } catch (err) {
       showToast(`Remove failed: ${err.message || "network error"}`);
+      return false;
     } finally {
       sharedPackOps.end(packId);
       if (!refreshedFromResponse) {
@@ -1230,6 +1234,7 @@ export function createProfileAddonsController({
     refreshProfile,
     refreshAddons,
     renderAddonsSection,
+    installPack,
     getStateSnapshot,
     getProfile: () => local.profile,
     getAddons: () => local.addons,
