@@ -331,7 +331,30 @@ class PracticeSessionStore:
             "question_count": len(raw.get("questions") or []),
             "turn_count": len(raw.get("turns") or []),
             "has_debrief": bool(raw.get("debrief")),
+            **PracticeSessionStore._history_extras(raw.get("questions") or []),
         }
+
+    @staticmethod
+    def _history_extras(questions: list[Any]) -> dict[str, Any]:
+        """Small, privacy-safe facts that let the history rail tell sessions apart."""
+        focus_title = ""
+        answered = 0
+        total = 0.0
+        scored = 0
+        for q in questions:
+            item = q if isinstance(q, dict) else q.model_dump()
+            if not focus_title:
+                focus_title = str(item.get("title") or item.get("competency") or "").strip()[:80]
+            if item.get("status") == "completed":
+                answered += 1
+            signals = item.get("carl_signals") or {}
+            if isinstance(signals, dict) and signals:
+                scored += 1
+                for dim in ("context", "action", "result", "learning"):
+                    val = signals.get(dim)
+                    total += 1.0 if val == "strong" else 0.5 if val == "partial" else 0.0
+        score = round((total / scored) * 2) / 2 if scored else None
+        return {"focus_title": focus_title, "answered_count": answered, "score": score}
 
     @staticmethod
     def _summary_from_session(session: PracticeSession) -> dict[str, Any]:
@@ -346,6 +369,7 @@ class PracticeSessionStore:
             "question_count": len(session.questions),
             "turn_count": len(session.turns),
             "has_debrief": bool(session.debrief),
+            **PracticeSessionStore._history_extras(list(session.questions)),
         }
 
     def _safe_path(self, session_id: str) -> Path:

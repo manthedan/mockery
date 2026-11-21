@@ -3254,14 +3254,17 @@ function renderOnboardingPacksStep() {
       installBtn.classList.toggle("hidden", installed || !available);
       const busy = op === "installing" || op === "uninstalling";
       installBtn.disabled = busy;
+      // Size lives once, in the card's description line — never repeated on the button.
       installBtn.textContent =
         op === "installing"
-          ? `Downloading ${size} MB…`
+          ? "Downloading…"
           : op === "uninstalling"
             ? "Removing…"
             : pack?.state === "error"
-              ? `Retry ${shortName} (${size} MB)`
-              : `Install ${shortName} (${size} MB)`;
+              ? `Retry ${shortName}`
+              : `Install ${shortName}`;
+      installBtn.classList.toggle("is-loading", op === "installing");
+      installBtn.title = `${shortName} · ${size} MB download, then fully offline`;
     }
     if (errEl) {
       const errMsg = pack?.error || ttsError || "";
@@ -3302,9 +3305,9 @@ function renderOnboardingPacksStep() {
   const anyVoiceInstalled = phononInstalled || kokoroInstalled;
   const doneBtn = el("onboardDoneBtn");
   if (doneBtn) {
-    doneBtn.textContent = anyVoiceInstalled ? "Start using Mockery" : "Skip voice for now";
-    doneBtn.classList.toggle("btn-primary", anyVoiceInstalled);
-    doneBtn.classList.toggle("btn-outline", !anyVoiceInstalled);
+    doneBtn.textContent = anyVoiceInstalled ? "Start using Mockery" : "Continue with macOS voice";
+    doneBtn.classList.add("btn-primary");
+    doneBtn.classList.remove("btn-outline");
   }
 
   const optList = el("onboardOptionalPacksList");
@@ -3315,14 +3318,27 @@ function renderOnboardingPacksStep() {
       .map((id) => packs.find((p) => p.id === id))
       .filter(Boolean);
 
+    // Human-first names: what the pack does for you, with its size stated once.
+    const friendly = {
+      rampart_pii: {
+        name: "Resume privacy",
+        desc: "On-device resume privacy scrubber · 15 MB",
+      },
+      pyodide_python: {
+        name: "Python for coding rounds",
+        desc: "Local Python test runner · 14 MB",
+      },
+    };
+
     optList.innerHTML = optionalPacks
       .map((pk) => {
+        const copy = friendly[pk.id] || { name: pk.name, desc: pk.description };
         const op = packOps.get(pk.id);
         const isInstalling = op === "installing" || pk.state === "installing";
         const isUninstalling = op === "uninstalling" || pk.state === "uninstalling";
         const recTag =
           pk.id === "rampart_pii" && cloudActive
-            ? `<span class="addon-size-pill is-rec">Recommended for cloud AI</span>`
+            ? `<span class="addon-size-pill is-rec">Recommended with cloud AI</span>`
             : "";
         let actionHtml = "";
         if (isInstalling) {
@@ -3334,17 +3350,16 @@ function renderOnboardingPacksStep() {
         } else {
           actionHtml = `<button type="button" class="btn btn-outline btn-sm" data-onboard-install="${escapeHtml(
             pk.id
-          )}">Install (${pk.size_mb} MB)</button>`;
+          )}">Install</button>`;
         }
         return `
           <div class="onboard-pack-row">
             <div class="onboard-pack-main">
               <div class="onboard-pack-title">
-                ${escapeHtml(pk.name)}
-                <span class="addon-size-pill">${pk.size_mb} MB</span>
+                ${escapeHtml(copy.name)}
                 ${recTag}
               </div>
-              <div class="onboard-pack-desc">${escapeHtml(pk.description)}</div>
+              <div class="onboard-pack-desc">${escapeHtml(copy.desc)}</div>
               ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
             </div>
             <div class="onboard-pack-actions">${actionHtml}</div>
@@ -3364,7 +3379,13 @@ function setOnboardStep(step) {
   for (const pill of document.querySelectorAll("[data-onboard-step]")) {
     const active = pill.getAttribute("data-onboard-step") === nextStep;
     pill.classList.toggle("active", active);
+    pill.classList.toggle(
+      "is-done",
+      nextStep === "packs" && pill.getAttribute("data-onboard-step") === "ai"
+    );
     pill.setAttribute("aria-selected", active ? "true" : "false");
+    if (active) pill.setAttribute("aria-current", "step");
+    else pill.removeAttribute("aria-current");
   }
 
   el("onboardSkipBtn")?.classList.toggle("hidden", nextStep !== "ai");
@@ -3710,7 +3731,7 @@ async function refreshHomeSessions() {
     return;
   }
   if (!sessions.length) {
-    list.innerHTML = `<div class="home-empty">Interviews you run are kept here, with their transcript and calibration.</div>`;
+    list.innerHTML = `<div class="home-empty">Interviews you run are kept here.</div>`;
     return;
   }
   let lastDay = null;
@@ -4465,6 +4486,11 @@ profileAddons = createProfileAddonsController({
   setModalState,
   clientMachines,
   packOps,
+  onPracticeQuestion: async (q) => {
+    const ok = await practiceStudio?.selectBankQuestion(q);
+    if (ok) setModalState("none");
+    return ok;
+  },
   onRoleApply: (jd) => {
     if (!jd?.title) return;
     const roleLabel = jd.company ? `${jd.title} (${jd.company})` : jd.title;

@@ -32,16 +32,16 @@ DEFAULT_MODULES: dict[str, bool] = {
 
 MODULE_DESCRIPTIONS: dict[str, dict[str, str]] = {
     "practice_mode": {
-        "label": "AI Practice Interviewer & CARL Coach",
-        "description": "Solo mock interviews driven by your resume, target job listing, and curated banks with supportive CARL coaching.",
+        "label": "AI Mock Practice",
+        "description": "Solo mock interviews shaped by your resume and target job, with a supportive coach that leads with your strengths.",
     },
     "system_design_studio": {
-        "label": "System Design Whiteboard Studio",
-        "description": "Interactive architecture canvas whose diagram state is read live by the AI interviewer for real bottleneck probes.",
+        "label": "System Design Whiteboard",
+        "description": "Sketch your architecture while you talk. Your interviewer sees the diagram and asks about what you actually drew.",
     },
     "coding_studio": {
-        "label": "Coding Interview Studio",
-        "description": "Live code editor with in-browser JS/Python test execution and step-by-step AI proctoring.",
+        "label": "Coding Studio",
+        "description": "Write and run JavaScript or Python against real tests, with friendly step-by-step coaching when you want it.",
     },
 }
 
@@ -218,10 +218,10 @@ class AddonManager:
         specs: list[dict[str, Any]] = [
             {
                 "id": "rampart_pii",
-                "name": "Rampart Local PII Classifier",
+                "name": "Resume Privacy Scrubber",
                 "category": "privacy",
                 "size_mb": RAMPART_APPROX_MB,
-                "description": "America.gov's 14.7 MB quantized ONNX MiniLM classifier for local resume scrubbing before cloud LLM calls.",
+                "description": "Finds names, employers, and contact details on this Mac, so they are hidden before anything reaches a cloud AI.",
                 "repo_id": RAMPART_REPO_ID,
                 "installed": self.redactor.is_downloaded(),
                 "available": True,
@@ -231,7 +231,7 @@ class AddonManager:
                 "name": PARAKEET_CHECKPOINTS["mlx-community/parakeet-tdt-0.6b-v2"],
                 "category": "speech",
                 "size_mb": 600,
-                "description": "Default offline Apple Silicon MLX speech recognition engine for English.",
+                "description": "Offline speech recognition for English. Turns what you say into text without leaving this Mac.",
                 "repo_id": "mlx-community/parakeet-tdt-0.6b-v2",
                 "installed": _hf_repo_cached("mlx-community/parakeet-tdt-0.6b-v2"),
                 "available": True,
@@ -241,17 +241,17 @@ class AddonManager:
                 "name": PARAKEET_CHECKPOINTS["mlx-community/parakeet-tdt-0.6b-v3"],
                 "category": "speech",
                 "size_mb": 620,
-                "description": "Optional multilingual Apple Silicon MLX speech recognition engine (25 European languages).",
+                "description": "Offline speech recognition for 25 European languages.",
                 "repo_id": "mlx-community/parakeet-tdt-0.6b-v3",
                 "installed": _hf_repo_cached("mlx-community/parakeet-tdt-0.6b-v3"),
                 "available": True,
             },
             {
                 "id": "phonon_tts",
-                "name": "Phonon-31M Fast Voice (Local TTS)",
+                "name": "Phonon · Fast Voice",
                 "category": "voice",
                 "size_mb": PHONON_APPROX_MB,
-                "description": "Ultra-compact 62 MB Apache 2.0 neural voice (~30× real-time on CPU) for instant offline interview speech.",
+                "description": "A lightweight interviewer voice that answers instantly, fully offline.",
                 "repo_id": PHONON_REPO_ID,
                 "installed": (
                     bool(self.extra_handlers["phonon_tts"]["is_installed"]())
@@ -266,10 +266,10 @@ class AddonManager:
             },
             {
                 "id": "kokoro_tts",
-                "name": "Kokoro-82M Studio Voice (Local TTS)",
+                "name": "Kokoro · Studio Voice",
                 "category": "voice",
                 "size_mb": KOKORO_APPROX_MB,
-                "description": "Rich FP16 local neural voice with US & UK voices so the AI interviewer sounds natural with instant barge-in.",
+                "description": "A warm, natural interviewer voice with US and UK accents. Interrupt it any time, just like a real conversation.",
                 "repo_id": KOKORO_REPO_ID,
                 "installed": (
                     bool(self.extra_handlers["kokoro_tts"]["is_installed"]())
@@ -284,10 +284,10 @@ class AddonManager:
             },
             {
                 "id": "pyodide_python",
-                "name": "Offline Python Runner (Pyodide WASM)",
+                "name": "Python Test Runner",
                 "category": "coding",
                 "size_mb": 14,
-                "description": "Run Python unit tests sandboxed inside your browser during Coding Studio practice sessions.",
+                "description": "Runs your Python tests safely on this Mac during coding practice. No internet needed.",
                 "repo_id": "",
                 "installed": (
                     bool(self.extra_handlers["pyodide_python"]["is_installed"]())

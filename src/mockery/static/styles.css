@@ -5322,3 +5322,3259 @@ kbd {
     transition: none !important;
   }
 }
+
+/* ============================================================================
+   Flagship pass — warm, calm, unboxed, voice-first
+
+   Everything below refines the system above without renaming a single hook.
+   Three ideas carry the whole pass:
+   · One filled action per surface. Everything else is a hairline, a chip or
+     plain words.
+   · Words a person reads or says are set in serif at a reading measure;
+     chrome stays quiet sans.
+   · Boxes only for things that float (dialogs, the composer dock, popovers).
+     Lists, transcripts and the coaching rail are separated by air and hairlines.
+   ============================================================================ */
+
+:root,
+:root[data-theme="dark"] {
+  /* Warm clay: the single non-semantic accent, used for "recommended" and
+     the AI-review spark. Never for primary actions (those stay solid ink). */
+  --accent: #e2ad7c;
+  --accent-soft: rgba(226, 173, 124, 0.13);
+
+  --sidebar: #0f0f0e;
+  --sidebar-line: rgba(255, 253, 245, 0.08);
+  --wash: rgba(255, 253, 245, 0.035);
+  --wash-strong: rgba(255, 253, 245, 0.06);
+  --track: rgba(255, 253, 245, 0.07);
+  --thumb: rgba(255, 253, 245, 0.16);
+  --thumb-shadow: inset 0 0 0 1px rgba(255, 253, 245, 0.1), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --pill-on: rgba(255, 253, 245, 0.14);
+  --pill-on-shadow: inset 0 0 0 1px rgba(255, 253, 245, 0.12);
+  --switch-off: rgba(255, 253, 245, 0.17);
+  --knob: #d8d6cf;
+  --callout: rgba(216, 165, 68, 0.1);
+  --callout-ink: #dcb869;
+  --shadow-soft: 0 12px 32px rgba(0, 0, 0, 0.38);
+  --shadow-dock: 0 0 0 1px var(--line-strong), 0 14px 34px rgba(0, 0, 0, 0.42);
+  --shadow-cta: 0 1px 0 rgba(255, 255, 255, 0.25) inset, 0 6px 18px rgba(0, 0, 0, 0.35);
+
+  --syn-kw: #e2ad7c;
+  --syn-str: #a5c99b;
+  --syn-num: #dfb866;
+  --syn-lit: #e0998a;
+  --syn-fn: #a9c6de;
+  --syn-def: #f4f2ea;
+  --syn-com: #7d7b73;
+}
+
+:root[data-theme="light"] {
+  --accent: #99531f;
+  --accent-soft: rgba(153, 83, 31, 0.09);
+
+  /* The rail is a clear half-step deeper than the paper canvas. */
+  --sidebar: #efede5;
+  --sidebar-line: rgba(26, 24, 16, 0.12);
+  --wash: rgba(26, 24, 16, 0.032);
+  --wash-strong: rgba(26, 24, 16, 0.055);
+  --track: rgba(26, 24, 16, 0.07);
+  --thumb: #ffffff;
+  --thumb-shadow: 0 0 0 1px rgba(26, 24, 16, 0.1), 0 1px 3px rgba(26, 24, 16, 0.14);
+  --pill-on: #ffffff;
+  --pill-on-shadow: 0 0 0 1px rgba(26, 24, 16, 0.16), 0 1px 2px rgba(26, 24, 16, 0.08);
+  --switch-off: rgba(26, 24, 16, 0.2);
+  --knob: #ffffff;
+  --callout: rgba(214, 158, 46, 0.14);
+  --callout-ink: #865a08;
+  --shadow-soft: 0 12px 30px rgba(26, 24, 16, 0.09);
+  --shadow-dock: 0 0 0 1px rgba(26, 24, 16, 0.13), 0 12px 30px rgba(26, 24, 16, 0.1);
+  --shadow-cta: 0 6px 16px rgba(26, 24, 16, 0.2);
+
+  --syn-kw: #9a4a1c;
+  --syn-str: #2d6c48;
+  --syn-num: #8a5a00;
+  --syn-lit: #a8412d;
+  --syn-fn: #2b5a84;
+  --syn-def: #1c1b18;
+  --syn-com: #99968d;
+}
+
+/* ---- Small controls ------------------------------------------------------- */
+
+.btn-xs {
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.btn-quiet {
+  color: var(--ink-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.btn-quiet:not(:disabled):hover {
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink);
+}
+
+.btn-ink {
+  background: var(--ink);
+  color: var(--on-ink);
+  font-weight: 550;
+}
+
+.btn-ink:not(:disabled):hover {
+  opacity: 0.86;
+}
+
+.btn kbd {
+  margin-left: 2px;
+}
+
+/* A chip is a one-tap suggestion: quieter than a button, louder than a link. */
+.chip-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--track);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
+}
+
+.chip-action:not(:disabled):hover {
+  background: var(--ink);
+  box-shadow: none;
+  color: var(--on-ink);
+}
+
+.chip-action:disabled,
+.chip-action.is-busy {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* macOS-style switch. Solid ink when on, in both lightings. */
+.switch {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 28px;
+  height: 17px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--switch-off);
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--knob);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.18s cubic-bezier(0.3, 0.7, 0.3, 1), background-color 0.18s ease;
+}
+
+.switch:checked {
+  background: var(--ink);
+}
+
+.switch:checked::after {
+  transform: translateX(11px);
+  background: var(--on-ink);
+}
+
+.switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.studio-check {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 4.5px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.3px var(--ink-4);
+  cursor: pointer;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.studio-check::after {
+  content: "";
+  width: 8px;
+  height: 4.5px;
+  border-left: 1.7px solid var(--on-ink);
+  border-bottom: 1.7px solid var(--on-ink);
+  transform: translateY(-1px) rotate(-45deg) scale(0);
+  transition: transform 0.12s ease;
+}
+
+.studio-check:checked {
+  background: var(--ink);
+  box-shadow: none;
+}
+
+.studio-check:checked::after {
+  transform: translateY(-1px) rotate(-45deg) scale(1);
+}
+
+.check-line {
+  gap: 9px;
+  min-height: 26px;
+}
+
+/* Selected pills must read at a glance, on paper as well as graphite. */
+.seg-opt.active {
+  background: var(--pill-on);
+  box-shadow: var(--pill-on-shadow);
+}
+
+/* One unified track for a two-way mode switch. */
+.seg.seg-track {
+  flex-wrap: nowrap;
+  gap: 2px;
+  margin-left: 0;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--track);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.seg-track .seg-opt {
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.seg-track .seg-opt.active {
+  background: var(--thumb);
+  box-shadow: var(--thumb-shadow);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.md-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--track);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  /* Tokens like `->` or `O(n log n)` must never break mid-symbol. */
+  white-space: nowrap;
+}
+
+/* ---- Home ----------------------------------------------------------------- */
+
+.home-sidebar {
+  border-right-color: var(--sidebar-line);
+  background: var(--sidebar);
+}
+
+/* One top-aligned rail that scrolls as a whole — no stranded half-height lists. */
+.home-rail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  overflow-y: auto;
+  padding: 14px 0 20px;
+}
+
+.home-rail .home-list {
+  flex: none;
+  overflow: visible;
+  padding: 0;
+}
+
+.home-rail .home-practice-history {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.home-sidebar-subhead {
+  padding: 0 8px 6px;
+}
+
+.home-rail .home-empty {
+  padding: 2px 8px 0;
+  font-size: 12px;
+}
+
+.home-rail .home-group {
+  padding-top: 10px;
+}
+
+.home-rail .home-group:first-child {
+  padding-top: 0;
+}
+
+.practice-history-item {
+  padding: 8px 8px 9px;
+}
+
+.practice-history-item .home-item-title {
+  font-weight: 550;
+}
+
+.ph-more {
+  margin-left: 5px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-weight: 450;
+}
+
+.home-sidebar .session-time {
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ph-meta {
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.ph-badge,
+.ph-pill {
+  flex-shrink: 0;
+  height: 17px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 17px;
+  white-space: nowrap;
+}
+
+.ph-badge {
+  border-radius: 4px;
+  background: var(--track);
+  color: var(--ink-2);
+}
+
+.ph-pill {
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ph-pill.is-progress {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mixed) 45%, transparent);
+  color: var(--mixed);
+}
+
+.ph-pill.is-ready {
+  color: var(--ink);
+}
+
+.ph-pill.is-done {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 45%, transparent);
+  color: var(--good);
+}
+
+.ph-meta .session-meta-main {
+  font-size: 11.5px;
+}
+
+.home-form {
+  max-width: 560px;
+}
+
+.home-mode-switch-row {
+  gap: 10px 14px;
+  margin-bottom: 30px;
+}
+
+.home-mode-caption {
+  font-size: 12.5px;
+}
+
+/* The target job sits directly under the role headline it informs. */
+.home-jd-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  margin-top: 10px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+.home-jd-glyph {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  color: var(--ink-4);
+}
+
+.home-jd-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-jd-line.is-applied .home-jd-text {
+  color: var(--ink-2);
+}
+
+.home-jd-line.is-applied .home-jd-glyph {
+  color: var(--good);
+}
+
+.props {
+  padding-top: 18px;
+}
+
+.practice-checks {
+  gap: 4px;
+}
+
+/* Voice status: one quiet line, never a stack of buttons. */
+.practice-voice-row {
+  margin-top: 2px;
+  padding-left: 37px;
+}
+
+.voice-status-line {
+  gap: 4px 7px;
+  min-height: 24px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.voice-status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink-4);
+}
+
+.voice-status-sep {
+  color: var(--ink-4);
+}
+
+.voice-status-lead {
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.voice-status-line .practice-voice-btns {
+  flex-wrap: nowrap;
+  gap: 5px;
+  margin-left: 2px;
+}
+
+.voice-picker-line {
+  margin-top: 4px;
+}
+
+#practiceQuestionPicker {
+  transition: box-shadow 0.25s ease;
+}
+
+#practiceQuestionPicker.is-flash {
+  box-shadow: 0 0 0 3px var(--mark-strong);
+}
+
+.home-cta {
+  gap: 18px;
+  padding-top: 24px;
+}
+
+/* The launch button is the only filled control on the page. */
+.home-cta .btn-primary {
+  height: 40px;
+  padding: 0 22px;
+  border-radius: 10px;
+  box-shadow: var(--shadow-cta);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.003em;
+}
+
+.home-cta .btn-primary:not(:disabled):active {
+  transform: translateY(0.5px);
+}
+
+.home-cta-hint {
+  max-width: 34ch;
+}
+
+/* ---- Dialogs: breathing headers, soft scroll fades ------------------------ */
+
+#settingsModal .modal-body,
+#profileModal .modal-body,
+#onboardingModal .modal-body {
+  padding-bottom: 0;
+}
+
+/* The fade doubles as the bottom padding, so it rides over content while there
+   is more to scroll and never covers the last row once you reach the end. */
+#settingsModal .modal-body::after,
+#profileModal .modal-body::after,
+#onboardingModal .modal-body::after {
+  content: "";
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: block;
+  flex-shrink: 0;
+  height: 26px;
+  margin: 0 -26px;
+  background: linear-gradient(to bottom, transparent, var(--raised) 82%);
+  pointer-events: none;
+}
+
+.modal-footer {
+  padding: 12px 18px 14px 26px;
+}
+
+/* Onboarding */
+
+.modal-header.onboard-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  padding: 20px 16px 16px 26px;
+  border-bottom: 1px solid var(--line);
+}
+
+.onboard-head-wrap {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#onboardingModal .modal-body {
+  padding: 18px 26px 0;
+}
+
+.onboarding-intro {
+  margin: 0 0 18px;
+  max-width: 58ch;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+/* Progress, not tabs: numbered beads joined by a rail. */
+.onboard-steps {
+  display: flex;
+  gap: 10px;
+}
+
+.onboard-step-pill,
+.onboard-step-pill:hover,
+.onboard-step-pill.active {
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+.onboard-step-pill {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.onboard-step-pill:hover {
+  color: var(--ink-2);
+}
+
+.onboard-step-pill.active {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.onboard-step-num {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.4px var(--line-strong);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.onboard-step-pill.active .onboard-step-num {
+  background: var(--ink);
+  box-shadow: none;
+  color: var(--on-ink);
+}
+
+.onboard-step-pill.is-done .onboard-step-num {
+  background: color-mix(in srgb, var(--good) 14%, transparent);
+  box-shadow: inset 0 0 0 1.4px color-mix(in srgb, var(--good) 60%, transparent);
+  color: transparent;
+}
+
+.onboard-step-pill.is-done .onboard-step-num::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 8px;
+  height: 4.5px;
+  border-left: 1.6px solid var(--good);
+  border-bottom: 1.6px solid var(--good);
+  transform: rotate(-45deg);
+}
+
+.onboard-step-rail {
+  flex: 0 1 44px;
+  height: 1.4px;
+  border-radius: 2px;
+  background: var(--line-strong);
+}
+
+.onboard-voice-grid {
+  gap: 12px;
+}
+
+.onboard-hero-pack {
+  gap: 16px;
+  padding: 16px 16px 14px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.onboard-hero-pack.is-recommended {
+  background: linear-gradient(170deg, var(--accent-soft), transparent 62%), var(--bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, var(--line));
+}
+
+.onboard-hero-pack.is-installed {
+  background: color-mix(in srgb, var(--good) 6%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 45%, var(--line));
+}
+
+.onboard-hero-pack-title {
+  gap: 8px;
+  font-family: var(--font-serif);
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.008em;
+}
+
+.onboard-hero-pack-desc {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.onboard-hero-pack-title .addon-size-pill,
+.onboard-pack-title .addon-size-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-3);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.addon-size-pill.is-rec,
+.onboard-hero-pack-title .addon-size-pill.is-rec,
+.onboard-pack-title .addon-size-pill.is-rec {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--accent);
+}
+
+.preview-btn:not(.is-loading)::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 6px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+
+.onboard-packs-list {
+  gap: 0;
+  margin-top: 8px;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+
+.onboard-pack-row {
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.onboard-pack-row + .onboard-pack-row {
+  border-top: 1px solid var(--line);
+}
+
+.onboard-footer {
+  padding: 14px 18px 16px 26px;
+}
+
+.onboard-footer .btn {
+  height: 32px;
+  padding: 0 16px;
+}
+
+.onboard-footer .btn-ghost {
+  padding: 0 10px;
+}
+
+/* Candidate profile */
+
+.modal-header.profile-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding: 20px 16px 0 26px;
+  border-bottom: 1px solid var(--line);
+}
+
+.profile-modal-head-left {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.profile-tabs {
+  align-self: flex-start;
+  gap: 24px;
+}
+
+.profile-tabs .tab {
+  height: 34px;
+}
+
+#profileModal .modal-body {
+  padding: 20px 26px 0;
+  gap: 18px;
+}
+
+.profile-tab-panel {
+  gap: 16px;
+}
+
+.rampart-banner {
+  gap: 13px;
+  padding: 13px 15px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--wash-strong);
+}
+
+.rampart-banner-glyph {
+  flex-shrink: 0;
+  width: 21px;
+  height: 21px;
+  color: var(--good);
+}
+
+.rampart-banner-info {
+  flex: 1;
+  min-width: 0;
+  gap: 3px;
+}
+
+.rampart-banner-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.rampart-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-3);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0;
+}
+
+.rampart-badge.is-ok {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 40%, transparent);
+  color: var(--good);
+}
+
+.resume-header-bar {
+  padding-bottom: 14px;
+}
+
+.resume-file-title {
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.redaction-controls {
+  gap: 10px 22px;
+  padding: 2px 0 0;
+}
+
+.redaction-section-label {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.redaction-section-hint {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* Each detail is a pill with one honest state: Hidden or Visible. */
+.pii-chip {
+  gap: 8px;
+  padding: 3px 3px 3px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.pii-chip:hover {
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+
+.pii-chip-label {
+  color: var(--ink);
+  font-weight: 550;
+}
+
+.pii-chip .pii-chip-orig,
+.pii-chip.is-redacted .pii-chip-orig {
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+}
+
+.pii-chip.is-kept {
+  border-style: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.pii-chip.is-kept .pii-chip-orig {
+  color: var(--ink-2);
+}
+
+.pii-chip-state {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.pii-chip.is-redacted .pii-chip-state {
+  background: var(--ink);
+  color: var(--on-ink);
+}
+
+.pii-chip.is-kept .pii-chip-state {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-2);
+}
+
+/* What the AI reads, set as prose — not a terminal dump. */
+.redacted-preview {
+  max-height: none;
+  overflow: visible;
+  padding: 20px 24px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--wash);
+  color: var(--ink-2);
+  font-family: var(--font-serif);
+  font-size: 14px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pii-inline-tag {
+  margin: 0 1px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--selected);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-2);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 550;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
+/* Question banks */
+
+.banks-filter-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  gap: 10px 14px;
+  margin: -8px 0 0;
+  padding: 8px 0 12px;
+  background: var(--raised);
+}
+
+.banks-count-label {
+  margin: -4px 0 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.banks-list {
+  gap: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+.bank-item {
+  padding: 18px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.bank-item:first-child {
+  padding-top: 6px;
+  border-top: 0;
+}
+
+.bank-item-head {
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.bank-item-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.003em;
+}
+
+.bank-item-meta {
+  flex-wrap: wrap;
+  margin-top: 7px;
+}
+
+.bank-cat-pill,
+.bank-level-pill,
+.bank-jd-match {
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.bank-cat-pill {
+  background: var(--track);
+}
+
+.bank-level-pill {
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--line);
+  text-transform: capitalize;
+}
+
+.bank-item-prompt {
+  max-width: 70ch;
+  margin-top: 10px;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.bank-item-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  margin-top: 10px;
+}
+
+.bank-item-foot > span + span::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--ink-4);
+}
+
+/* Settings add-ons */
+
+.addons-subhead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 20px 0 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.addons-subhead-note {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.addons-list {
+  border: 0;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.addon-row {
+  gap: 18px;
+  padding: 12px 14px;
+  background: transparent;
+}
+
+label.addon-row {
+  cursor: pointer;
+}
+
+.addon-row-main {
+  flex: 1;
+  gap: 3px;
+}
+
+.addon-row-desc {
+  max-width: 62ch;
+  line-height: 1.45;
+}
+
+.addon-row-actions {
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 132px;
+}
+
+.addon-state-badge.is-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.addon-state-badge.is-ok::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--good);
+}
+
+.addon-remove-btn {
+  color: var(--ink-3);
+}
+
+/* ---- Practice Studio: one bar, an editorial transcript, a voice-first dock -- */
+
+/* The Studio Bar is the only chrome while practising. */
+.app-shell.practice-mode .topbar {
+  display: none;
+}
+
+.practice-bar {
+  height: 48px;
+  padding: 0 10px 0 8px;
+  gap: 12px;
+}
+
+.practice-bar-left {
+  flex: 1 1 auto;
+  gap: 10px;
+}
+
+.practice-bar-right {
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.studio-back {
+  gap: 3px;
+  padding: 0 9px 0 5px;
+  color: var(--ink-2);
+}
+
+.studio-bar-rule {
+  flex-shrink: 0;
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--line);
+}
+
+.practice-title-block {
+  gap: 10px;
+}
+
+.practice-role-title {
+  font-size: 15.5px;
+  letter-spacing: -0.006em;
+}
+
+.practice-meta-pill {
+  padding: 0;
+  border: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.practice-progress-badge {
+  padding: 3px 9px;
+  border: 0;
+  background: var(--track);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.practice-save-pill {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  font-weight: 450;
+  white-space: nowrap;
+}
+
+.practice-save-pill.is-error {
+  padding: 2px 8px;
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--bad);
+}
+
+/* Voice is a real toggle you can see and hit. */
+.studio-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  margin-right: 4px;
+  padding: 0 11px 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.studio-pill:hover {
+  background: var(--hover);
+}
+
+.studio-pill-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+.studio-pill .voice-mute {
+  display: none;
+}
+
+.studio-pill.is-off {
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-3);
+}
+
+.studio-pill.is-off .voice-waves {
+  display: none;
+}
+
+.studio-pill.is-off .voice-mute {
+  display: inline;
+}
+
+.studio-action {
+  color: var(--ink-2);
+}
+
+/* Ending a live interview is deliberate, never the loudest thing on screen. */
+.practice-end-btn {
+  margin-left: 4px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink);
+}
+
+.practice-end-btn:not(:disabled):hover {
+  background: var(--hover);
+}
+
+.practice-end-btn:disabled {
+  opacity: 0.38;
+}
+
+/* Only once the questions are done does the debrief become the next step. */
+.practice-end-btn.is-ready:not(:disabled) {
+  background: var(--ink);
+  box-shadow: none;
+  color: var(--on-ink);
+}
+
+.practice-speaking-btn {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 55%, transparent);
+  color: var(--good);
+}
+
+.practice-speaking-btn.is-preparing {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-2);
+}
+
+.practice-workspace[data-phase="completed"] #practiceHintBtn,
+.practice-workspace[data-phase="completed"] #practiceNextQBtn,
+.practice-workspace[data-phase="completed"] #practiceDebriefBtn,
+.practice-workspace[data-phase="completed"] #practiceVoiceToggleBtn {
+  display: none;
+}
+
+.practice-grid {
+  grid-template-columns: minmax(0, 1fr) 304px;
+}
+
+/* Transcript: no boxes. Questions in serif, your answers on a quiet wash. */
+.practice-feed {
+  gap: 22px;
+  padding: 34px 32px 28px;
+  scroll-padding-bottom: 28px;
+}
+
+.pturn {
+  flex-shrink: 0;
+  align-self: center;
+  width: min(100%, 700px);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.pturn-interviewer,
+.pturn-coach {
+  border: 0;
+  background: transparent;
+}
+
+.pturn-candidate {
+  padding: 14px 18px 15px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--wash);
+}
+
+.pturn-coach {
+  padding: 12px 16px 13px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--good) 7%, transparent);
+}
+
+.pturn-coach .pturn-head {
+  color: var(--good);
+}
+
+.pturn-head {
+  min-height: 18px;
+  margin-bottom: 7px;
+  letter-spacing: 0.06em;
+}
+
+.pturn-body {
+  max-width: 70ch;
+  font-size: 14.5px;
+  line-height: 1.66;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.pturn-serif {
+  font-size: 17.5px;
+  line-height: 1.58;
+  letter-spacing: -0.004em;
+}
+
+.pturn-coach .pturn-body {
+  color: var(--ink-2);
+  font-size: 13.5px;
+}
+
+.pturn-replay-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.14s ease, color 0.12s ease;
+}
+
+.pturn:hover .pturn-replay-btn,
+.pturn-replay-btn:focus-visible {
+  opacity: 1;
+}
+
+.pturn-retry-tag {
+  padding: 1px 7px;
+  background: var(--track);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+
+.pturn-coach-note {
+  margin-top: 10px;
+  padding-top: 0;
+  border-top: 0;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* Thinking: staged copy, a glide bar and an elapsed timer — on a soft wash,
+   with the dots sitting on the text's optical centre line. */
+.pturn.is-thinking {
+  padding: 13px 18px 14px;
+  border-left: 0;
+  border-radius: 12px;
+  background: var(--wash);
+}
+
+.pturn.is-thinking .pturn-body {
+  gap: 2px;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.typing-dots {
+  position: relative;
+  top: 1.5px;
+  height: 1em;
+  margin-right: 9px;
+}
+
+/* Composer: a floating dock where the microphone is the hero. */
+.practice-composer {
+  gap: 7px;
+  padding: 4px 32px 14px;
+  border-top: 0;
+  background: transparent;
+}
+
+.practice-composer > * {
+  align-self: center;
+  width: min(100%, 700px);
+}
+
+.composer-dock {
+  align-items: flex-end;
+  gap: 8px;
+  padding: 7px;
+  border-radius: 28px;
+  background: var(--raised);
+  box-shadow: var(--shadow-dock);
+  transition: box-shadow 0.15s ease;
+}
+
+.composer-dock:focus-within {
+  box-shadow: 0 0 0 1px var(--ink-3), 0 14px 34px rgba(0, 0, 0, 0.18);
+}
+
+.practice-textarea {
+  align-self: center;
+  min-height: 42px;
+  max-height: 168px;
+  padding: 10px 6px;
+  border: 0;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1.55;
+  resize: none;
+  field-sizing: content;
+}
+
+.practice-textarea:focus {
+  border: 0;
+}
+
+.practice-textarea::placeholder {
+  color: var(--ink-3);
+}
+
+.mic-hero {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+  height: 44px;
+  padding: 0 17px 0 5px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--on-ink);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, opacity 0.12s ease;
+}
+
+.mic-hero:not(:disabled):hover {
+  opacity: 0.88;
+}
+
+.mic-hero:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mic-orb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--on-ink) 14%, transparent);
+}
+
+.mic-glyph {
+  width: 17px;
+  height: 17px;
+}
+
+.mic-hero .mic-dot {
+  display: none;
+  margin: 0;
+}
+
+.mic-hero.is-recording {
+  background: var(--rec);
+  color: #fff;
+}
+
+.mic-hero.is-recording .mic-orb {
+  background: rgba(255, 255, 255, 0.2);
+  animation: mic-halo 1.6s ease-out infinite;
+}
+
+.mic-hero.is-recording .mic-glyph,
+.mic-hero.is-transcribing .mic-glyph {
+  display: none;
+}
+
+.mic-hero.is-recording .mic-dot {
+  display: block;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.mic-hero.is-transcribing {
+  background: var(--track);
+  color: var(--ink-2);
+}
+
+.mic-hero.is-transcribing .mic-orb {
+  background: transparent;
+}
+
+.mic-hero.is-transcribing .mic-dot {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+@keyframes mic-halo {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 9px rgba(255, 255, 255, 0);
+  }
+}
+
+/* Send never changes width, and only turns solid once there is text to send.
+   While you type, the mic steps back so there is still one primary. */
+.practice-send-btn {
+  min-width: 92px;
+  height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.composer-dock:has(.practice-textarea:placeholder-shown) .practice-send-btn:not(.is-loading) {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-3);
+}
+
+.composer-dock:has(.practice-textarea:not(:placeholder-shown))
+  .mic-hero:not(.is-recording):not(.is-transcribing) {
+  background: var(--track);
+  color: var(--ink);
+}
+
+.composer-dock:has(.practice-textarea:not(:placeholder-shown))
+  .mic-hero:not(.is-recording):not(.is-transcribing)
+  .mic-orb {
+  background: var(--hover);
+}
+
+.practice-composer-tools {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 18px;
+}
+
+.composer-kbd {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* Coaching rail: three quiet sections on hairlines, not three boxes. */
+.practice-side {
+  gap: 0;
+  padding: 6px 18px 20px;
+}
+
+.practice-side-card {
+  padding: 18px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.practice-side-card + .practice-side-card {
+  border-top: 1px solid var(--line);
+}
+
+.practice-side-head {
+  margin-bottom: 12px;
+}
+
+.practice-side-head .practice-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.meter-help {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-3);
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 15px;
+  letter-spacing: 0;
+  cursor: help;
+}
+
+.meter-help:hover {
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+  color: var(--ink);
+}
+
+.practice-carl-score {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tiles can never be wider than their column, whatever the label. */
+.carl-meter-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.carl-pill {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "letter name"
+    "letter state";
+  align-items: center;
+  gap: 1px 9px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--wash);
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.carl-letter {
+  grid-area: letter;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.carl-name {
+  grid-area: name;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.carl-state {
+  grid-area: state;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.carl-pill.is-strong {
+  background: color-mix(in srgb, var(--good) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 45%, transparent);
+}
+
+.carl-pill.is-partial {
+  background: color-mix(in srgb, var(--mixed) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mixed) 45%, transparent);
+}
+
+.practice-coach-card {
+  border-left: 0;
+}
+
+.practice-coach-card.is-thinking {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--mixed) 8%, transparent), transparent 70%);
+}
+
+.practice-coach-msg {
+  font-family: var(--font-serif);
+  font-size: 14.5px;
+  line-height: 1.58;
+}
+
+.practice-roadmap {
+  gap: 0;
+}
+
+.roadmap-item {
+  padding: 9px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.roadmap-item + .roadmap-item {
+  border-top: 1px solid var(--line);
+}
+
+.roadmap-item.is-active {
+  background: transparent;
+}
+
+.roadmap-item:not(.is-active) .roadmap-title {
+  color: var(--ink-2);
+  font-weight: 450;
+}
+
+.roadmap-item.is-active .roadmap-title {
+  font-weight: 600;
+}
+
+.roadmap-item.is-active .roadmap-num {
+  color: var(--ink);
+}
+
+.roadmap-src {
+  padding: 1px 7px;
+  border: 0;
+  background: var(--track);
+}
+
+.carl-chip {
+  border: 0;
+  border-radius: 5px;
+  background: var(--track);
+}
+
+.roadmap-reqs {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.roadmap-req {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.roadmap-req-mark {
+  position: relative;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.3px var(--line-strong);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.roadmap-req.is-done {
+  color: var(--ink);
+}
+
+.roadmap-req.is-done .roadmap-req-mark {
+  background: var(--good);
+  box-shadow: none;
+}
+
+.roadmap-req.is-done .roadmap-req-mark::after {
+  content: "";
+  position: absolute;
+  top: 4.2px;
+  left: 3.6px;
+  width: 6.5px;
+  height: 3.5px;
+  border-left: 1.5px solid var(--on-ink);
+  border-bottom: 1.5px solid var(--on-ink);
+  transform: rotate(-45deg);
+}
+
+/* ---- Studio split: conversation left, a spacious canvas or editor right ---- */
+
+.practice-workspace[data-studio] .practice-grid {
+  grid-template-columns: minmax(0, 1fr) 276px;
+}
+
+.practice-workspace[data-studio] .practice-main {
+  display: grid;
+  grid-template-columns: minmax(310px, 36%) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.practice-workspace[data-studio] .practice-active-view {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+
+.practice-workspace[data-studio] .practice-studio-slot {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 0;
+  background: var(--bg-sunken);
+}
+
+.practice-workspace[data-studio] .practice-debrief-view {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.practice-workspace[data-studio] .practice-feed {
+  padding: 26px 22px 22px;
+}
+
+.practice-workspace[data-studio] .practice-composer {
+  padding: 4px 16px 12px;
+}
+
+.practice-workspace[data-studio] .pturn-serif {
+  font-size: 16px;
+}
+
+.practice-workspace[data-studio] .practice-side {
+  padding: 4px 16px 18px;
+}
+
+/* In the narrow conversation column the dock stacks: words on top, actions below. */
+.practice-workspace[data-studio] .composer-dock {
+  flex-wrap: wrap;
+  border-radius: 20px;
+}
+
+.practice-workspace[data-studio] .composer-dock .practice-textarea {
+  order: -1;
+  flex: 1 1 100%;
+  padding: 6px 8px 2px;
+}
+
+.practice-workspace[data-studio] .composer-dock .mic-hero {
+  height: 38px;
+  margin-right: auto;
+}
+
+.practice-workspace[data-studio] .composer-dock .mic-orb {
+  width: 28px;
+  height: 28px;
+}
+
+.practice-workspace[data-studio] .composer-dock .practice-send-btn {
+  height: 38px;
+}
+
+.practice-workspace[data-studio] .composer-kbd {
+  display: none;
+}
+
+.practice-studio-slot > .sd-studio,
+.practice-studio-slot > .cs-studio {
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 10px;
+  padding: 12px 16px 12px;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* Shared studio chrome */
+
+.sd-header,
+.cs-header {
+  flex-wrap: nowrap;
+  min-height: 26px;
+}
+
+.sd-header-left,
+.cs-header-left {
+  min-width: 0;
+}
+
+.sd-header-actions,
+.cs-header-actions {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
+.sd-count-pill,
+.cs-status-pill {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 450;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cs-status-pill.is-pass,
+.cs-status-pill.is-fail,
+.cs-status-pill.is-running {
+  font-weight: 600;
+}
+
+.sd-chip-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sd-chip-btn:hover,
+.sd-chip-btn.is-open {
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink);
+}
+
+.sd-chip-btn.is-complete {
+  color: var(--good);
+}
+
+.sd-review-btn {
+  gap: 6px;
+}
+
+.sd-review-glyph {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.btn-quiet.sd-review-btn {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, var(--line));
+  color: var(--ink);
+}
+
+.btn-quiet.sd-review-btn .sd-review-glyph {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.btn-quiet.sd-review-btn:not(:disabled):hover {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, var(--line));
+}
+
+.sd-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  list-style: none;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.sd-icon-btn::-webkit-details-marker {
+  display: none;
+}
+
+.sd-icon-btn:not(:disabled):hover,
+.sd-more[open] > .sd-icon-btn {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.sd-icon-btn:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+.sd-toolbar-rule {
+  flex-shrink: 0;
+  width: 1px;
+  height: 18px;
+  background: var(--line);
+}
+
+.sd-toolbar-spacer {
+  flex: 1 1 0;
+}
+
+/* System design whiteboard: one floating toolbar in four clusters —
+   tool · components · history · everything else. */
+
+.sd-studio {
+  container-type: inline-size;
+}
+
+.sd-toolbar {
+  gap: 7px;
+  padding: 4px 5px;
+  border-radius: 11px;
+  background: var(--raised);
+  box-shadow: 0 0 0 1px var(--line), 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.sd-mode-group {
+  gap: 2px;
+  padding: 2px;
+  overflow: visible;
+  border: 0;
+  border-radius: 8px;
+  background: var(--track);
+}
+
+.sd-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px 0 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.sd-tool-btn.active {
+  background: var(--thumb);
+  box-shadow: var(--thumb-shadow);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.sd-palette {
+  flex: 0 1 auto;
+  gap: 2px;
+}
+
+.sd-palette-btn {
+  gap: 5px;
+  height: 26px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sd-palette-btn:hover {
+  background: transparent;
+}
+
+.sd-palette-tag {
+  padding: 3px 5px;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-2);
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+  transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sd-palette-btn:hover .sd-palette-tag {
+  background: var(--ink);
+  box-shadow: none;
+  color: var(--on-ink);
+}
+
+/* Names join the badges only when the whiteboard is wide enough to hold them. */
+.sd-palette-name {
+  display: none;
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+
+@container (min-width: 1020px) {
+  .sd-palette-name {
+    display: inline;
+  }
+
+  .sd-palette-btn {
+    padding: 0 6px 0 3px;
+  }
+}
+
+.sd-more {
+  position: relative;
+}
+
+.sd-more-menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 5px;
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: var(--shadow-pop);
+}
+
+.sd-menu-item {
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sd-menu-item:hover {
+  background: var(--hover);
+}
+
+.sd-menu-item.is-danger {
+  color: var(--bad);
+}
+
+.sd-menu-rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+
+.sd-playbook {
+  padding: 13px 15px;
+  border: 0;
+  border-radius: 11px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.sd-req-item {
+  gap: 9px;
+  font-size: 12.5px;
+}
+
+.sd-req-item .studio-check {
+  margin-top: 1.5px;
+}
+
+.sd-canvas-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 300px;
+  border: 0;
+  border-radius: 13px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.sd-svg {
+  flex: 1 1 auto;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  border-radius: 13px;
+}
+
+.sd-empty-hint {
+  flex-direction: column;
+  gap: 7px;
+  pointer-events: none;
+}
+
+.sd-empty-hint .chip-action {
+  pointer-events: auto;
+}
+
+.sd-empty-title {
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 19px;
+}
+
+.sd-empty-sub {
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+.sd-inspector {
+  flex-shrink: 0;
+  min-height: 30px;
+}
+
+.sd-inspector-hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.sd-hint-dot {
+  color: var(--ink-4);
+}
+
+/* Coding studio: a tall editor, one obvious Run, results a person can read. */
+
+.cs-toolbar {
+  flex-wrap: nowrap;
+}
+
+.cs-lang-group,
+.cs-tab-group {
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px;
+  overflow: visible;
+  border: 0;
+  border-radius: 8px;
+  background: var(--track);
+}
+
+.cs-lang-btn,
+.cs-tab-btn {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.cs-lang-btn + .cs-lang-btn,
+.cs-tab-btn + .cs-tab-btn {
+  border-left: 0;
+}
+
+.cs-lang-btn.active,
+.cs-tab-btn.active {
+  background: var(--thumb);
+  box-shadow: var(--thumb-shadow);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.cs-run-btn {
+  min-width: 104px;
+  gap: 7px;
+}
+
+.cs-run-btn::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 7px solid currentColor;
+  border-top: 4.5px solid transparent;
+  border-bottom: 4.5px solid transparent;
+}
+
+.cs-cancel-btn {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 40%, var(--line));
+  color: var(--bad);
+}
+
+.cs-hints-panel,
+.cs-py-banner {
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.cs-hints-list {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 24+ visible lines on a laptop, and it grows with the window. */
+.cs-editor-wrap {
+  flex: 1 1 auto;
+  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: min(430px, 46vh);
+  max-height: none;
+  border: 0;
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.cs-editor-wrap:focus-within {
+  box-shadow: inset 0 0 0 1px var(--ink-3), 0 0 0 3px color-mix(in srgb, var(--ink) 9%, transparent);
+}
+
+.cs-gutter,
+.cs-highlight,
+.cs-textarea {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  letter-spacing: 0;
+  tab-size: 2;
+}
+
+.cs-gutter {
+  padding: 12px 9px 12px 4px;
+  border-right: 0;
+  background: transparent;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.cs-code-layer {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The highlighted copy sits exactly under a transparent textarea: same font,
+   same padding, same scroll offsets — so the caret and selection stay native. */
+.cs-highlight,
+.cs-textarea {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  padding: 12px 14px 12px 6px;
+  border: 0;
+  white-space: pre;
+}
+
+.cs-highlight {
+  overflow: hidden;
+  color: var(--ink);
+  pointer-events: none;
+}
+
+.cs-textarea {
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  resize: none;
+}
+
+.cs-textarea::placeholder {
+  color: var(--ink-4);
+}
+
+.cs-textarea::selection {
+  background: var(--mark-strong);
+  color: transparent;
+}
+
+.syn-kw {
+  color: var(--syn-kw);
+}
+
+.syn-str {
+  color: var(--syn-str);
+}
+
+.syn-num {
+  color: var(--syn-num);
+}
+
+.syn-lit {
+  color: var(--syn-lit);
+}
+
+.syn-fn {
+  color: var(--syn-fn);
+}
+
+.syn-def {
+  color: var(--syn-def);
+}
+
+.syn-com {
+  color: var(--syn-com);
+}
+
+.cs-editor-hint {
+  flex-shrink: 0;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.cs-console {
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.cs-console-head {
+  padding: 9px 13px 8px;
+}
+
+.cs-console-meta {
+  color: var(--ink-3);
+}
+
+.cs-console-body,
+.cs-console-body.is-pass,
+.cs-console-body.is-fail {
+  max-height: 176px;
+  overflow-y: auto;
+  padding: 9px 13px 11px;
+  color: var(--ink-2);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.cs-out-empty {
+  margin: 0;
+  color: var(--ink-3);
+}
+
+.cs-out-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cs-out-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.cs-out-mark {
+  flex-shrink: 0;
+  width: 14px;
+  color: var(--ink-4);
+  font-weight: 700;
+  text-align: center;
+}
+
+.cs-out-label {
+  flex-shrink: 0;
+  width: 36px;
+  white-space: nowrap;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.cs-out-text {
+  min-width: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.cs-out-row.is-pass .cs-out-mark,
+.cs-out-row.is-pass .cs-out-label {
+  color: var(--good);
+}
+
+.cs-out-row.is-fail .cs-out-mark,
+.cs-out-row.is-fail .cs-out-label {
+  color: var(--bad);
+}
+
+.cs-out-row.is-summary .cs-out-text {
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.cs-out-row.is-info .cs-out-text,
+.cs-out-row.is-detail .cs-out-text {
+  color: var(--ink-2);
+}
+
+.cs-raw-trace {
+  margin-top: 8px;
+}
+
+.cs-raw-trace > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.cs-raw-trace > summary::-webkit-details-marker {
+  display: none;
+}
+
+.cs-raw-trace > summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-right: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.12s ease;
+}
+
+.cs-raw-trace[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.cs-raw-trace > summary:hover {
+  color: var(--ink);
+}
+
+.cs-raw-trace > pre {
+  max-height: 150px;
+  margin: 7px 0 0;
+  padding: 9px 11px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--wash);
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---- Debrief & 45-second retry: an editorial page, not a stack of cards ----- */
+
+.practice-debrief-view {
+  gap: 32px;
+  padding: 40px 32px 56px;
+}
+
+.practice-debrief-view > * {
+  flex-shrink: 0;
+  align-self: center;
+  width: min(100%, 760px);
+}
+
+.practice-debrief-content {
+  display: flex;
+  flex-direction: column;
+  gap: 34px;
+}
+
+.debrief-hero {
+  padding: 0 0 30px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.debrief-encouragement {
+  max-width: 24em;
+  margin-top: 12px;
+  font-size: 27px;
+  line-height: 1.3;
+  letter-spacing: -0.014em;
+  text-wrap: balance;
+}
+
+.debrief-primer {
+  max-width: 62ch;
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.debrief-hero-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-top: 22px;
+}
+
+.debrief-hero-actions .btn {
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.debrief-hero-score {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+.debrief-hero-score-num {
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 21px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.debrief-section-title {
+  margin: 0 0 16px;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.008em;
+  text-transform: none;
+}
+
+.debrief-strengths {
+  gap: 11px;
+  padding-left: 0;
+  font-size: 14px;
+  line-height: 1.58;
+  list-style: none;
+}
+
+.debrief-strengths li {
+  position: relative;
+  max-width: 72ch;
+  padding-left: 24px;
+}
+
+.debrief-strengths li::before {
+  content: "";
+  position: absolute;
+  top: 7px;
+  left: 3px;
+  width: 9px;
+  height: 5px;
+  border-left: 1.7px solid var(--good);
+  border-bottom: 1.7px solid var(--good);
+  transform: rotate(-45deg);
+}
+
+.debrief-q-list {
+  gap: 0;
+}
+
+.debrief-q-card {
+  gap: 12px;
+  padding: 24px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.debrief-q-card:first-child {
+  padding-top: 2px;
+  border-top: 0;
+}
+
+.debrief-q-card:last-child {
+  padding-bottom: 0;
+}
+
+.debrief-q-head {
+  align-items: baseline;
+  gap: 14px;
+}
+
+.debrief-q-heading {
+  min-width: 0;
+}
+
+.debrief-q-num {
+  margin-right: 8px;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+}
+
+.debrief-q-title {
+  font-size: 15px;
+  letter-spacing: -0.003em;
+}
+
+.debrief-q-score {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.debrief-q-retried {
+  color: var(--good);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.debrief-q-prompt {
+  max-width: 68ch;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.debrief-q-row,
+.retry-detail {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 14px;
+  max-width: 80ch;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.debrief-q-label {
+  padding-top: 3px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
+/* The reframe is a tinted editorial callout — no dashes, no box-in-a-box. */
+.debrief-q-reframe {
+  margin-top: 4px;
+  padding: 15px 20px 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--callout);
+}
+
+.debrief-q-reframe .practice-kicker {
+  color: var(--callout-ink);
+}
+
+.debrief-q-reframe p {
+  max-width: 68ch;
+  margin-top: 6px;
+  font-size: 15px;
+  line-height: 1.62;
+}
+
+.debrief-pending-card {
+  gap: 14px;
+  padding: 24px 26px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--wash);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* Retry drill: the one floating card on the page. */
+.practice-retry-card {
+  gap: 16px;
+  padding: 26px 28px 24px;
+  border: 0;
+  border-radius: 18px;
+  background: var(--raised);
+  box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-soft);
+  scroll-margin: 24px;
+  transition: box-shadow 0.3s ease;
+}
+
+.practice-retry-card.is-spotlit {
+  box-shadow: 0 0 0 2px var(--ink-2), var(--shadow-soft);
+}
+
+.practice-retry-head {
+  align-items: center;
+  gap: 18px;
+}
+
+.practice-retry-headline {
+  min-width: 0;
+}
+
+.practice-retry-focus {
+  margin-top: 5px;
+  font-family: var(--font-serif);
+  font-size: 21px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.practice-retry-timer-wrap {
+  flex-shrink: 0;
+  gap: 10px;
+}
+
+/* A countdown you can read in peripheral vision while speaking. */
+.retry-ring {
+  --p: 100;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: conic-gradient(var(--ink-2) calc(var(--p) * 1%), var(--track) 0);
+  -webkit-mask: radial-gradient(circle, transparent 54%, #000 57%);
+  mask: radial-gradient(circle, transparent 54%, #000 57%);
+}
+
+.practice-retry-card.is-timing .retry-ring {
+  background: conic-gradient(var(--ink) calc(var(--p) * 1%), var(--track) 0);
+}
+
+.retry-ring.is-warn,
+.practice-retry-card.is-timing .retry-ring.is-warn {
+  background: conic-gradient(var(--mixed) calc(var(--p) * 1%), var(--track) 0);
+}
+
+.practice-retry-clock {
+  min-width: 34px;
+  color: var(--ink-2);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.practice-retry-card.is-timing .practice-retry-clock {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.practice-retry-prompt {
+  max-width: 66ch;
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.58;
+}
+
+.retry-dock {
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.retry-dock:focus-within {
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+
+.retry-submit-btn {
+  min-width: 136px;
+}
+
+.practice-retry-card > .practice-composer-tools {
+  margin-top: -8px;
+}
+
+.practice-retry-history {
+  gap: 22px;
+}
+
+.practice-retry-history:not(:empty) {
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.retry-result-card {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.retry-result-head {
+  margin-bottom: 10px;
+  letter-spacing: 0.06em;
+}
+
+/* What changed comes first, in words: Result: Partial → Strong. */
+.retry-outcome {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 8px;
+  margin: 0 0 14px;
+}
+
+.retry-delta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: var(--wash);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.retry-delta-dim {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.retry-delta-dim::after {
+  content: ":";
+}
+
+.retry-delta-from {
+  color: var(--ink-3);
+}
+
+.retry-delta-arrow {
+  color: var(--ink-4);
+}
+
+.retry-delta-to {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.retry-delta.is-up {
+  background: color-mix(in srgb, var(--good) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 40%, transparent);
+}
+
+.retry-delta.is-up .retry-delta-to {
+  color: var(--good);
+}
+
+.retry-delta.is-down .retry-delta-to {
+  color: var(--mixed);
+}
+
+.retry-outcome-score {
+  margin-left: 4px;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One quote treatment, no nested rules down the left edge. */
+.retry-quote {
+  margin: 0 0 12px;
+  padding: 13px 18px 14px;
+  border-left: 0;
+  border-radius: 12px;
+  background: var(--wash);
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 14.5px;
+  line-height: 1.62;
+}
+
+.retry-encourage {
+  margin-bottom: 8px;
+  font-size: 13.5px;
+}
+
+.retry-detail {
+  margin-top: 6px;
+}
+
+.practice-debrief-footer {
+  gap: 8px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.debrief-footer-spacer {
+  flex: 1 1 auto;
+}
+
+.practice-debrief-footer .btn {
+  height: 32px;
+  padding: 0 14px;
+}
+
+.transcript-toggle {
+  gap: 8px;
+  padding: 0 10px 0 6px;
+  color: var(--ink-2);
+}
+
+.transcript-toggle::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-left: 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.14s ease;
+}
+
+.transcript-toggle[aria-expanded="true"]::before {
+  transform: rotate(45deg);
+}
+
+.practice-debrief-transcript {
+  gap: 20px;
+  padding-top: 4px;
+  border-top: 0;
+}
+
+.practice-debrief-transcript .pturn {
+  align-self: stretch;
+  width: 100%;
+}
+
+/* ---- Refinements from the rendered review --------------------------------- */
+
+/* Home: the form hangs from one line, so switching modes never moves the switch. */
+.home-form {
+  margin: 0 auto auto;
+  padding-top: clamp(20px, 7vh, 72px);
+}
+
+.home-form .prop {
+  grid-template-columns: 122px minmax(0, 1fr);
+}
+
+.home-form .prop-label {
+  white-space: nowrap;
+}
+
+/* A requested hint is a quiet aside in the coach's warm tone, never an alert. */
+.pturn-coach {
+  background: var(--callout);
+}
+
+.pturn-coach .pturn-head {
+  color: var(--callout-ink);
+}
+
+/* Studio rail: the four signals read as one calm list with full names. */
+.practice-workspace[data-studio] .practice-grid {
+  grid-template-columns: minmax(0, 1fr) 264px;
+}
+
+.practice-workspace[data-studio] .practice-main {
+  grid-template-columns: minmax(292px, 28%) minmax(0, 1fr);
+}
+
+.practice-workspace[data-studio] .carl-meter-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.practice-workspace[data-studio] .carl-pill,
+.practice-workspace[data-studio] .carl-pill.is-strong,
+.practice-workspace[data-studio] .carl-pill.is-partial {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "letter name state";
+  gap: 0 10px;
+  padding: 8px 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.practice-workspace[data-studio] .carl-pill + .carl-pill {
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.practice-workspace[data-studio] .carl-letter {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+
+.practice-workspace[data-studio] .carl-name {
+  font-size: 12.5px;
+}
+
+.practice-workspace[data-studio] .carl-state {
+  overflow: visible;
+  font-size: 11.5px;
+}
+
+/* Whiteboard: the artboard is exactly the drawable area, never a letterbox. */
+.sd-canvas-wrap {
+  display: block;
+  flex: 0 0 auto;
+  min-height: 0;
+  max-width: calc((100vh - 236px) * 2.19);
+  aspect-ratio: 920 / 420;
+}
+
+.sd-svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* The debrief-in-progress card sits in the same reading column as the turns. */
+.practice-feed > .debrief-pending-card {
+  flex-shrink: 0;
+  align-self: center;
+  width: min(100%, 700px);
+}
+
+/* Retry feedback labels stay on one line. */
+.retry-detail {
+  grid-template-columns: 126px minmax(0, 1fr);
+}
+
+.debrief-q-label {
+  white-space: nowrap;
+}
+
+/* ---- Narrow windows (re-stated: the rules above changed the base grid) ------ */
+
+@media (max-width: 1180px) {
+  .practice-workspace[data-studio] .practice-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .practice-workspace[data-studio] .practice-side {
+    display: none;
+  }
+
+  .practice-meta-pill,
+  .practice-save-pill:not(.is-error) {
+    display: none;
+  }
+}
+
+@media (max-width: 960px) {
+  .practice-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .practice-side {
+    max-height: 34vh;
+    border-top: 1px solid var(--line);
+  }
+
+  .practice-workspace[data-studio] .practice-main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.25fr) minmax(0, 1fr);
+  }
+
+  .practice-workspace[data-studio] .practice-studio-slot {
+    grid-column: 1;
+    grid-row: 1;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .practice-workspace[data-studio] .practice-active-view {
+    grid-column: 1;
+    grid-row: 2;
+    border-right: 0;
+  }
+
+  .cs-editor-wrap {
+    min-height: 300px;
+  }
+
+  .practice-feed,
+  .practice-debrief-view {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .practice-composer {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .debrief-q-row,
+  .retry-detail {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .studio-action,
+  .composer-kbd {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 720px) {
+  .mic-hero > span:last-child {
+    display: none;
+  }
+
+  .mic-hero {
+    padding: 0 5px;
+  }
+
+  .voice-status-lead,
+  .voice-status-sep {
+    display: none;
+  }
+}
+
+/* Motion is a courtesy, never a requirement. */
+@media (prefers-reduced-motion: reduce) {
+  .mic-hero.is-recording .mic-orb,
+  .switch,
+  .switch::after,
+  .studio-check::after,
+  .pturn-replay-btn {
+    animation: none !important;
+    transition: none !important;
+  }
+}
