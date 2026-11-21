@@ -104,7 +104,12 @@ class CandidateProfileStore:
             return CandidateProfileState()
         try:
             raw = json.loads(self.profile_path.read_text(encoding="utf-8"))
-            return CandidateProfileState.model_validate(raw)
+            loaded = CandidateProfileState.model_validate(raw)
+            if loaded.active_jd_id is not None:
+                valid_ids = {jd.id for jd in loaded.job_listings}
+                if loaded.active_jd_id not in valid_ids:
+                    loaded.active_jd_id = loaded.job_listings[0].id if loaded.job_listings else None
+            return loaded
         except Exception:
             return CandidateProfileState()
 
@@ -355,9 +360,26 @@ class CandidateProfileStore:
                     "prefs": r.prefs.model_dump(),
                     "updated_at_ms": r.updated_at_ms,
                 }
+            from .state_machines import (
+                derive_resume_redaction_state,
+                validate_profile_invariants,
+            )
+
+            redaction_state = derive_resume_redaction_state(
+                has_resume=self._state.resume is not None,
+                engine=self._state.resume.engine if self._state.resume is not None else "",
+            )
+            violations = validate_profile_invariants(self._state)
             return {
                 "resume": resume_dict,
                 "job_listings": [j.model_dump() for j in self._state.job_listings],
                 "active_jd_id": self._state.active_jd_id,
                 "rampart": self.redactor.status_dict(),
+                "state_machines": {
+                    "resume_redaction": {
+                        "state": redaction_state.value,
+                    },
+                    "invariants_ok": len(violations) == 0,
+                    "invariant_violations": violations,
+                },
             }
