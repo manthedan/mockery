@@ -7,11 +7,13 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import httpx
 from dotenv import dotenv_values
 from openai import AsyncOpenAI
 
@@ -32,15 +34,26 @@ logger = logging.getLogger(__name__)
 
 
 PROVIDER_ENV_KEYS: dict[str, str] = {
-    "deepseek": "DEEPSEEK_API_KEY",
     "gemini": "GEMINI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
+
+CLI_BACKEND_MAP: dict[str, str] = {
+    "claude_cli": "claude",
+    "codex_cli": "codex",
+    "gemini_cli": "gemini",
+    "agy": "agy",
+    "pi": "pi",
+}
+
+LOCAL_HTTP_PROVIDERS = {"ollama", "lmstudio"}
 
 
 class LLMRuntimeConfig:
-    """Manages OpenAI-compatible & local CLI (`agy` / `pi`) LLM + ASR checkpoint config with `.env.local` persistence."""
+    """Manages OpenAI-compatible, native Anthropic, local Ollama/LM Studio, & local CLI LLM + ASR config with `.env.local` persistence."""
 
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
@@ -53,8 +66,9 @@ class LLMRuntimeConfig:
         if self.env_local_path.exists():
             merged.update({k: v for k, v in dotenv_values(self.env_local_path).items() if v is not None})
 
-        self.provider: str = merged.get("LLM_PROVIDER") or os.getenv("LLM_PROVIDER", "deepseek")
-        preset = LLM_PRESETS.get(self.provider, LLM_PRESETS["deepseek"])
+        self._has_saved_provider: bool = bool(merged.get("LLM_PROVIDER") or os.getenv("LLM_PROVIDER"))
+        self.provider: str = merged.get("LLM_PROVIDER") or os.getenv("LLM_PROVIDER", "gemini")
+        preset = LLM_PRESETS.get(self.provider, LLM_PRESETS["gemini"])
         self.base_url: str = merged.get("LLM_BASE_URL") or os.getenv("LLM_BASE_URL", preset["base_url"])
 
         provider_env_var = PROVIDER_ENV_KEYS.get(self.provider)
@@ -77,27 +91,39 @@ class LLMRuntimeConfig:
 
     @property
     def cli_backend(self) -> str | None:
-        if self.provider == "agy" or self.base_url.startswith("cli://agy"):
-            return "agy"
-        if self.provider == "pi" or self.base_url.startswith("cli://pi"):
-            return "pi"
+        if self.provider in CLI_BACKEND_MAP:
+            return CLI_BACKEND_MAP[self.provider]
+        if self.base_url.startswith("cli://"):
+            bin_name = self.base_url[len("cli://") :].strip().split("/")[0]
+            if bin_name in CLI_BACKEND_MAP.values():
+                return bin_name
         return None
 
     @property
+    def is_anthropic_native(self) -> bool:
+        return self.provider == "anthropic" or "api.anthropic.com" in self.base_url.lower()
+
+    @property
     def is_configured(self) -> bool:
+        if self.provider == "none":
+            return False
         cli = self.cli_backend
         if cli is not None:
             return shutil.which(cli) is not None
-        if self.provider == "ollama" or "localhost" in self.base_url or "127.0.0.1" in self.base_url:
+        if self.provider in LOCAL_HTTP_PROVIDERS or "localhost" in self.base_url or "127.0.0.1" in self.base_url:
             return True
         return bool(self.api_key.strip())
 
     def public_dict(self) -> dict[str, Any]:
         masked = ""
-        if self.api_key:
+        if self.provider == "none":
+            masked = "Transcript-only mode"
+        elif self.api_key:
             masked = f"{self.api_key[:4]}...{self.api_key[-4:]}" if len(self.api_key) > 8 else "••••••••"
         elif self.cli_backend:
             masked = f"local {self.cli_backend} CLI"
+        elif self.provider in LOCAL_HTTP_PROVIDERS:
+            masked = "Local server (no key)"
         return {
             "provider": self.provider,
             "base_url": self.base_url,
@@ -106,6 +132,7 @@ class LLMRuntimeConfig:
             "has_api_key": bool(self.api_key.strip()) or bool(self.cli_backend and self.is_configured),
             "masked_api_key": masked,
             "is_configured": self.is_configured,
+            "needs_onboarding": (not self.is_configured) and (not self._has_saved_provider),
             "presets": LLM_PRESETS,
         }
 
@@ -122,6 +149,7 @@ class LLMRuntimeConfig:
         clean_provider = _sanitize_env_val(provider) or "custom"
         provider_changed = clean_provider != self.provider
         self.provider = clean_provider
+        self._has_saved_provider = True
         self.base_url = _sanitize_env_val(base_url)
         self.fast_model = _sanitize_env_val(fast_model)
         self.calibration_model = _sanitize_env_val(calibration_model)
@@ -130,7 +158,9 @@ class LLMRuntimeConfig:
         if self.env_local_path.exists():
             existing = {k: v for k, v in dotenv_values(self.env_local_path).items() if v is not None}
 
-        if api_key is not None and api_key.strip() != "":
+        if self.provider == "none":
+            self.api_key = ""
+        elif api_key is not None and api_key.strip() != "":
             self.api_key = _sanitize_env_val(api_key)
         elif provider_changed:
             # Never carry over an old provider's API key when switching to a different provider
@@ -447,6 +477,321 @@ class InterviewCopilotLLM:
             raise RuntimeError(f"pi CLI exited {proc.returncode}: {(stderr or stdout)[:300]}")
         return stdout
 
+    async def _call_claude_cli(
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        timeout: float,
+        expect_json: bool,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        model_name, effort = _parse_agy_model_spec(re.sub(r"^claude/", "", model.strip()))
+        format_rule = (
+            "Reply with ONLY raw valid JSON (no markdown fences)."
+            if expect_json
+            else "Reply with ONLY the requested Markdown response."
+        )
+        sys_prompt = f"{system.strip()}\n\n{format_rule}".strip()
+        args = [
+            "claude",
+            "-p",
+            "--no-session-persistence",
+            "--tools",
+            "",
+            "--output-format",
+            "text",
+        ]
+        if model_name:
+            args.extend(["--model", model_name])
+        if effort:
+            args.extend(["--effort", effort])
+        if sys_prompt:
+            args.extend(["--system-prompt", sys_prompt])
+
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        return await self._communicate_or_stream_cli(
+            proc,
+            name="claude CLI",
+            stdin_text=user,
+            timeout=timeout,
+            on_delta=on_delta,
+        )
+
+    async def _call_codex_cli(
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        timeout: float,
+        expect_json: bool,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        clean_model = re.sub(r"^codex/", "", model.strip())
+        format_rule = (
+            "Do NOT run commands or inspect files. Use ONLY the input below and reply with ONLY raw valid JSON (no markdown fences)."
+            if expect_json
+            else "Do NOT run commands or inspect files. Use ONLY the input below and reply with ONLY the requested Markdown response."
+        )
+        combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
+        fd, out_path = tempfile.mkstemp(prefix="mockery_codex_", suffix=".txt")
+        os.close(fd)
+        try:
+            args = [
+                "codex",
+                "exec",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--color",
+                "never",
+                "-s",
+                "read-only",
+                "-o",
+                out_path,
+            ]
+            if clean_model:
+                args.extend(["-m", clean_model])
+            args.append("-")
+
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout = await self._communicate_or_stream_cli(
+                proc,
+                name="codex CLI",
+                stdin_text=combined,
+                timeout=timeout,
+                on_delta=None,
+            )
+            file_out = Path(out_path).read_text(encoding="utf-8", errors="replace").strip()
+            result = file_out or stdout
+            if on_delta is not None and result:
+                await on_delta(result)
+            return result
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+    async def _call_gemini_cli(
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        timeout: float,
+        expect_json: bool,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        clean_model = re.sub(r"^gemini/", "", model.strip())
+        format_rule = (
+            "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY raw valid JSON (no markdown fences)."
+            if expect_json
+            else "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY the requested Markdown response."
+        )
+        combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
+        args = ["gemini", "-o", "text"]
+        if clean_model:
+            args.extend(["-m", clean_model])
+        args.extend(["-p", ""])
+
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        return await self._communicate_or_stream_cli(
+            proc,
+            name="gemini CLI",
+            stdin_text=combined,
+            timeout=timeout,
+            on_delta=on_delta,
+        )
+
+    async def _communicate_or_stream_cli(
+        self,
+        proc: asyncio.subprocess.Process,
+        *,
+        name: str,
+        stdin_text: str,
+        timeout: float,
+        on_delta: Callable[[str], Awaitable[None]] | None,
+    ) -> str:
+        stdin_bytes = stdin_text.encode("utf-8")
+        if on_delta is None:
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise TimeoutError(f"{name} timed out after {timeout:.0f}s")
+            stdout = stdout_b.decode("utf-8", errors="replace").strip()
+            stderr = stderr_b.decode("utf-8", errors="replace").strip()
+            if proc.returncode != 0:
+                raise RuntimeError(f"{name} exited {proc.returncode}: {(stderr or stdout)[:300]}")
+            return stdout
+
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        deadline = time.monotonic() + timeout
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        chunks: list[str] = []
+        stderr_task = asyncio.create_task(proc.stderr.read())
+        try:
+            proc.stdin.write(stdin_bytes)
+            await proc.stdin.drain()
+            proc.stdin.close()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                data = await asyncio.wait_for(proc.stdout.read(256), timeout=remaining)
+                if not data:
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        chunks.append(tail)
+                        await on_delta(tail)
+                    break
+                text_chunk = decoder.decode(data, final=False)
+                if text_chunk:
+                    chunks.append(text_chunk)
+                    await on_delta(text_chunk)
+            remaining = max(0.1, deadline - time.monotonic())
+            await asyncio.wait_for(proc.wait(), timeout=remaining)
+            stderr_b = await stderr_task
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            stderr_task.cancel()
+            raise TimeoutError(f"{name} timed out after {timeout:.0f}s")
+
+        stdout = "".join(chunks).strip()
+        stderr = stderr_b.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            raise RuntimeError(f"{name} exited {proc.returncode}: {(stderr or stdout)[:300]}")
+        return stdout
+
+    async def _call_anthropic_api(
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float,
+        max_tokens: int,
+        timeout: float,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        base = self.config.base_url.rstrip("/")
+        url = f"{base}/messages" if not base.endswith("/messages") else base
+        headers = {
+            "x-api-key": self.config.api_key.strip(),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": user}],
+        }
+        if system.strip():
+            payload["system"] = system
+
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            if on_delta is not None:
+                payload["stream"] = True
+                parts: list[str] = []
+                async with http.stream("POST", url, headers=headers, json=payload) as resp:
+                    if resp.status_code >= 400:
+                        body = (await resp.aread()).decode("utf-8", errors="replace")
+                        raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {body[:300]}")
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw or raw == "[DONE]":
+                            continue
+                        try:
+                            ev = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if ev.get("type") == "content_block_delta":
+                            delta_obj = ev.get("delta") or {}
+                            txt = delta_obj.get("text")
+                            if isinstance(txt, str) and txt:
+                                parts.append(txt)
+                                await on_delta(txt)
+                return "".join(parts).strip()
+
+            resp = await http.post(url, headers=headers, json=payload)
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {resp.text[:300]}")
+            data = resp.json()
+            blocks = data.get("content") or []
+            return "".join(
+                str(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+
+    async def test_connection(self, timeout: float = 20.0) -> dict[str, Any]:
+        """Run a tiny end-to-end ping against the configured provider to verify credentials and model access."""
+        if self.config.provider == "none":
+            return {
+                "ok": True,
+                "latency_ms": 0,
+                "model": "none",
+                "message": "Transcript-only mode active (local speech recognition ready; no AI provider needed).",
+            }
+        if not self.config.is_configured:
+            return {
+                "ok": False,
+                "latency_ms": 0,
+                "model": self.config.fast_model,
+                "error": "No API key or local CLI detected for this provider.",
+                "hint": "Paste an API key or choose a detected local CLI / Ollama server.",
+            }
+        t0 = time.perf_counter()
+        try:
+            reply = await self._complete_text(
+                model=self.config.fast_model,
+                system="You are a connectivity test. Reply with exactly: OK",
+                user="Ping",
+                temperature=0.0,
+                max_tokens=16,
+                timeout=timeout,
+                expect_json=False,
+            )
+            dt_ms = round((time.perf_counter() - t0) * 1000)
+            return {
+                "ok": True,
+                "latency_ms": dt_ms,
+                "model": self.config.fast_model,
+                "reply": reply[:60],
+                "message": f"Connected to {self.config.fast_model} in {dt_ms} ms.",
+            }
+        except Exception as exc:
+            dt_ms = round((time.perf_counter() - t0) * 1000)
+            msg = str(exc)
+            hint = _friendly_connection_hint(self.config, msg)
+            return {
+                "ok": False,
+                "latency_ms": dt_ms,
+                "model": self.config.fast_model,
+                "error": msg[:260],
+                "hint": hint,
+            }
+
     async def _complete_text(
         self,
         *,
@@ -475,6 +820,43 @@ class InterviewCopilotLLM:
                 model=model,
                 system=system,
                 user=user,
+                timeout=timeout,
+                on_delta=on_delta,
+            )
+        if cli == "claude":
+            return await self._call_claude_cli(
+                model=model,
+                system=system,
+                user=user,
+                timeout=timeout,
+                expect_json=expect_json,
+                on_delta=on_delta,
+            )
+        if cli == "codex":
+            return await self._call_codex_cli(
+                model=model,
+                system=system,
+                user=user,
+                timeout=timeout,
+                expect_json=expect_json,
+                on_delta=on_delta,
+            )
+        if cli == "gemini":
+            return await self._call_gemini_cli(
+                model=model,
+                system=system,
+                user=user,
+                timeout=timeout,
+                expect_json=expect_json,
+                on_delta=on_delta,
+            )
+        if self.config.is_anthropic_native:
+            return await self._call_anthropic_api(
+                model=model,
+                system=system,
+                user=user,
+                temperature=temperature,
+                max_tokens=max_tokens,
                 timeout=timeout,
                 on_delta=on_delta,
             )
@@ -1151,3 +1533,113 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     if end > start:
         return json.loads(cleaned[start : end + 1])
     return json.loads(cleaned)
+
+
+def _friendly_connection_hint(cfg: LLMRuntimeConfig, err_msg: str) -> str:
+    low = err_msg.lower()
+    if cfg.cli_backend:
+        return f"Make sure `{cfg.cli_backend}` is signed in on your Mac (try running it once in Terminal)."
+    if "401" in low or "unauthorized" in low or "invalid api key" in low or "authentication" in low:
+        return "Double-check that your API key is copied completely and has not expired."
+    if "404" in low or "model" in low and "not found" in low:
+        return f"Model `{cfg.fast_model}` was not found by this provider — check the model name in Advanced settings."
+    if "429" in low or "quota" in low or "rate limit" in low:
+        return "Provider returned a rate limit or quota error — verify billing/free-tier quota."
+    if cfg.provider in LOCAL_HTTP_PROVIDERS or "connection" in low or "refused" in low:
+        if cfg.provider == "ollama":
+            return "Ollama does not appear to be running. Open Ollama (or run `ollama serve`) and pull a model first."
+        if cfg.provider == "lmstudio":
+            return "LM Studio local server is not reachable on port 1234. Start the Local Server in LM Studio first."
+        return "Could not reach the endpoint URL. Check your internet connection or Base URL."
+    return "Check your credentials, model name, and network connection."
+
+
+def get_system_memory_gb() -> int | None:
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            return max(1, round((pages * page_size) / (1024**3)))
+    except (ValueError, OSError, AttributeError):
+        pass
+    return None
+
+
+async def _probe_ollama(timeout: float = 0.6) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            resp = await http.get("http://127.0.0.1:11434/api/tags")
+            if resp.status_code == 200:
+                data = resp.json()
+                models = [
+                    str(m.get("name", "")).strip()
+                    for m in (data.get("models") or [])
+                    if isinstance(m, dict) and m.get("name")
+                ]
+                return {"running": True, "models": models}
+    except Exception:
+        pass
+    return {"running": False, "models": []}
+
+
+async def _probe_lmstudio(timeout: float = 0.6) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            resp = await http.get("http://127.0.0.1:1234/v1/models")
+            if resp.status_code == 200:
+                data = resp.json()
+                models = [
+                    str(m.get("id", "")).strip()
+                    for m in (data.get("data") or [])
+                    if isinstance(m, dict) and m.get("id")
+                ]
+                return {"running": True, "models": models}
+    except Exception:
+        pass
+    return {"running": False, "models": []}
+
+
+async def discover_available_providers() -> dict[str, Any]:
+    """
+    Fast (<600ms) local discovery of:
+      - Installed subscription CLIs (`claude`, `codex`, `gemini`, `agy`, `pi`)
+      - Running local OpenAI-compatible runtimes (Ollama, LM Studio) and their installed models
+      - Host unified memory in GB (to guide local-LLM expectations)
+    """
+    detected_clis: list[dict[str, Any]] = []
+    for preset_id, preset in LLM_PRESETS.items():
+        if preset.get("category") != "cli":
+            continue
+        cli_bin = str(preset.get("cli_bin") or "")
+        if cli_bin and shutil.which(cli_bin):
+            detected_clis.append(
+                {
+                    "provider": preset_id,
+                    "cli_bin": cli_bin,
+                    "label": preset["label"],
+                    "badge": preset.get("badge", "Detected"),
+                    "hint": preset.get("hint", ""),
+                    "base_url": preset["base_url"],
+                    "fast_model": preset["fast_model"],
+                    "calibration_model": preset["calibration_model"],
+                }
+            )
+
+    ollama_info, lmstudio_info = await asyncio.gather(_probe_ollama(), _probe_lmstudio())
+
+    env_keys_present = [
+        prov
+        for prov, env_name in PROVIDER_ENV_KEYS.items()
+        if bool(os.getenv(env_name, "").strip())
+    ]
+
+    return {
+        "detected_clis": detected_clis,
+        "local_servers": {
+            "ollama": ollama_info,
+            "lmstudio": lmstudio_info,
+        },
+        "env_keys_present": env_keys_present,
+        "system_memory_gb": get_system_memory_gb(),
+    }
+

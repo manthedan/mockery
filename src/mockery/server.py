@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
+import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,15 +21,22 @@ from pydantic import BaseModel, ValidationError
 from .asr import ParakeetEngine
 from .diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
 from .grouper import QAGrouper
-from .llm import InterviewCopilotLLM, LLMRuntimeConfig
+from .llm import (
+    InterviewCopilotLLM,
+    LLMRuntimeConfig,
+    PROVIDER_ENV_KEYS,
+    discover_available_providers,
+)
 from .models import (
     InterviewerSelfRating,
     InterviewSession,
+    LLM_PRESETS,
     SessionConfig,
     SpeakerRole,
     Utterance,
     short_id,
 )
+from .paths import resolve_data_root
 from .sources import SegmentedSpeech, SessionAudioRouter
 from .state_machines import (
     ASRModelState,
@@ -41,7 +52,7 @@ from .state_machines import (
 from .storage import SessionAudioArchive, SessionStore
 from .vad import SileroVADRuntime
 
-logger = logging.getLogger("mock_helper")
+logger = logging.getLogger("mockery")
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
@@ -49,35 +60,64 @@ ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver"
 
 
 def resolve_project_root() -> Path:
-    cwd = Path.cwd()
-    if (cwd / "pyproject.toml").exists():
-        return cwd
-    return PACKAGE_DIR.parent.parent
+    return resolve_data_root()
 
 
-def is_trusted_origin(origin: str | None, host_header: str | None) -> bool:
+def is_trusted_origin(
+    origin: str | None,
+    host_header: str | None,
+    *,
+    allow_same_host_lan: bool = False,
+) -> bool:
     if not origin:
         return True
     parsed = urlparse(origin)
     if parsed.scheme not in ("http", "https"):
         return False
     origin_host = (parsed.hostname or "").lower()
-    if origin_host not in ALLOWED_LOOPBACK_HOSTS:
-        return False
     if host_header:
         expected_netloc = host_header.strip().lower()
         if parsed.netloc.lower() != expected_netloc:
             return False
+        if allow_same_host_lan:
+            return True
+    if origin_host not in ALLOWED_LOOPBACK_HOSTS:
+        return False
     return True
+
+
+def _has_valid_token(
+    expected_token: str,
+    *,
+    query_token: str | None,
+    cookie_token: str | None,
+    auth_header: str | None,
+) -> bool:
+    candidates: list[str] = []
+    if query_token:
+        candidates.append(query_token.strip())
+    if cookie_token:
+        candidates.append(cookie_token.strip())
+    if auth_header and auth_header.lower().startswith("bearer "):
+        candidates.append(auth_header[7:].strip())
+    return any(secrets.compare_digest(c, expected_token) for c in candidates if c)
 
 
 class LLMSettingsUpdate(BaseModel):
     provider: str
-    base_url: str
-    fast_model: str
-    calibration_model: str
+    base_url: str = ""
+    fast_model: str = ""
+    calibration_model: str = ""
     api_key: str | None = None
     parakeet_model: str | None = None
+
+
+class LLMConnectionTestRequest(BaseModel):
+    provider: str | None = None
+    base_url: str | None = None
+    fast_model: str | None = None
+    calibration_model: str | None = None
+    api_key: str | None = None
 
 
 class AppRuntime:
@@ -250,7 +290,11 @@ class AppRuntime:
             pass
 
 
-def create_app(project_root: Path | None = None, preload_asr: bool = True) -> FastAPI:
+def create_app(
+    project_root: Path | None = None,
+    preload_asr: bool = True,
+    auth_token: str | None = None,
+) -> FastAPI:
     root = project_root or resolve_project_root()
     runtime = AppRuntime(root)
 
@@ -267,20 +311,43 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
         runtime.store.close()
         await runtime.llm.aclose()
 
-    app = FastAPI(title="Mock Helper — Live Interview Copilot", lifespan=lifespan)
+    app = FastAPI(title="Mockery — Local Mock Interview Studio", lifespan=lifespan)
     app.state.runtime = runtime
+    app.state.auth_token = auth_token
 
     @app.middleware("http")
-    async def verify_http_origin(request: Request, call_next: Any):
+    async def verify_http_origin_and_token(request: Request, call_next: Any):
+        if auth_token:
+            query_token = request.query_params.get("token")
+            cookie_token = request.cookies.get("mockery_token")
+            auth_header = request.headers.get("authorization")
+            if not _has_valid_token(
+                auth_token,
+                query_token=query_token,
+                cookie_token=cookie_token,
+                auth_header=auth_header,
+            ):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing or invalid Mockery LAN access token."},
+                )
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             origin = request.headers.get("origin")
             host = request.headers.get("host")
-            if not is_trusted_origin(origin, host):
+            if not is_trusted_origin(origin, host, allow_same_host_lan=bool(auth_token)):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "Untrusted Origin rejected."},
                 )
-        return await call_next(request)
+        response = await call_next(request)
+        if auth_token and request.query_params.get("token"):
+            response.set_cookie(
+                key="mockery_token",
+                value=auth_token,
+                httponly=True,
+                samesite="strict",
+            )
+        return response
 
     @app.get("/api/machines")
     async def get_machine_specs() -> dict[str, Any]:
@@ -292,8 +359,75 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
             "asr": runtime.asr.status_dict(),
             "diarizer": runtime.diarizer.status_dict(),
             "llm": runtime.llm_config.public_dict(),
+            "data_dir": str(runtime.project_root),
+            "sessions_dir": str(runtime.store.sessions_dir),
             "session": _serialize_session(runtime),
         }
+
+    @app.get("/api/providers/discover")
+    async def discover_providers() -> dict[str, Any]:
+        info = await discover_available_providers()
+        info["data_dir"] = str(runtime.project_root)
+        info["sessions_dir"] = str(runtime.store.sessions_dir)
+        return info
+
+    @app.post("/api/settings/llm/test")
+    async def test_llm_settings(body: LLMConnectionTestRequest) -> dict[str, Any]:
+        cfg = LLMRuntimeConfig(runtime.project_root)
+        target_provider = (body.provider or runtime.llm_config.provider).strip()
+        preset = LLM_PRESETS.get(target_provider, {})
+        cfg.provider = target_provider
+        cfg.base_url = (
+            body.base_url.strip()
+            if body.base_url is not None and body.base_url.strip()
+            else (
+                runtime.llm_config.base_url
+                if target_provider == runtime.llm_config.provider
+                else str(preset.get("base_url", ""))
+            )
+        )
+        cfg.fast_model = (
+            body.fast_model.strip()
+            if body.fast_model is not None and body.fast_model.strip()
+            else (
+                runtime.llm_config.fast_model
+                if target_provider == runtime.llm_config.provider
+                else str(preset.get("fast_model", ""))
+            )
+        )
+        cfg.calibration_model = (
+            body.calibration_model.strip()
+            if body.calibration_model is not None and body.calibration_model.strip()
+            else (
+                runtime.llm_config.calibration_model
+                if target_provider == runtime.llm_config.provider
+                else str(preset.get("calibration_model", ""))
+            )
+        )
+        if body.api_key is not None and body.api_key.strip():
+            cfg.api_key = body.api_key.strip()
+        elif target_provider == runtime.llm_config.provider:
+            cfg.api_key = runtime.llm_config.api_key
+        else:
+            env_var = PROVIDER_ENV_KEYS.get(target_provider)
+            cfg.api_key = "" if not env_var else (os.getenv(env_var, "").strip())
+
+        tester = InterviewCopilotLLM(cfg)
+        try:
+            return await tester.test_connection(timeout=20.0)
+        finally:
+            await tester.aclose()
+
+    @app.post("/api/open-data-dir")
+    async def open_data_dir() -> dict[str, Any]:
+        if auth_token:
+            raise HTTPException(status_code=403, detail="Opening local folders is disabled in LAN mode.")
+        target = runtime.store.sessions_dir
+        target.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+            return {"ok": True, "path": str(target)}
+        return {"ok": False, "path": str(target), "detail": "Folder reveal is supported on macOS."}
 
     @app.post("/api/settings/llm")
     async def update_llm_settings(body: LLMSettingsUpdate) -> dict[str, Any]:
@@ -393,7 +527,20 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
 
     @app.websocket("/ws/session")
     async def session_ws(ws: WebSocket) -> None:
-        if not is_trusted_origin(ws.headers.get("origin"), ws.headers.get("host")):
+        if auth_token:
+            if not _has_valid_token(
+                auth_token,
+                query_token=ws.query_params.get("token"),
+                cookie_token=ws.cookies.get("mockery_token"),
+                auth_header=ws.headers.get("authorization"),
+            ):
+                await ws.close(code=1008)
+                return
+        if not is_trusted_origin(
+            ws.headers.get("origin"),
+            ws.headers.get("host"),
+            allow_same_host_lan=bool(auth_token),
+        ):
             await ws.close(code=1008)
             return
 

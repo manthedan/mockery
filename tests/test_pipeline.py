@@ -7,17 +7,17 @@ from pathlib import Path
 import numpy as np
 from fastapi.testclient import TestClient
 
-from mock_helper.grouper import QAGrouper
-from mock_helper.llm import _fast_extra_body
-from mock_helper.models import InterviewSession, SessionConfig, Utterance
-from mock_helper.server import create_app
-from mock_helper.sources import (
+from mockery.grouper import QAGrouper
+from mockery.llm import _fast_extra_body
+from mockery.models import InterviewSession, SessionConfig, Utterance
+from mockery.server import create_app
+from mockery.sources import (
     CHANNEL_CANDIDATE,
     CHANNEL_INTERVIEWER,
     CrossChannelBleedFilter,
     SessionAudioRouter,
 )
-from mock_helper.vad import SileroVADRuntime
+from mockery.vad import SileroVADRuntime
 
 
 def _synthesize_pcm16(text: str, *, voice: str | None = None, trailing_silence_s: float = 0.9) -> bytes:
@@ -325,9 +325,9 @@ def test_codex_review_regressions(tmp_path: Path, monkeypatch) -> None:
     import pytest
     from starlette.websockets import WebSocketDisconnect
 
-    from mock_helper.llm import LLMRuntimeConfig
-    from mock_helper.models import DiveDeeperResponse, ProbeSuggestion
-    from mock_helper.storage import SessionAudioArchive
+    from mockery.llm import LLMRuntimeConfig
+    from mockery.models import DiveDeeperResponse, ProbeSuggestion
+    from mockery.storage import SessionAudioArchive
 
     # 1. Default English Parakeet v2 + provider-scoped API key fallback + persisted PARAKEET_MODEL override
     monkeypatch.delenv("PARAKEET_MODEL", raising=False)
@@ -501,14 +501,14 @@ def test_codex_review_regressions(tmp_path: Path, monkeypatch) -> None:
 def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
     import json
 
-    from mock_helper.models import DiveDeeperResponse, ProbeSuggestion
-    from mock_helper.state_machines import (
+    from mockery.models import DiveDeeperResponse, ProbeSuggestion
+    from mockery.state_machines import (
         CardProbeState,
         VADTurnState,
         derive_card_probe_state,
         validate_session_invariants,
     )
-    from mock_helper.vad import ChannelVADSegmenter
+    from mockery.vad import ChannelVADSegmenter
 
     app = create_app(project_root=tmp_path, preload_asr=False)
     client = TestClient(app)
@@ -519,7 +519,7 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
     assert "stateDiagram-v2" in specs["machines"]["session_phase"]["mermaid"]
 
     cli_out = subprocess.run(
-        ["uv", "run", "mock-helper", "--dump-machines"],
+        ["uv", "run", "mockery", "--dump-machines"],
         cwd=Path(__file__).resolve().parent.parent,
         capture_output=True,
         text=True,
@@ -641,7 +641,7 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
 
     # 6. `ready` is the entry state of the session lifecycle: only an already-active capture or a
     #    running calibration can block `start_capture`.
-    from mock_helper.state_machines import (
+    from mockery.state_machines import (
         AsyncJobState,
         SessionPhase,
         compute_allowed_session_events,
@@ -694,12 +694,12 @@ def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
     import json
     import stat
 
-    from mock_helper.grouper import make_concise_title
-    from mock_helper.llm import LLMRuntimeConfig, _extract_json_object
-    from mock_helper.models import DiveDeeperResponse, ProbeSuggestion
-    from mock_helper.sources import CHANNEL_ROOM_MIC, SessionAudioRouter
-    from mock_helper.state_machines import CardProbeState, derive_card_probe_state
-    from mock_helper.storage import SessionStore
+    from mockery.grouper import make_concise_title
+    from mockery.llm import LLMRuntimeConfig, _extract_json_object
+    from mockery.models import DiveDeeperResponse, ProbeSuggestion
+    from mockery.sources import CHANNEL_ROOM_MIC, SessionAudioRouter
+    from mockery.state_machines import CardProbeState, derive_card_probe_state
+    from mockery.storage import SessionStore
 
     # 0. Multi-sentence interviewer transition picks the actual question sentence for card titles
     t_title = make_concise_title(
@@ -995,9 +995,9 @@ def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_scratch_transfer_cli_providers_and_turn_triage(tmp_path: Path, monkeypatch) -> None:
-    from mock_helper.llm import LLMRuntimeConfig, _parse_agy_model_spec
-    from mock_helper.models import TurnSegment, TurnTriagePlan
-    from mock_helper.state_machines import validate_session_invariants
+    from mockery.llm import LLMRuntimeConfig, _parse_agy_model_spec
+    from mockery.models import TurnSegment, TurnTriagePlan
+    from mockery.state_machines import validate_session_invariants
 
     # 1. Local agy / pi CLI config & effort parsing
     assert _parse_agy_model_spec("gemini-4-hydrogen:low") == ("gemini-4-hydrogen", "low")
@@ -1197,7 +1197,7 @@ def test_scratch_transfer_cli_providers_and_turn_triage(tmp_path: Path, monkeypa
 
 
 def test_acoustic_wespeaker_single_mic_diarizer() -> None:
-    from mock_helper.diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
+    from mockery.diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
 
     embedder = WeSpeakerEmbedder()
     embedder.ensure_loaded()
@@ -1268,7 +1268,7 @@ def test_acoustic_wespeaker_single_mic_diarizer() -> None:
 
 
 def test_diarizer_sparse_cold_start_and_self_healing() -> None:
-    from mock_helper.diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
+    from mockery.diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
 
     embedder = WeSpeakerEmbedder()
     embedder.ensure_loaded()
@@ -1355,7 +1355,7 @@ def test_diarizer_sparse_cold_start_and_self_healing() -> None:
 
 
 def test_diarizer_swap_roles_and_ws_command(tmp_path: Path) -> None:
-    from mock_helper.diarizer import DiarizedSubSegment, OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
+    from mockery.diarizer import DiarizedSubSegment, OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
 
     embedder = WeSpeakerEmbedder()
     d = OnlineTwoSpeakerDiarizer(embedder)
@@ -1431,7 +1431,7 @@ def test_diarizer_swap_roles_and_ws_command(tmp_path: Path) -> None:
 
 
 def test_fast_kaldi_fbank_and_sliding_windows_equivalence() -> None:
-    from mock_helper.diarizer import WeSpeakerEmbedder, extract_kaldi_fbank80
+    from mockery.diarizer import WeSpeakerEmbedder, extract_kaldi_fbank80
 
     embedder = WeSpeakerEmbedder()
     embedder.ensure_loaded()
@@ -1459,7 +1459,7 @@ def test_fast_kaldi_fbank_and_sliding_windows_equivalence() -> None:
 def test_parakeet_fast_tdt_decoder_and_optimization_parity() -> None:
     import mlx.core as mx
     from parakeet_mlx.audio import get_logmel
-    from mock_helper.asr import CONTROL_TOKEN_RE, WHITESPACE_RE, ParakeetEngine
+    from mockery.asr import CONTROL_TOKEN_RE, WHITESPACE_RE, ParakeetEngine
 
     engine = ParakeetEngine()
     model = engine.ensure_loaded()
@@ -1488,7 +1488,7 @@ def test_parakeet_fast_tdt_decoder_and_optimization_parity() -> None:
 def test_storage_debounced_wav_and_fast_list_recent_parity(tmp_path: Path) -> None:
     import time as _time
     import wave
-    from mock_helper.storage import SessionAudioArchive, SessionStore
+    from mockery.storage import SessionAudioArchive, SessionStore
 
     arch = SessionAudioArchive(tmp_path, "sess_debounce", header_sync_interval_s=0.05)
     chunk = np.ones(800, dtype=np.int16).tobytes()
@@ -1629,7 +1629,7 @@ def test_incremental_utterance_draft_ws_patch_and_jsonl_throttling(tmp_path: Pat
 
 
 def test_vad_contiguous_buffer_and_ring_preroll_parity() -> None:
-    from mock_helper.vad import FRAME_MS, FRAME_SAMPLES, ChannelVADSegmenter
+    from mockery.vad import FRAME_MS, FRAME_SAMPLES, ChannelVADSegmenter
 
     class _ScriptedVADRuntime:
         def __init__(self, probs: list[float]) -> None:
@@ -1683,7 +1683,7 @@ def test_vad_contiguous_buffer_and_ring_preroll_parity() -> None:
 
 def test_fixed_conformer_conv_cache_preserves_committed_boundary() -> None:
     import mlx.core as mx
-    from mock_helper.asr import _FixedRotatingConformerCache
+    from mockery.asr import _FixedRotatingConformerCache
 
     # Chunk 1 has frames [1..10], drop_size=4 -> committed frames are [1..6], padding=2 -> next chunk should see [5, 6] prepended!
     cache = _FixedRotatingConformerCache(capacity=64, cache_drop_size=4)
@@ -1704,7 +1704,7 @@ def test_fixed_conformer_conv_cache_preserves_committed_boundary() -> None:
 
 
 def test_session_store_coalesced_live_save_and_lazy_markdown(tmp_path: Path) -> None:
-    from mock_helper.storage import SessionStore
+    from mockery.storage import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     sess = InterviewSession()
@@ -1839,9 +1839,9 @@ def test_codex_sol_review_regressions(tmp_path: Path) -> None:
     import asyncio
     import threading
     from types import SimpleNamespace
-    from mock_helper.asr import ParakeetEngine
-    from mock_helper.diarizer import _HAMMING_WIN_400, _FBANK_EPS, _build_kaldi_mel_filterbank
-    from mock_helper.storage import SessionStore
+    from mockery.asr import ParakeetEngine
+    from mockery.diarizer import _HAMMING_WIN_400, _FBANK_EPS, _build_kaldi_mel_filterbank
+    from mockery.storage import SessionStore
 
     # --- #1: Crash recovery replays trailing finalized turns over an older valid JSON snapshot ---
     store = SessionStore(tmp_path / "sessions_crash")
@@ -1896,7 +1896,7 @@ def test_codex_sol_review_regressions(tmp_path: Path) -> None:
     eng.ensure_loaded = _swap_during_ensure  # type: ignore[method-assign]
     eng._infer_fast_locked = lambda m, d, mel: (paired.append((m.tag, d.tag)) or "ok")  # type: ignore[method-assign]
 
-    import mock_helper.asr as asr_mod
+    import mockery.asr as asr_mod
     orig_get_logmel = asr_mod.get_logmel
     try:
         asr_mod.get_logmel = lambda audio, cfg: audio  # type: ignore[assignment]
@@ -2073,3 +2073,115 @@ def test_codex_sol_review_regressions(tmp_path: Path) -> None:
         assert reloaded_disk is not None
         assert reloaded_disk.qa_groups[0].title == "Edited After Reopen"
         assert reloaded_disk.calibration_markdown is None
+
+
+def test_mockery_productization_discovery_auth_and_providers(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+
+    from mockery.llm import LLMRuntimeConfig
+    from mockery.paths import resolve_data_root
+
+    # 1. Data root resolution priority
+    explicit = tmp_path / "explicit_home"
+    assert resolve_data_root(explicit) == explicit.resolve()
+    env_home = tmp_path / "env_home"
+    monkeypatch.setenv("MOCKERY_HOME", str(env_home))
+    assert resolve_data_root() == env_home.resolve()
+    assert env_home.is_dir()
+    monkeypatch.delenv("MOCKERY_HOME", raising=False)
+
+    # 2. Multi-provider config: fresh onboarding flag, Transcript-Only ("none"), Anthropic native, Claude/Codex/Gemini CLIs
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    fresh_dir = tmp_path / "fresh_user"
+    cfg = LLMRuntimeConfig(fresh_dir)
+    assert cfg.provider == "gemini"
+    assert cfg.is_configured is False
+    assert cfg.public_dict()["needs_onboarding"] is True
+
+    # Choosing Transcript-Only dismisses onboarding permanently
+    cfg.update_and_save(provider="none", base_url="", fast_model="", calibration_model="")
+    assert cfg.is_configured is False
+    assert cfg.public_dict()["needs_onboarding"] is False
+
+    # Native Anthropic & LM Studio & new CLI providers
+    cfg.update_and_save(
+        provider="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        fast_model="claude-haiku-4-5-20251001",
+        calibration_model="claude-sonnet-4-5-20250929",
+        api_key="sk-ant-test-key",
+    )
+    assert cfg.is_anthropic_native is True
+    assert cfg.is_configured is True
+
+    cfg.update_and_save(
+        provider="lmstudio",
+        base_url="http://localhost:1234/v1",
+        fast_model="local-model",
+        calibration_model="local-model",
+    )
+    assert cfg.is_configured is True
+
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: f"/usr/local/bin/{name}" if name in ("claude", "codex", "gemini") else None,
+    )
+    for prov_id, expected_bin in [("claude_cli", "claude"), ("codex_cli", "codex"), ("gemini_cli", "gemini")]:
+        cfg.update_and_save(
+            provider=prov_id,
+            base_url=f"cli://{expected_bin}",
+            fast_model="fast",
+            calibration_model="cal",
+        )
+        assert cfg.cli_backend == expected_bin
+        assert cfg.is_configured is True
+
+    # 3. Discovery & connection test endpoints
+    app = create_app(project_root=tmp_path / "disc_srv", preload_asr=False)
+    client = TestClient(app)
+    disc_res = client.get("/api/providers/discover")
+    assert disc_res.status_code == 200
+    disc_body = disc_res.json()
+    detected_ids = {c["provider"] for c in disc_body["detected_clis"]}
+    assert {"claude_cli", "codex_cli", "gemini_cli"}.issubset(detected_ids)
+    assert "ollama" in disc_body["local_servers"]
+    assert "lmstudio" in disc_body["local_servers"]
+    assert disc_body["data_dir"] == str(tmp_path / "disc_srv")
+
+    test_none = client.post("/api/settings/llm/test", json={"provider": "none"})
+    assert test_none.status_code == 200
+    assert test_none.json()["ok"] is True
+
+    test_missing_key = client.post("/api/settings/llm/test", json={"provider": "openai", "api_key": ""})
+    assert test_missing_key.status_code == 200
+    assert test_missing_key.json()["ok"] is False
+    assert test_missing_key.json().get("hint")
+
+    # 4. LAN token auth guard (Codex #9): rejects unauthenticated HTTP/WS, accepts query/Bearer/cookie
+    lan_app = create_app(project_root=tmp_path / "lan_srv", preload_asr=False, auth_token="secret-lan-token-123")
+    lan_client = TestClient(lan_app)
+
+    assert lan_client.get("/api/status").status_code == 401
+    with pytest.raises(WebSocketDisconnect):
+        with lan_client.websocket_connect("/ws/session"):
+            pass
+
+    # Query token succeeds and sets HttpOnly cookie
+    ok_res = lan_client.get("/api/status?token=secret-lan-token-123")
+    assert ok_res.status_code == 200
+    assert "mockery_token" in ok_res.cookies
+
+    # Subsequent call works via cookie or Bearer header
+    assert lan_client.get("/api/status").status_code == 200
+    bearer_client = TestClient(lan_app)
+    assert bearer_client.get("/api/status", headers={"Authorization": "Bearer secret-lan-token-123"}).status_code == 200
+
+    with lan_client.websocket_connect("/ws/session?token=secret-lan-token-123") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "session_state"
+
