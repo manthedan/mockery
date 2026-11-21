@@ -93,6 +93,7 @@ const state = {
 
   sharedAudioCtx: null,
   audioCleanupFns: [],
+  audioFlushFns: [],
   lastSyncedSessionId: null,
   activeCitationUttId: null,
   homeVisible: false,
@@ -533,6 +534,11 @@ function applyUtteranceDraftPatch(msg) {
     ? container?.querySelector(`[data-utt-row="${CSS.escape(utt.id)}"]`)
     : null;
 
+  if (msg.metrics) {
+    session.metrics = msg.metrics;
+    renderMetricsBar();
+  }
+
   if (!span) {
     renderQAList();
     if (probeStateChanged) renderProbesPanel();
@@ -571,7 +577,7 @@ function applyUtteranceDraftPatch(msg) {
 async function ensureSharedAudioContext() {
   if (!state.sharedAudioCtx || state.sharedAudioCtx.state === "closed") {
     const ctx = new AudioContext();
-    await ctx.audioWorklet.addModule("/static/pcm-worklet.js?v=perf2");
+    await ctx.audioWorklet.addModule("/static/pcm-worklet.js?v=perf4");
     state.sharedAudioCtx = ctx;
   }
   if (state.sharedAudioCtx.state === "suspended") {
@@ -711,15 +717,57 @@ function attachStreamToSharedContext(ctx, mediaStream, channelId, meterElementId
   worklet.connect(silentGain);
   silentGain.connect(ctx.destination);
 
+  let flushResolve = null;
+  let detached = false;
+
   worklet.port.onmessage = (ev) => {
-    const { pcmBuffer, rms } = ev.data;
-    sendBinaryPcm(channelId, pcmBuffer);
-    const pct = Math.min(100, Math.round(Math.pow(rms * 6.5, 0.65) * 100));
-    const meterEl = el(meterElementId);
-    if (meterEl) meterEl.style.width = `${pct}%`;
+    const data = ev.data || {};
+    if (data.pcmBuffer && !detached) {
+      sendBinaryPcm(channelId, data.pcmBuffer);
+      const pct = Math.min(100, Math.round(Math.pow((data.rms || 0) * 6.5, 0.65) * 100));
+      const meterEl = el(meterElementId);
+      if (meterEl) meterEl.style.width = `${pct}%`;
+    }
+    if (data.flushed && flushResolve) {
+      const done = flushResolve;
+      flushResolve = null;
+      done();
+    }
   };
 
+  state.audioFlushFns.push(
+    () =>
+      new Promise((resolve) => {
+        if (detached) {
+          resolve();
+          return;
+        }
+        const timer = setTimeout(() => {
+          flushResolve = null;
+          resolve();
+        }, 150);
+        flushResolve = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        try {
+          worklet.port.postMessage({ type: "flush" });
+        } catch (_) {
+          clearTimeout(timer);
+          flushResolve = null;
+          resolve();
+        }
+      })
+  );
+
   state.audioCleanupFns.push(() => {
+    detached = true;
+    worklet.port.onmessage = null;
+    if (flushResolve) {
+      const done = flushResolve;
+      flushResolve = null;
+      done();
+    }
     worklet.disconnect();
     source.disconnect();
     silentGain.disconnect();
@@ -728,6 +776,7 @@ function attachStreamToSharedContext(ctx, mediaStream, channelId, meterElementId
 }
 
 function stopAudioStreamsOnly() {
+  state.audioFlushFns.length = 0;
   while (state.audioCleanupFns.length) {
     const fn = state.audioCleanupFns.pop();
     try {
@@ -742,7 +791,7 @@ function stopAudioStreamsOnly() {
   el("meterCand").style.width = "0%";
 }
 
-function stopCaptureSession({ flush = true } = {}) {
+async function stopCaptureSession({ flush = true } = {}) {
   if (state.captureState !== "streaming") return;
   setCaptureState("stopping");
 
@@ -753,6 +802,11 @@ function stopCaptureSession({ flush = true } = {}) {
   if (state.timerHandle) {
     clearInterval(state.timerHandle);
     state.timerHandle = null;
+  }
+
+  if (flush && state.audioFlushFns.length) {
+    const flushers = state.audioFlushFns.splice(0, state.audioFlushFns.length);
+    await Promise.all(flushers.map((fn) => fn().catch(() => {})));
   }
 
   stopAudioStreamsOnly();

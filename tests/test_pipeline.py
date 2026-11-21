@@ -1825,6 +1825,251 @@ def test_calibration_streaming_deltas_and_skip_redundant_regroup(tmp_path: Path)
         assert regroup_calls == 1
 
 
+def test_codex_sol_review_regressions(tmp_path: Path) -> None:
+    """
+    Regression suite for Codex Sol 6.2 findings:
+      #1 Crash recovery replays trailing `.events.jsonl` turns over an older valid `.json` snapshot
+      #2 Stale calibration job cannot overwrite edits or broadcast after New -> Reopen -> Edit
+      #3 ParakeetEngine.transcribe_pcm captures model & decoder atomically under lock
+      #5 Late binary PCM frames after `flush_and_end` cannot reopen capture until `start_capture`
+      #7 Regroup cache invalidates on speaker swap / interview type & ignores invalid boundary lists
+      #8 WeSpeaker Kaldi fbank uses Hamming window, mel-space slopes, and float32 eps floor
+      #10 Live `utterance_draft` patches include updated talk-ratio metrics
+    """
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from mock_helper.asr import ParakeetEngine
+    from mock_helper.diarizer import _HAMMING_WIN_400, _FBANK_EPS, _build_kaldi_mel_filterbank
+    from mock_helper.storage import SessionStore
 
+    # --- #1: Crash recovery replays trailing finalized turns over an older valid JSON snapshot ---
+    store = SessionStore(tmp_path / "sessions_crash")
+    sess = InterviewSession(id="crash_test_01")
+    grouper = QAGrouper()
+    u1 = Utterance(id="utt_1", rev=1, final=True, speaker="interviewer", text="Tell me about caching.", start_ms=0, end_ms=2000)
+    grouper.upsert_and_route(sess, u1)
+    store.append_utterance_event(sess.id, u1)
+    store.save(sess)  # Valid snapshot with journal_offset after u1
 
+    # Simulate Turn 2 written to journal right before SIGKILL (before background save_live hits disk)
+    u2 = Utterance(id="utt_2", rev=1, final=True, speaker="candidate", text="We used write-through Redis with TTL jitter.", start_ms=2500, end_ms=6000)
+    store.append_utterance_event(sess.id, u2)
 
+    recovered = store.load(sess.id)
+    assert recovered is not None
+    assert [u.id for u in recovered.utterances] == ["utt_1", "utt_2"]
+    assert recovered.utterances[1].text == "We used write-through Redis with TTL jitter."
+    store.close()
+
+    # --- #8: WeSpeaker Kaldi fbank frontend matches Hamming + mel-space + float32 eps ---
+    assert np.allclose(_HAMMING_WIN_400[0], np.hamming(400).astype(np.float32))
+    assert float(_FBANK_EPS) == float(np.finfo(np.float32).eps)
+    fb = _build_kaldi_mel_filterbank()
+    assert fb.shape == (257, 80) and fb.dtype == np.float32
+
+    # --- #3: Atomic (model, fast_decoder) acquisition under lock during checkpoint swap ---
+    eng = ParakeetEngine.__new__(ParakeetEngine)
+    eng._lock = threading.Lock()
+    eng._state_lock = threading.Lock()
+    eng._streams = {}
+    eng._optimization_mode = "test"
+    eng.last_inference_ms = 0.0
+    paired: list[tuple[str, str]] = []
+
+    fake_cfg = SimpleNamespace(sample_rate=16000, hop_length=160)
+    m_v2 = SimpleNamespace(tag="v2", preprocessor_config=fake_cfg)
+    d_v2 = SimpleNamespace(tag="v2")
+    m_v3 = SimpleNamespace(tag="v3", preprocessor_config=fake_cfg)
+    d_v3 = SimpleNamespace(tag="v3")
+    eng._model = m_v2
+    eng._fast_decoder = d_v2
+
+    def _swap_during_ensure() -> object:
+        # Simulate checkpoint switch completing right as ensure_loaded() returns old ref
+        old = eng._model
+        with eng._lock:
+            eng._model = m_v3
+            eng._fast_decoder = d_v3
+        return old
+
+    eng.ensure_loaded = _swap_during_ensure  # type: ignore[method-assign]
+    eng._infer_fast_locked = lambda m, d, mel: (paired.append((m.tag, d.tag)) or "ok")  # type: ignore[method-assign]
+
+    import mock_helper.asr as asr_mod
+    orig_get_logmel = asr_mod.get_logmel
+    try:
+        asr_mod.get_logmel = lambda audio, cfg: audio  # type: ignore[assignment]
+        res = eng.transcribe_pcm(np.zeros(1600, dtype=np.float32))
+    finally:
+        asr_mod.get_logmel = orig_get_logmel  # type: ignore[assignment]
+    assert res.text == "ok"
+    assert paired == [("v3", "v3")], f"Expected matched checkpoint pair, got {paired}"
+
+    # --- #2, #5, #7, #10 via live FastAPI TestClient ---
+    app = create_app(project_root=tmp_path / "app_root", preload_asr=False)
+    rt = app.state.runtime
+    rt.llm_config.provider = "openai"
+    rt.llm_config.base_url = "https://api.openai.com/v1"
+    rt.llm_config.api_key = "sk-test"
+
+    calib_release = threading.Event()
+    calib_done = threading.Event()
+    regroup_calls = 0
+    return_invalid_boundaries = True
+
+    async def fake_regroup(session: InterviewSession) -> list[dict[str, str]]:
+        nonlocal regroup_calls
+        regroup_calls += 1
+        if return_invalid_boundaries:
+            return [{"start_utterance_id": "nonexistent_utt_id", "title": "Bogus"}]
+        return [{"start_utterance_id": session.utterances[0].id, "title": "Valid Topic"}]
+
+    async def slow_calib(session: InterviewSession, *, on_delta=None) -> str:
+        await asyncio.to_thread(calib_release.wait, 5.0)
+        try:
+            if on_delta is not None:
+                await on_delta("### 1. Calibration Check\nStale report.")
+            return "### 1. Calibration Check\nStale report."
+        finally:
+            calib_done.set()
+
+    rt.llm.regroup_cards_full_context = fake_regroup  # type: ignore[method-assign]
+    rt.llm.generate_calibration_report = slow_calib  # type: ignore[method-assign]
+
+    client = TestClient(app)
+    with client.websocket_connect("/ws/session") as ws:
+        init = ws.receive_json()
+        assert init["type"] == "session_state"
+        _ = ws.receive_json()  # asr_status
+        orig_sid = init["session"]["id"]
+
+        # #10: In-place utterance draft patch includes live talk-ratio metrics
+        ws.send_json({
+            "type": "inject_utterance",
+            "id": "utt_q1",
+            "rev": 1,
+            "final": True,
+            "speaker": "interviewer",
+            "text": "Tell me about a time you designed a distributed rate limiter?",
+            "start_ms": 0,
+            "end_ms": 2000,
+        })
+        _ = ws.receive_json()
+
+        ws.send_json({
+            "type": "inject_utterance",
+            "id": "utt_a1",
+            "rev": 1,
+            "final": False,
+            "speaker": "candidate",
+            "text": "I would start with",
+            "start_ms": 2500,
+            "end_ms": 4000,
+        })
+        _ = ws.receive_json()  # initial draft -> session_state
+
+        ws.send_json({
+            "type": "inject_utterance",
+            "id": "utt_a1",
+            "rev": 2,
+            "final": False,
+            "speaker": "candidate",
+            "text": "I would start with a token bucket in Redis.",
+            "start_ms": 2500,
+            "end_ms": 8500,
+        })
+        draft_msg = ws.receive_json()
+        assert draft_msg["type"] == "utterance_draft"
+        assert "metrics" in draft_msg
+        assert draft_msg["metrics"]["candidate_time_pct"] > 60.0
+
+        # Finalize utt_a1
+        ws.send_json({
+            "type": "inject_utterance",
+            "id": "utt_a1",
+            "rev": 3,
+            "final": True,
+            "speaker": "candidate",
+            "text": "I would start with a token bucket in Redis.",
+            "start_ms": 2500,
+            "end_ms": 8500,
+        })
+        _ = ws.receive_json()
+
+        ws.send_json({
+            "type": "inject_utterance",
+            "id": "utt_q2",
+            "rev": 1,
+            "final": True,
+            "speaker": "interviewer",
+            "text": "How did you handle Redis failover?",
+            "start_ms": 9000,
+            "end_ms": 11000,
+        })
+        _ = ws.receive_json()
+
+        # #7: Invalid boundary response must NOT cache regrouped_signature; speaker swap invalidates sig
+        ws.send_json({"type": "regroup_cards"})
+        assert ws.receive_json()["type"] == "regroup_loading"
+        reg_res = ws.receive_json()
+        assert reg_res.get("regrouped") is False
+        assert orig_sid not in rt.regrouped_signature
+
+        return_invalid_boundaries = False
+        ws.send_json({"type": "regroup_cards"})
+        assert ws.receive_json()["type"] == "regroup_loading"
+        reg_res2 = ws.receive_json()
+        assert reg_res2.get("regrouped") is True
+        sig_before_swap = rt.regrouped_signature[orig_sid]
+
+        ws.send_json({"type": "swap_all_speakers"})
+        _ = ws.receive_json()
+        assert rt.transcript_regroup_sig(rt.active_session) != sig_before_swap
+        ws.send_json({"type": "swap_all_speakers"})  # restore
+        _ = ws.receive_json()
+
+        # #5: Late binary PCM after flush_and_end must NOT reopen capture or clear ended_epoch_ms
+        ws.send_json({"type": "start_capture"})
+        _ = ws.receive_json()
+        ws.send_json({"type": "flush_and_end"})
+        ended_msg = ws.receive_json()
+        assert ended_msg["session"]["ended_epoch_ms"] is not None
+        assert rt.is_capturing is False
+
+        # Send a late 100ms silent binary PCM packet right after flush_and_end
+        ws.send_bytes(bytes([0]) + (b"\x00\x00" * 1600))
+        # Send a benign command to synchronize the WS loop and confirm capture stayed closed
+        cur_qa_id = rt.active_session.qa_groups[0].id
+        ws.send_json({"type": "update_qa_meta", "qa_id": cur_qa_id, "title": "Rate Limiter Q1"})
+        after_late_pcm = ws.receive_json()
+        assert rt.is_capturing is False
+        assert after_late_pcm["session"]["ended_epoch_ms"] is not None
+
+        # #2: Start calibration -> New -> Reopen same session -> Edit card -> release old calibration
+        ws.send_json({"type": "generate_calibration", "regroup_first": False, "rating": {"hire_signal": "lean_hire"}})
+        assert ws.receive_json()["type"] == "calibration_loading"
+
+        # New session + reopen original session via HTTP load endpoint
+        ws.send_json({"type": "new_session"})
+        _ = ws.receive_json()
+        load_resp = client.post(f"/api/sessions/{orig_sid}/load")
+        assert load_resp.status_code == 200
+        _ = ws.receive_json()  # session_state broadcast from load
+
+        # Edit card title on the reopened session
+        reopened_qa_id = rt.active_session.qa_groups[0].id
+        ws.send_json({"type": "update_qa_meta", "qa_id": reopened_qa_id, "title": "Edited After Reopen"})
+        _ = ws.receive_json()
+
+        # Release the stale calibration job and wait for it to finish; it MUST NOT overwrite disk or UI
+        calib_release.set()
+        assert calib_done.wait(timeout=3.0)
+        ws.send_json({"type": "update_qa_meta", "qa_id": reopened_qa_id, "notes": "keep me"})
+        final_ws_msg = ws.receive_json()
+        assert final_ws_msg["type"] == "session_state"
+        assert final_ws_msg["session"]["calibration_markdown"] is None
+        reloaded_disk = rt.store.load(orig_sid)
+        assert reloaded_disk is not None
+        assert reloaded_disk.qa_groups[0].title == "Edited After Reopen"
+        assert reloaded_disk.calibration_markdown is None
