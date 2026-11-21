@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .models import PARAKEET_CHECKPOINTS
 from .redactor import RAMPART_APPROX_MB, RAMPART_REPO_ID, RampartRedactor
+from .tts import KOKORO_APPROX_MB, KOKORO_REPO_ID
 from .state_machines import (
     AddonPackState,
     compute_allowed_addon_pack_events,
@@ -189,9 +190,9 @@ class AddonManager:
                 "id": "kokoro_tts",
                 "name": "Kokoro-82M Neural Voice (Local TTS)",
                 "category": "voice",
-                "size_mb": 95,
-                "description": "Local Apple Silicon neural voice so the AI interviewer speaks questions aloud with instant barge-in (macOS voices work with zero download).",
-                "repo_id": "onnx-community/Kokoro-82M-v1.0-ONNX",
+                "size_mb": KOKORO_APPROX_MB,
+                "description": "Natural FP16 local neural voice so the AI interviewer speaks questions aloud with instant barge-in (macOS voices remain as zero-download fallback).",
+                "repo_id": KOKORO_REPO_ID,
                 "installed": (
                     bool(self.extra_handlers["kokoro_tts"]["is_installed"]())
                     if "kokoro_tts" in self.extra_handlers

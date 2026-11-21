@@ -344,8 +344,8 @@ class AppRuntime:
         self.addons.register_pack_handler(
             "kokoro_tts",
             is_installed=self.tts.is_kokoro_installed,
-            install=self.tts.install_kokoro,
-            uninstall=self.tts.uninstall_kokoro,
+            install=lambda: asyncio.to_thread(self.tts.install_kokoro),
+            uninstall=lambda: asyncio.to_thread(self.tts.uninstall_kokoro),
             available=self.tts.is_kokoro_available(),
         )
         self.addons.register_pack_handler(
