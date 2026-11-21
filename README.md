@@ -28,7 +28,7 @@ A local-first 45-minute mock interview assistant for macOS (Apple Silicon), buil
 uv run mock-helper
 ```
 
-Opens `http://127.0.0.1:8765` (`mlx-community/parakeet-tdt-0.6b-v3` is already pre-cached on this Mac; you can A/B switch to `parakeet-tdt-0.6b-v2` in **Settings**).
+Opens `http://127.0.0.1:8765` (defaults to `mlx-community/parakeet-tdt-0.6b-v2` for English; opt into `parakeet-tdt-0.6b-v3` in **Settings** for 25-language multilingual support).
 
 ## State Machine Introspection (DX & AX)
 

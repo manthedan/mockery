@@ -58,9 +58,11 @@ LLM_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
+DEFAULT_PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
+
 PARAKEET_CHECKPOINTS: dict[str, str] = {
-    "mlx-community/parakeet-tdt-0.6b-v3": "Parakeet TDT 0.6B v3 (Multilingual default)",
-    "mlx-community/parakeet-tdt-0.6b-v2": "Parakeet TDT 0.6B v2 (English-focused — A/B test)",
+    "mlx-community/parakeet-tdt-0.6b-v2": "Parakeet TDT 0.6B v2 (English — recommended)",
+    "mlx-community/parakeet-tdt-0.6b-v3": "Parakeet TDT 0.6B v3 (Multilingual — 25 languages)",
 }
 
 
