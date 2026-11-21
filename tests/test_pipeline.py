@@ -2121,6 +2121,25 @@ def test_mockery_productization_discovery_auth_and_providers(tmp_path: Path, mon
     assert cfg.is_anthropic_native is True
     assert cfg.is_configured is True
 
+    from mockery.llm import _resolve_omlx_probe_target
+
+    cfg.update_and_save(
+        provider="omlx",
+        base_url="http://localhost:8000/v1",
+        fast_model="qwen3-8b",
+        calibration_model="qwen3-8b:thinking",
+    )
+    assert cfg.is_configured is True
+    assert cfg.public_dict()["masked_api_key"] == "Local server (no key)"
+
+    monkeypatch.setenv("OMLX_PORT", "11435")
+    monkeypatch.setenv("OMLX_API_KEY", "omlx-secret-key")
+    omlx_port, omlx_key = _resolve_omlx_probe_target()
+    assert omlx_port == 11435
+    assert omlx_key == "omlx-secret-key"
+    monkeypatch.delenv("OMLX_PORT", raising=False)
+    monkeypatch.delenv("OMLX_API_KEY", raising=False)
+
     cfg.update_and_save(
         provider="lmstudio",
         base_url="http://localhost:1234/v1",
@@ -2151,6 +2170,7 @@ def test_mockery_productization_discovery_auth_and_providers(tmp_path: Path, mon
     disc_body = disc_res.json()
     detected_ids = {c["provider"] for c in disc_body["detected_clis"]}
     assert {"claude_cli", "codex_cli", "gemini_cli"}.issubset(detected_ids)
+    assert "omlx" in disc_body["local_servers"]
     assert "ollama" in disc_body["local_servers"]
     assert "lmstudio" in disc_body["local_servers"]
     assert disc_body["data_dir"] == str(tmp_path / "disc_srv")

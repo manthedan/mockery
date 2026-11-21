@@ -5,7 +5,7 @@
 Mockery listens to your mock interview in real time — running **100% offline speech recognition and speaker separation directly on your Mac** — organizes the conversation into clean question/phase cards, surfaces sharp follow-up probes while the candidate is still talking, and runs a **blind post-interview calibration audit** against your own gut verdict.
 
 - **Private by default:** Speech-to-text ([Parakeet TDT 0.6B v2](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2) on MLX) and voice separation ([WeSpeaker](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) on CoreML) run locally on your Mac. Audio never leaves your machine.
-- **Zero-friction setup:** Works out of the box in **Transcript-Only mode** with no API key, or connects in one click to a provider you already have — **Claude Code CLI**, **Codex CLI**, **Gemini CLI**, **Ollama / LM Studio**, or a **Google Gemini (free tier)**, **Anthropic**, **OpenAI**, **DeepSeek**, or **OpenRouter** API key.
+- **Zero-friction setup:** Works out of the box in **Transcript-Only mode** with no API key, or connects in one click to a provider you already have — **Claude Code CLI**, **Codex CLI**, **Gemini CLI**, **oMLX / Ollama / LM Studio**, or a **Google Gemini (free tier)**, **Anthropic**, **OpenAI**, **DeepSeek**, or **OpenRouter** API key.
 - **Two capture modes:**
   - **Google Meet / Remote:** Captures your mic (`You`) and your Chrome Meet tab (`Candidate`) on a shared audio clock with automatic echo-bleed suppression.
   - **In-Person (Single Mic):** Acoustic two-speaker diarization separates voices automatically in the same room.
@@ -58,7 +58,7 @@ To enable **live follow-up probes** and **blind calibration**, Mockery's onboard
 | **Detected Local CLIs** (`claude`, `codex`, `gemini`, `agy`, `pi`) | Existing subscription — **no API key** | Auto-detected if installed on your Mac (one click) |
 | **Google Gemini API** | Generous free tier via [Google AI Studio](https://aistudio.google.com/apikey) | Easiest cloud setup without a credit card |
 | **Anthropic Claude / OpenAI / DeepSeek / OpenRouter** | Bring your own API key | Favorite frontier or budget cloud models |
-| **Ollama / LM Studio** | **100% offline & free** | Private local LLMs (auto-lists your installed models; 16 GB+ Mac recommended) |
+| **[oMLX](https://github.com/jundot/omlx) / Ollama / LM Studio** | **100% offline & free** | Private local LLMs on Apple Silicon (auto-lists your loaded models; 16 GB+ Mac recommended) |
 | **Transcript-Only** | Free, zero setup | Pure local transcription, notes, and Markdown export |
 
 Use **Settings → Test connection** at any time to verify your setup before an interview.
