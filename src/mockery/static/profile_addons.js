@@ -2,6 +2,12 @@
  * and Xcode-style Add-Ons & Modules manager.
  */
 
+import {
+  createPackOpTracker,
+  createRedactionQueueCoordinator,
+  formatApiDetail,
+} from "./state_machines.js";
+
 const CATEGORY_LABELS = {
   behavioral: "Behavioral & Leadership",
   system_design: "System Design",
@@ -31,13 +37,6 @@ function friendlyLabel(raw) {
   return LABEL_FRIENDLY[raw] || String(raw || "PII").replace(/_/g, " ");
 }
 
-function normVal(str) {
-  return String(str || "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
-
 export function createProfileAddonsController({
   state,
   el,
@@ -46,22 +45,37 @@ export function createProfileAddonsController({
   setModalState,
   onRoleApply,
   onAddonsChange,
+  clientMachines = null,
+  packOps = null,
 }) {
+  const sharedPackOps = packOps || createPackOpTracker(clientMachines);
+  const redactionCoord = createRedactionQueueCoordinator();
+
   const local = {
     profile: null,
     addons: null,
     activeTab: "resume",
     banksData: null,
+    banksState: "idle", // "idle" | "loading" | "ready" | "error"
+    banksError: "",
+    banksAbort: null,
+    banksReqId: 0,
     bankCategory: "",
     bankLevel: "",
     bankMatchJd: true,
     pasteResumeOpen: false,
     pasteJdOpen: false,
     expandedJdId: null,
-    busyRedaction: false,
+    busyResumeMutation: false,
     busyJdImport: false,
-    installingPacks: new Set(),
+    busyJdIds: new Set(),
+    busyModules: new Set(),
   };
+
+  sharedPackOps.subscribe(() => {
+    renderAddonsSection();
+    renderResumeTab();
+  });
 
   function getActiveJd(profile = local.profile) {
     if (!profile || !Array.isArray(profile.job_listings) || profile.job_listings.length === 0) {
@@ -151,7 +165,7 @@ export function createProfileAddonsController({
 
   /* ---------------- Profile Modal Tabs ---------------- */
 
-  function setProfileTab(tab) {
+  function setProfileTab(tab, { skipLoadBanks = false } = {}) {
     local.activeTab = tab;
     for (const btn of document.querySelectorAll("[data-profile-tab]")) {
       const isAct = btn.getAttribute("data-profile-tab") === tab;
@@ -162,16 +176,16 @@ export function createProfileAddonsController({
     el("profileTabJd")?.classList.toggle("hidden", tab !== "jd");
     el("profileTabBanks")?.classList.toggle("hidden", tab !== "banks");
 
-    if (tab === "banks") {
+    if (tab === "banks" && !skipLoadBanks) {
       loadBanks();
     }
   }
 
   async function openProfileModal(initialTab = "resume") {
-    setProfileTab(initialTab);
+    setProfileTab(initialTab, { skipLoadBanks: true });
     setModalState("profile");
     await refreshProfile();
-    if (initialTab === "banks") {
+    if (local.activeTab === "banks") {
       await loadBanks();
     }
   }
@@ -237,14 +251,18 @@ export function createProfileAddonsController({
       }
     }
     if (installBtn) {
-      const busy = local.installingPacks.has("rampart_pii");
-      installBtn.classList.toggle("hidden", rampartReady);
+      const installing = sharedPackOps.isInstalling("rampart_pii");
+      const uninstalling = sharedPackOps.isUninstalling("rampart_pii");
+      const busy = installing || uninstalling;
+      installBtn.classList.toggle("hidden", rampartReady && !busy);
       installBtn.disabled = busy;
-      installBtn.textContent = busy
+      installBtn.textContent = installing
         ? "Downloading 14.7 MB…"
-        : rampart.installed
-          ? "Retry Rampart"
-          : "Install Rampart (14.7 MB)";
+        : uninstalling
+          ? "Removing…"
+          : rampart.installed
+            ? "Retry Rampart"
+            : "Install Rampart (14.7 MB)";
     }
 
     const emptyWrap = el("resumeEmptyState");
@@ -322,7 +340,9 @@ export function createProfileAddonsController({
   }
 
   async function uploadResumeFile(file) {
-    if (!file) return;
+    if (!file || local.busyResumeMutation) return;
+    local.busyResumeMutation = true;
+    clientMachines?.beginOp("resume_upload", { filename: file.name });
     const form = new FormData();
     form.append("file", file);
     showToast(`Scanning & scrubbing ${file.name} locally…`, 2500);
@@ -330,9 +350,11 @@ export function createProfileAddonsController({
       const res = await fetch("/api/profile/resume/file", { method: "POST", body: form });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        showToast(data.detail || `Could not read resume (${res.status}).`, 4000);
+        showToast(formatApiDetail(data.detail, `Could not read resume (${res.status}).`), 4000);
+        if (!redactionCoord.busy) await refreshProfile();
         return;
       }
+      redactionCoord.invalidate();
       local.profile = data;
       local.pasteResumeOpen = false;
       renderProfileModal();
@@ -343,16 +365,23 @@ export function createProfileAddonsController({
       );
     } catch (err) {
       showToast(`Upload failed: ${err.message || "network error"}`);
+      if (!redactionCoord.busy) await refreshProfile();
+    } finally {
+      local.busyResumeMutation = false;
+      clientMachines?.endOp("resume_upload");
     }
   }
 
   async function submitPastedResume() {
+    if (local.busyResumeMutation) return;
     const input = el("resumePasteTextarea");
     const text = input?.value?.trim() || "";
     if (!text) {
       showToast("Paste your resume text first.");
       return;
     }
+    local.busyResumeMutation = true;
+    clientMachines?.beginOp("resume_paste");
     try {
       const res = await fetch("/api/profile/resume/text", {
         method: "POST",
@@ -361,9 +390,11 @@ export function createProfileAddonsController({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        showToast(data.detail || "Could not process resume text.");
+        showToast(formatApiDetail(data.detail, "Could not process resume text."));
+        if (!redactionCoord.busy) await refreshProfile();
         return;
       }
+      redactionCoord.invalidate();
       local.profile = data;
       local.pasteResumeOpen = false;
       if (input) input.value = "";
@@ -375,6 +406,10 @@ export function createProfileAddonsController({
       );
     } catch (err) {
       showToast(`Could not process resume: ${err.message || "network error"}`);
+      if (!redactionCoord.busy) await refreshProfile();
+    } finally {
+      local.busyResumeMutation = false;
+      clientMachines?.endOp("resume_paste");
     }
   }
 
@@ -395,12 +430,10 @@ export function createProfileAddonsController({
   }
 
   async function drainRedactionQueue() {
-    if (local.busyRedaction) return;
-    local.busyRedaction = true;
+    clientMachines?.beginOp("resume_redaction");
     try {
-      while (local.redactionQueue && local.redactionQueue.length > 0) {
-        const op = local.redactionQueue.shift();
-        if (!local.profile?.resume) break;
+      await redactionCoord.drain(async (op, isCurrent, isQueueEmpty) => {
+        if (!local.profile?.resume || !isCurrent()) return;
         let res;
         if (op.type === "prefs") {
           const payload = {
@@ -417,57 +450,66 @@ export function createProfileAddonsController({
             method: "POST",
           });
         }
-        if (!res) continue;
+        if (!res) return;
         const data = await res.json().catch(() => ({}));
+        // Discard stale response if resume was deleted or replaced while in flight
+        if (!isCurrent()) return;
         if (!res.ok) {
-          showToast(data.detail || "Could not update redaction.");
-          continue;
+          showToast(formatApiDetail(data.detail, "Could not update redaction."));
+          return;
         }
         local.profile = data;
         // Only redraw DOM controls once no newer prefs update is waiting in the queue
-        if (local.redactionQueue.length === 0) {
+        if (isQueueEmpty()) {
           renderProfileModal();
           renderProfileSummaryIndicators();
         }
-      }
+      });
     } catch (err) {
       showToast(`Redaction update failed: ${err.message || "network error"}`);
     } finally {
-      local.busyRedaction = false;
+      if (!redactionCoord.busy) {
+        clientMachines?.endOp("resume_redaction");
+      }
     }
   }
 
   async function saveRedactionPrefs() {
-    if (!local.profile?.resume) return;
-    if (!local.redactionQueue) local.redactionQueue = [];
-    // Coalesce consecutive prefs writes while keeping any span toggles in order
+    if (!local.profile?.resume || local.busyResumeMutation) return;
     const payload = readRedactionPrefsFromDom();
-    const last = local.redactionQueue[local.redactionQueue.length - 1];
-    if (last && last.type === "prefs") {
-      last.payload = payload;
-    } else {
-      local.redactionQueue.push({ type: "prefs", payload });
-    }
+    redactionCoord.enqueue({ type: "prefs", payload });
     await drainRedactionQueue();
   }
 
   async function toggleSpanRedaction(spanId) {
-    if (!local.profile?.resume || !spanId) return;
-    if (!local.redactionQueue) local.redactionQueue = [];
-    local.redactionQueue.push({ type: "toggle", spanId });
+    if (!local.profile?.resume || !spanId || local.busyResumeMutation) return;
+    redactionCoord.enqueue({ type: "toggle", spanId });
     await drainRedactionQueue();
   }
 
   async function deleteResume() {
+    if (local.busyResumeMutation) return;
+    local.busyResumeMutation = true;
+    clientMachines?.beginOp("resume_delete");
     try {
       const res = await fetch("/api/profile/resume", { method: "DELETE" });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showToast(formatApiDetail(data.detail, "Could not remove resume."));
+        if (!redactionCoord.busy) await refreshProfile();
+        return;
+      }
+      redactionCoord.invalidate();
       local.profile = await res.json();
       renderProfileModal();
       renderProfileSummaryIndicators();
       showToast("Resume removed from this Mac.", 2200);
     } catch (err) {
       showToast(`Could not remove resume: ${err.message || "network error"}`);
+      if (!redactionCoord.busy) await refreshProfile();
+    } finally {
+      local.busyResumeMutation = false;
+      clientMachines?.endOp("resume_delete");
     }
   }
 
@@ -576,7 +618,7 @@ export function createProfileAddonsController({
       if (!res.ok) {
         if (statusEl) {
           statusEl.classList.add("is-err");
-          statusEl.textContent = data.detail || `Import failed (${res.status})`;
+          statusEl.textContent = formatApiDetail(data.detail, `Import failed (${res.status})`);
         }
         return;
       }
@@ -611,30 +653,69 @@ export function createProfileAddonsController({
   }
 
   async function selectJobListing(jdId) {
-    const res = await fetch(`/api/profile/jd/${encodeURIComponent(jdId)}/select`, {
-      method: "POST",
-    });
-    if (!res.ok) return;
-    local.profile = await res.json();
-    local.banksData = null;
-    renderProfileModal();
-    renderProfileSummaryIndicators();
+    if (!jdId || local.busyJdIds.has(jdId)) return;
+    local.busyJdIds.add(jdId);
+    try {
+      const res = await fetch(`/api/profile/jd/${encodeURIComponent(jdId)}/select`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showToast(formatApiDetail(data.detail, "Could not select job listing."));
+        return;
+      }
+      local.profile = await res.json();
+      local.banksData = null;
+      renderProfileModal();
+      renderProfileSummaryIndicators();
+    } catch (err) {
+      showToast(`Could not select job listing: ${err.message || "network error"}`);
+    } finally {
+      local.busyJdIds.delete(jdId);
+    }
   }
 
   async function deleteJobListing(jdId) {
-    const res = await fetch(`/api/profile/jd/${encodeURIComponent(jdId)}`, {
-      method: "DELETE",
-    });
-    if (!res.ok) return;
-    local.profile = await res.json();
-    local.banksData = null;
-    renderProfileModal();
-    renderProfileSummaryIndicators();
+    if (!jdId || local.busyJdIds.has(jdId)) return;
+    local.busyJdIds.add(jdId);
+    try {
+      const res = await fetch(`/api/profile/jd/${encodeURIComponent(jdId)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showToast(formatApiDetail(data.detail, "Could not remove job listing."));
+        return;
+      }
+      local.profile = await res.json();
+      local.banksData = null;
+      renderProfileModal();
+      renderProfileSummaryIndicators();
+    } catch (err) {
+      showToast(`Could not remove job listing: ${err.message || "network error"}`);
+    } finally {
+      local.busyJdIds.delete(jdId);
+    }
   }
 
   /* ---------------- Tab 3: Curated Question Banks ---------------- */
 
   async function loadBanks() {
+    if (local.banksAbort) {
+      try {
+        local.banksAbort.abort();
+      } catch {
+        /* ignore */
+      }
+      local.banksAbort = null;
+    }
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    local.banksAbort = ctrl;
+    local.banksReqId += 1;
+    const reqId = local.banksReqId;
+    local.banksState = "loading";
+    local.banksError = "";
+
     const listEl = el("banksListContainer");
     if (listEl) {
       listEl.innerHTML = `<div class="profile-empty-note">Loading question banks…</div>`;
@@ -645,13 +726,34 @@ export function createProfileAddonsController({
     params.set("match_active_jd", local.bankMatchJd ? "true" : "false");
 
     try {
-      const res = await fetch(`/api/banks?${params.toString()}`);
-      if (!res.ok) return;
-      local.banksData = await res.json();
+      const res = await fetch(`/api/banks?${params.toString()}`, ctrl ? { signal: ctrl.signal } : {});
+      if (reqId !== local.banksReqId) return;
+      const data = await res.json().catch(() => ({}));
+      if (reqId !== local.banksReqId) return;
+      if (!res.ok) {
+        throw new Error(formatApiDetail(data.detail, `Could not load question banks (${res.status}).`));
+      }
+      local.banksData = data;
+      local.banksState = "ready";
       renderBanksTab();
-    } catch {
+    } catch (err) {
+      if (err?.name === "AbortError" || reqId !== local.banksReqId) return;
+      local.banksData = null;
+      local.banksState = "error";
+      local.banksError = String(err?.message || "Could not load question banks.");
       if (listEl) {
-        listEl.innerHTML = `<div class="profile-empty-note">Could not load question banks.</div>`;
+        listEl.innerHTML = `
+          <div class="profile-empty-note">
+            ${escapeHtml(local.banksError)}
+            <div style="margin-top:8px;">
+              <button type="button" class="btn btn-outline btn-sm" data-retry-banks>Retry</button>
+            </div>
+          </div>
+        `;
+      }
+    } finally {
+      if (local.banksAbort === ctrl) {
+        local.banksAbort = null;
       }
     }
   }
@@ -720,7 +822,7 @@ export function createProfileAddonsController({
   function renderProfileModal() {
     renderResumeTab();
     renderJdTab();
-    if (local.activeTab === "banks" && local.banksData) {
+    if (local.activeTab === "banks" && local.banksState === "ready" && local.banksData) {
       renderBanksTab();
     }
   }
@@ -748,9 +850,22 @@ export function createProfileAddonsController({
     if (!local.addons) return;
 
     if (modList) {
-      modList.innerHTML = (local.addons.modules || [])
-        .map(
-          (m) => `
+      const modules = local.addons.modules || [];
+      const existingInputs = Array.from(modList.querySelectorAll("[data-addon-module]"));
+      const canPatchInPlace =
+        existingInputs.length === modules.length &&
+        modules.every((m, idx) => existingInputs[idx]?.getAttribute("data-addon-module") === m.id);
+      if (canPatchInPlace) {
+        // Patch checked/disabled state in place to preserve keyboard focus across toggles
+        modules.forEach((m, idx) => {
+          const inp = existingInputs[idx];
+          inp.checked = Boolean(m.enabled);
+          inp.disabled = local.busyModules.has(m.id);
+        });
+      } else {
+        modList.innerHTML = modules
+          .map(
+            (m) => `
           <label class="addon-row">
             <span class="addon-row-main">
               <span class="addon-row-title">${escapeHtml(m.label)}</span>
@@ -761,18 +876,20 @@ export function createProfileAddonsController({
               class="studio-check addon-mod-toggle"
               data-addon-module="${escapeHtml(m.id)}"
               ${m.enabled ? "checked" : ""}
+              ${local.busyModules.has(m.id) ? "disabled" : ""}
             />
           </label>
         `
-        )
-        .join("");
+          )
+          .join("");
+      }
     }
 
     if (packList) {
       packList.innerHTML = (local.addons.packs || [])
         .map((pk) => {
-          const installing = local.installingPacks.has(pk.id) || pk.state === "installing";
-          const uninstalling = pk.state === "uninstalling";
+          const installing = sharedPackOps.isInstalling(pk.id) || pk.state === "installing";
+          const uninstalling = sharedPackOps.isUninstalling(pk.id) || pk.state === "uninstalling";
           let actionHtml = "";
           if (installing) {
             actionHtml = `<button type="button" class="btn btn-outline btn-sm" disabled>Installing…</button>`;
@@ -823,93 +940,127 @@ export function createProfileAddonsController({
     }
   }
 
-  function formatApiDetail(detail, fallback) {
-    if (typeof detail === "string" && detail.trim()) return detail.trim();
-    if (detail && typeof detail === "object") {
-      const msg = detail.message || detail.remediation;
-      if (typeof msg === "string" && msg.trim()) return msg.trim();
-    }
-    return fallback;
-  }
-
   async function toggleModule(modId, enabled) {
+    if (!modId || local.busyModules.has(modId)) return;
+    local.busyModules.add(modId);
+    const modList = el("addonsModulesList");
+    const targetInput = modList?.querySelector(
+      `[data-addon-module="${CSS.escape ? CSS.escape(modId) : modId}"]`
+    );
+    const hadFocus = Boolean(targetInput && document.activeElement === targetInput);
+    if (targetInput) {
+      targetInput.disabled = true;
+    } else {
+      renderAddonsSection();
+    }
     try {
       const res = await fetch("/api/addons/modules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modules: { [modId]: enabled } }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showToast(formatApiDetail(data.detail, "Could not update add-on module."));
+        return;
+      }
       local.addons = await res.json();
       state.addons = local.addons;
-      renderAddonsSection();
       if (typeof onAddonsChange === "function") {
         onAddonsChange(local.addons);
       }
     } catch (err) {
       showToast(`Could not update add-on module: ${err.message || "network error"}`);
+    } finally {
+      local.busyModules.delete(modId);
+      renderAddonsSection();
+      if (hadFocus) {
+        const refocused = el("addonsModulesList")?.querySelector(
+          `[data-addon-module="${CSS.escape ? CSS.escape(modId) : modId}"]`
+        );
+        refocused?.focus?.();
+      }
     }
   }
 
   async function installPack(packId) {
-    if (local.installingPacks.has(packId)) return;
-    local.installingPacks.add(packId);
-    renderAddonsSection();
-    renderResumeTab();
+    if (!packId || !sharedPackOps.begin(packId, "installing")) return;
     showToast(`Downloading ${packId.replace(/_/g, " ")}…`, 3000);
+    let refreshedFromResponse = false;
     try {
       const res = await fetch(`/api/addons/${encodeURIComponent(packId)}/install`, {
         method: "POST",
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        showToast(formatApiDetail(data.detail, `Install failed (${res.status})`), 4000);
-        return;
-      }
       if (data.addons) {
         local.addons = data.addons;
         state.addons = data.addons;
+        refreshedFromResponse = true;
         if (typeof onAddonsChange === "function") onAddonsChange(data.addons);
       }
       if (data.profile) {
         local.profile = data.profile;
         renderProfileSummaryIndicators();
+      }
+      if (!res.ok) {
+        showToast(formatApiDetail(data.detail, `Install failed (${res.status})`), 4000);
+        return;
       }
       showToast("Add-on installed and ready.", 2400);
     } catch (err) {
       showToast(`Install failed: ${err.message || "network error"}`);
     } finally {
-      local.installingPacks.delete(packId);
-      renderAddonsSection();
-      renderResumeTab();
+      sharedPackOps.end(packId);
+      if (!refreshedFromResponse) {
+        await refreshAddons();
+      }
     }
   }
 
   async function uninstallPack(packId) {
+    if (!packId || !sharedPackOps.begin(packId, "uninstalling")) return;
+    let refreshedFromResponse = false;
     try {
       const res = await fetch(`/api/addons/${encodeURIComponent(packId)}`, {
         method: "DELETE",
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        showToast(formatApiDetail(data.detail, "Could not remove add-on."), 4000);
-        return;
-      }
       if (data.addons) {
         local.addons = data.addons;
         state.addons = data.addons;
+        refreshedFromResponse = true;
         if (typeof onAddonsChange === "function") onAddonsChange(data.addons);
       }
       if (data.profile) {
         local.profile = data.profile;
         renderProfileSummaryIndicators();
       }
-      renderAddonsSection();
-      renderResumeTab();
+      if (!res.ok) {
+        showToast(formatApiDetail(data.detail, "Could not remove add-on."), 4000);
+        return;
+      }
       showToast("Add-on removed from local cache.", 2200);
     } catch (err) {
       showToast(`Remove failed: ${err.message || "network error"}`);
+    } finally {
+      sharedPackOps.end(packId);
+      if (!refreshedFromResponse) {
+        await refreshAddons();
+      }
     }
+  }
+
+  function getStateSnapshot() {
+    return {
+      activeTab: local.activeTab,
+      banksState: local.banksState,
+      redactionBusy: redactionCoord.busy,
+      redactionEpoch: redactionCoord.epoch,
+      redactionPendingCount: redactionCoord.pendingCount,
+      busyResumeMutation: local.busyResumeMutation,
+      busyJdImport: local.busyJdImport,
+      packOps: sharedPackOps.snapshot(),
+    };
   }
 
   /* ---------------- Event Binding ---------------- */
@@ -1045,6 +1196,11 @@ export function createProfileAddonsController({
       local.bankMatchJd = Boolean(ev.target.checked);
       loadBanks();
     });
+    el("banksListContainer")?.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-retry-banks]")) {
+        loadBanks();
+      }
+    });
 
     // Settings Add-Ons listeners
     el("addonsModulesList")?.addEventListener("change", (ev) => {
@@ -1074,6 +1230,7 @@ export function createProfileAddonsController({
     refreshProfile,
     refreshAddons,
     renderAddonsSection,
+    getStateSnapshot,
     getProfile: () => local.profile,
     getAddons: () => local.addons,
   };

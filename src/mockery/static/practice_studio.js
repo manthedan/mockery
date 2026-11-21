@@ -3,6 +3,14 @@
  * and extensible Studio Slot for Milestone 3 (System Design) & Milestone 4 (Coding).
  */
 
+import {
+  createPracticeMicMachine,
+  createPracticeOpMachine,
+  createRetryTimerMachine,
+  createWorkspaceSaveMachine,
+  formatApiDetail,
+} from "./state_machines.js";
+
 const SOURCE_NOTES = {
   mixed:
     "Blends curated role-ranked prompts with questions tailored to your locally redacted resume & JD.",
@@ -84,21 +92,13 @@ function fmtShortClock(sec) {
   return `${m}:${String(rem).padStart(2, "0")}`;
 }
 
-function formatApiDetail(detail, fallback) {
-  if (typeof detail === "string" && detail.trim()) return detail.trim();
-  if (detail && typeof detail === "object") {
-    const msg = detail.message || detail.remediation;
-    if (typeof msg === "string" && msg.trim()) return msg.trim();
-  }
-  return fallback;
-}
-
 export function createPracticeStudioController({
   state,
   el,
   escapeHtml,
   showToast,
   onPracticeActiveChange,
+  clientMachines = null,
 }) {
   const local = {
     homeMode: "copilot", // "copilot" | "practice"
@@ -109,15 +109,17 @@ export function createPracticeStudioController({
     ttsStatus: null,
     busy: false,
 
-    // Voice playback state (with generation token to prevent race conditions)
+    // Voice playback state (with generation token + AbortController)
     voiceEnabled: true,
     isSpeaking: false,
     speakGen: 0,
+    ttsAbort: null,
     activeAudio: null,
     activeAudioUrl: null,
 
     // Local mic recording state
     recordingTarget: null, // null | "answer" | "retry"
+    micTarget: null,
     recGen: 0,
     recSamples: 0,
     recAutoStopping: false,
@@ -143,7 +145,74 @@ export function createPracticeStudioController({
     workspaceSaveSeq: 0,
     workspaceAckSeq: 0,
     debriefPollTimer: null,
+    exitForceArmed: false,
+    exitForceTimer: null,
   };
+
+  const micMachine = createPracticeMicMachine(clientMachines);
+  const opMachine = createPracticeOpMachine(clientMachines, (next) => {
+    local.busy = next !== "idle";
+    if (next === "idle") {
+      clientMachines?.endOp("practice_op");
+    } else {
+      clientMachines?.beginOp("practice_op", { op: next, sessionId: local.session?.id || null });
+    }
+  });
+  const retryTimerMachine = createRetryTimerMachine(clientMachines);
+  const workspaceSaveMachine = createWorkspaceSaveMachine(clientMachines, () => {
+    renderWorkspaceSaveStatus();
+  });
+
+  function clearExitForceArm() {
+    local.exitForceArmed = false;
+    if (local.exitForceTimer) {
+      clearTimeout(local.exitForceTimer);
+      local.exitForceTimer = null;
+    }
+  }
+
+  function renderWorkspaceSaveStatus() {
+    const pill = el("practiceWorkspaceSaveStatus");
+    if (!pill) return;
+    const show = Boolean(local.session && local.mountedPlugin && local.session.phase !== "completed");
+    pill.classList.toggle("hidden", !show);
+    if (!show) return;
+    const st = workspaceSaveMachine.state;
+    pill.classList.remove("is-saving", "is-dirty", "is-error");
+    if (st === "saving") {
+      pill.textContent = "Saving…";
+      pill.classList.add("is-saving");
+      pill.disabled = true;
+      pill.title = "Saving workspace changes locally…";
+    } else if (st === "dirty") {
+      pill.textContent = "Unsaved";
+      pill.classList.add("is-dirty");
+      pill.disabled = false;
+      pill.title = "Changes will autosave momentarily — click to save now";
+    } else if (st === "error") {
+      pill.textContent = "Save failed · Retry";
+      pill.classList.add("is-error");
+      pill.disabled = false;
+      pill.title = "Click to retry saving workspace";
+    } else {
+      pill.textContent = "Saved";
+      pill.disabled = true;
+      pill.title = "Workspace synced locally";
+    }
+  }
+
+  function resetWorkspaceSaveState() {
+    if (local.workspaceSyncTimer) {
+      clearTimeout(local.workspaceSyncTimer);
+      local.workspaceSyncTimer = null;
+    }
+    clearExitForceArm();
+    local.workspaceDirty = false;
+    local.workspaceSaveSeq = 0;
+    local.workspaceAckSeq = 0;
+    workspaceSaveMachine.reset("saved", { event: "session_reset" });
+    renderWorkspaceSaveStatus();
+  }
 
   function getSelectedFormat() {
     const activeBtn = el("setupTypePills")?.querySelector(".seg-opt.active");
@@ -312,6 +381,14 @@ export function createPracticeStudioController({
 
   function stopSpeaking() {
     local.speakGen += 1;
+    if (local.ttsAbort) {
+      try {
+        local.ttsAbort.abort();
+      } catch {
+        /* ignore */
+      }
+      local.ttsAbort = null;
+    }
     if (local.activeAudio) {
       try {
         local.activeAudio.pause();
@@ -346,6 +423,8 @@ export function createPracticeStudioController({
 
     stopSpeaking();
     const myGen = local.speakGen;
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    local.ttsAbort = ctrl;
     setSpeakingUI(true);
 
     try {
@@ -353,8 +432,10 @@ export function createPracticeStudioController({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: clean, rate: 1.0 }),
+        signal: ctrl?.signal,
       });
       if (myGen !== local.speakGen) return;
+      if (local.ttsAbort === ctrl) local.ttsAbort = null;
       if (res.ok) {
         const blob = await res.blob();
         if (myGen !== local.speakGen) return;
@@ -371,7 +452,9 @@ export function createPracticeStudioController({
         await audio.play();
         return;
       }
-    } catch {
+    } catch (err) {
+      if (local.ttsAbort === ctrl) local.ttsAbort = null;
+      if (err?.name === "AbortError" || myGen !== local.speakGen) return;
       /* fall through to browser speech synthesis */
     }
 
@@ -415,11 +498,18 @@ export function createPracticeStudioController({
     const status = el(isRetry ? "practiceRetryMicStatus" : "practiceMicStatus");
     if (btn) btn.classList.toggle("is-recording", phase === "recording");
     if (lbl) {
-      if (phase === "recording") lbl.textContent = "Stop & transcribe";
+      if (phase === "requesting_mic") lbl.textContent = "Requesting mic…";
+      else if (phase === "recording") lbl.textContent = "Stop & transcribe";
       else if (phase === "transcribing") lbl.textContent = "Transcribing…";
       else lbl.textContent = isRetry ? "Speak retry" : "Speak answer";
     }
-    if (btn) btn.disabled = phase === "transcribing";
+    if (btn) {
+      const lockedByPhase =
+        !isRetry &&
+        local.session &&
+        (local.session.phase === "awaiting_debrief" || local.session.phase === "debriefing");
+      btn.disabled = phase === "transcribing" || phase === "requesting_mic" || Boolean(lockedByPhase);
+    }
     if (status && note) status.textContent = note;
   }
 
@@ -470,8 +560,10 @@ export function createPracticeStudioController({
 
   function abortMicRecording() {
     local.recGen += 1;
-    const prevTarget = local.recordingTarget;
+    const prevTarget = local.micTarget || local.recordingTarget;
     local.recordingTarget = null;
+    local.micTarget = null;
+    micMachine.reset("idle", { event: "abort_mic" });
     cleanupMicResources();
     if (prevTarget) {
       updateMicUI(prevTarget, "idle", "Local mic ready");
@@ -482,20 +574,29 @@ export function createPracticeStudioController({
     // Instant barge-in: pressing speak immediately silences the AI voice
     stopSpeaking();
 
-    if (local.recordingTarget === target) {
+    if (opMachine.state === "exiting") return;
+    if (micMachine.state === "requesting_mic" || micMachine.state === "transcribing") {
+      return;
+    }
+    if (micMachine.state === "recording" && local.recordingTarget === target) {
       await stopMicAndTranscribe();
       return;
     }
-    if (local.recordingTarget && local.recordingTarget !== target) {
+    if (micMachine.state === "recording" && local.recordingTarget && local.recordingTarget !== target) {
       await stopMicAndTranscribe();
+      if (micMachine.state !== "idle") return;
     }
 
-    if (!local.session) return;
+    if (!local.session || opMachine.state === "exiting") return;
 
     if (!navigator.mediaDevices?.getUserMedia) {
       showToast("Microphone capture is unavailable in this browser.", 3000);
       return;
     }
+
+    if (!micMachine.transition("requesting_mic", { event: "request_mic" })) return;
+    local.micTarget = target;
+    updateMicUI(target, "requesting_mic", "Requesting microphone access…");
 
     local.recGen += 1;
     const myRecGen = local.recGen;
@@ -511,13 +612,23 @@ export function createPracticeStudioController({
         },
       });
       // Guard against exiting/switching session or double-tapping while awaiting permission
-      if (myRecGen !== local.recGen || mySessionGen !== local.sessionGen || !local.session) {
+      if (
+        myRecGen !== local.recGen ||
+        mySessionGen !== local.sessionGen ||
+        !local.session ||
+        opMachine.state === "exiting"
+      ) {
         for (const t of stream.getTracks()) {
           try {
             t.stop();
           } catch {
             /* ignore */
           }
+        }
+        if (myRecGen === local.recGen) {
+          local.micTarget = null;
+          micMachine.reset("idle", { event: "mic_aborted_during_exit" });
+          updateMicUI(target, "idle", "Local mic ready");
         }
         return;
       }
@@ -537,6 +648,7 @@ export function createPracticeStudioController({
       local.recProcessor = processor;
       local.recordingTarget = target;
       local.recStartedAt = Date.now();
+      micMachine.transition("recording", { event: "mic_granted" });
 
       processor.onaudioprocess = (ev) => {
         if (myRecGen !== local.recGen || local.recAutoStopping) return;
@@ -579,6 +691,9 @@ export function createPracticeStudioController({
       if (myRecGen === local.recGen) {
         cleanupMicResources();
         local.recordingTarget = null;
+        local.micTarget = null;
+        micMachine.reset("idle", { event: "mic_denied" });
+        updateMicUI(target, "idle", "Microphone unavailable — type your answer below");
       }
       showToast(`Microphone access denied: ${err.message || err}`, 3200);
     }
@@ -586,9 +701,11 @@ export function createPracticeStudioController({
 
   async function stopMicAndTranscribe() {
     const target = local.recordingTarget;
-    if (!target) return;
+    if (!target || micMachine.state !== "recording") return;
     local.recGen += 1;
+    const myRecGen = local.recGen;
     const mySessionGen = local.sessionGen;
+    const myQuestionId = target === "answer" ? currentQuestionId() : null;
     const sampleRate = local.recAudioCtx?.sampleRate || 48000;
     const chunks = local.recChunks.slice();
     local.recordingTarget = null;
@@ -596,10 +713,13 @@ export function createPracticeStudioController({
 
     const int16 = downsampleToInt16(chunks, sampleRate, 16000);
     if (int16.length < 1600) {
+      local.micTarget = null;
+      micMachine.transition("idle", { event: "clip_too_short" });
       updateMicUI(target, "idle", "Recording was too short — try again or type below.");
       return;
     }
 
+    micMachine.transition("transcribing", { event: "start_transcribe" });
     updateMicUI(target, "transcribing", "Transcribing locally with Parakeet…");
     try {
       const res = await fetch("/api/asr/transcribe", {
@@ -608,9 +728,16 @@ export function createPracticeStudioController({
         body: int16.buffer,
       });
       const data = await res.json();
-      if (mySessionGen !== local.sessionGen) return;
+      if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return;
       if (!res.ok) {
         throw new Error(formatApiDetail(data.detail, "Transcription failed"));
+      }
+      // If the user advanced to a different question while transcribing, discard stale answer audio
+      if (target === "answer" && myQuestionId && currentQuestionId() !== myQuestionId) {
+        local.micTarget = null;
+        micMachine.transition("idle", { event: "transcribe_discarded_question_changed" });
+        updateMicUI(target, "idle", "Local mic ready");
+        return;
       }
       const transcript = String(data.text || "").trim();
       const inputEl = el(target === "retry" ? "practiceRetryInput" : "practiceAnswerInput");
@@ -619,6 +746,8 @@ export function createPracticeStudioController({
         inputEl.value = prefix ? `${prefix} ${transcript}` : transcript;
         inputEl.focus();
       }
+      local.micTarget = null;
+      micMachine.transition("idle", { event: "transcribe_done" });
       const ms = data.inference_ms ? ` (${Math.round(data.inference_ms)} ms local)` : "";
       updateMicUI(
         target,
@@ -628,7 +757,9 @@ export function createPracticeStudioController({
           : "No speech detected — try speaking closer to the mic"
       );
     } catch (err) {
-      if (mySessionGen !== local.sessionGen) return;
+      if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return;
+      local.micTarget = null;
+      micMachine.transition("idle", { event: "transcribe_error" });
       updateMicUI(target, "idle", `Local transcription error: ${err.message || err}`);
       showToast(String(err.message || err), 3200);
     }
@@ -659,7 +790,8 @@ export function createPracticeStudioController({
       hadPending &&
       local.mountedPlugin &&
       local.session &&
-      local.session.phase !== "completed"
+      local.session.phase !== "completed" &&
+      local.session.phase !== "debriefing"
     ) {
       const snap = getActiveWorkspaceContext();
       if (snap) {
@@ -681,6 +813,7 @@ export function createPracticeStudioController({
       slot.innerHTML = "";
       slot.classList.add("hidden");
     }
+    renderWorkspaceSaveStatus();
     return flushPromise;
   }
 
@@ -716,6 +849,7 @@ export function createPracticeStudioController({
         ? ++local.workspaceSaveSeq
         : local.workspaceSaveSeq;
     local.workspaceDirty = true;
+    workspaceSaveMachine.transition("saving", { event: "workspace_save_start" });
     // Synchronously mirror onto local.session so toggling add-on off/on never remounts stale data
     local.session.workspace_context = {
       ...(local.session.workspace_context || {}),
@@ -729,27 +863,34 @@ export function createPracticeStudioController({
         keepalive,
       });
       if (!res.ok) {
+        if (mySessionGen === local.sessionGen && saveSeq === local.workspaceSaveSeq) {
+          workspaceSaveMachine.transition("error", { event: "workspace_save_http_error" });
+        }
         return false;
       }
       const data = await res.json();
+      if (mySessionGen !== local.sessionGen) return true;
       if (saveSeq > local.workspaceAckSeq) {
         local.workspaceAckSeq = saveSeq;
       }
       // Only clear dirty and accept server snapshot if no newer local edit superseded this request
       if (saveSeq === local.workspaceSaveSeq) {
         local.workspaceDirty = false;
-        if (
-          mySessionGen === local.sessionGen &&
-          local.session &&
-          local.session.id === sid &&
-          data?.workspace_context
-        ) {
+        clearExitForceArm();
+        workspaceSaveMachine.transition("saved", { event: "workspace_save_ok" });
+        if (local.session && local.session.id === sid && data?.workspace_context) {
           local.session.workspace_context = data.workspace_context;
         }
+      } else if (local.workspaceAckSeq < local.workspaceSaveSeq) {
+        // Only show "dirty" if a newer edit is still unacknowledged; never regress an already-saved newer edit
+        workspaceSaveMachine.transition("dirty", { event: "workspace_save_superseded" });
       }
       return true;
     } catch {
       // Retain workspaceDirty = true so subsequent sync/exit retries cleanly
+      if (mySessionGen === local.sessionGen && saveSeq === local.workspaceSaveSeq) {
+        workspaceSaveMachine.transition("error", { event: "workspace_save_network_error" });
+      }
       return false;
     }
   }
@@ -762,8 +903,10 @@ export function createPracticeStudioController({
     ) {
       return;
     }
+    clearExitForceArm();
     local.workspaceSaveSeq += 1;
     local.workspaceDirty = true;
+    workspaceSaveMachine.transition("dirty", { event: "workspace_edit" });
     const snap = getActiveWorkspaceContext();
     if (snap) {
       local.session.workspace_context = {
@@ -779,6 +922,7 @@ export function createPracticeStudioController({
   }
 
   function syncStudioSlot() {
+    if (opMachine.state === "exiting") return;
     const slot = el("practiceStudioSlot");
     if (!slot || !local.session) {
       unmountStudioPlugin();
@@ -807,6 +951,7 @@ export function createPracticeStudioController({
     if (local.mountedPluginKey === pluginKey && local.mountedPlugin) {
       local.mountedPlugin.updateSession?.(local.session);
       slot.classList.remove("hidden");
+      renderWorkspaceSaveStatus();
       return;
     }
 
@@ -822,6 +967,7 @@ export function createPracticeStudioController({
         submitTurn(promptText);
       },
     });
+    renderWorkspaceSaveStatus();
   }
 
   function stopDebriefPoll() {
@@ -879,55 +1025,125 @@ export function createPracticeStudioController({
     if (ret) ret.value = "";
   }
 
-  async function exitPracticeToHome() {
-    // Capture & start awaiting normal workspace save BEFORE clearing session state
-    const flushPromise = unmountStudioPlugin({ flush: true });
+  async function exitPracticeToHome({ force = false } = {}) {
+    if (opMachine.state === "exiting") return false;
+    const forceNow = Boolean(force || local.exitForceArmed);
+    if (!opMachine.transition("exiting", { event: "exit_practice" })) {
+      opMachine.reset("exiting", { event: "exit_practice" });
+    }
+    setBusy(true);
+    const micBtn = el("practiceMicBtn");
+    const retryMicBtn = el("practiceRetryMicBtn");
+    if (micBtn) micBtn.disabled = true;
+    if (retryMicBtn) retryMicBtn.disabled = true;
+
     stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
+
     const myGen = local.sessionGen;
-    try {
-      await Promise.race([
-        flushPromise,
-        new Promise((resolve) => setTimeout(resolve, 2000)),
-      ]);
-    } catch {
-      /* ignore */
+    const needsFlush = Boolean(
+      local.mountedPlugin &&
+        local.session &&
+        local.session.phase !== "completed" &&
+        local.session.phase !== "debriefing" &&
+        (local.workspaceSyncTimer ||
+          local.workspaceDirty ||
+          local.workspaceSaveSeq > local.workspaceAckSeq ||
+          workspaceSaveMachine.state === "error")
+    );
+
+    if (needsFlush && !forceNow) {
+      let savedOk = false;
+      try {
+        savedOk = Boolean(
+          await Promise.race([
+            pushWorkspaceSnapshot(),
+            new Promise((resolve) => setTimeout(() => resolve(false), 2000)),
+          ])
+        );
+      } catch {
+        savedOk = false;
+      }
+      if (myGen !== local.sessionGen) {
+        if (opMachine.state === "exiting") {
+          opMachine.reset("idle", { event: "exit_superseded" });
+          setBusy(false);
+        }
+        return false;
+      }
+      if (!savedOk) {
+        clearExitForceArm();
+        local.exitForceArmed = true;
+        local.exitForceTimer = setTimeout(() => {
+          local.exitForceArmed = false;
+          local.exitForceTimer = null;
+        }, 8000);
+        opMachine.reset("idle", { event: "exit_blocked_unsaved" });
+        setBusy(false);
+        renderPracticeSession();
+        showToast(
+          "Could not save your latest workspace edits — click Retry Save, or click Home again to leave without saving.",
+          4500
+        );
+        return false;
+      }
     }
-    if (myGen !== local.sessionGen) return;
+
+    if (myGen !== local.sessionGen) {
+      if (opMachine.state === "exiting") {
+        opMachine.reset("idle", { event: "exit_superseded" });
+        setBusy(false);
+      }
+      return false;
+    }
+
+    // Invalidate all in-flight session requests BEFORE unmounting so nothing can remount after exit
     local.sessionGen += 1;
-    local.workspaceDirty = false;
+    clearExitForceArm();
+    unmountStudioPlugin({ flush: false });
+    abortMicRecording();
+    resetWorkspaceSaveState();
     clearDraftInputs();
     local.session = null;
+    opMachine.reset("idle", { event: "exited_practice" });
     setBusy(false);
     setPracticeVisible(false);
     refreshPracticeHistory();
+    return true;
   }
 
   function setBusy(busy) {
     local.busy = busy;
-    const ids = [
-      "practiceSendBtn",
-      "practiceHintBtn",
-      "practiceNextQBtn",
-      "practiceDebriefBtn",
-      "practiceRetrySubmitBtn",
-    ];
-    for (const id of ids) {
+    const phase = local.session?.phase || "active";
+    const isDebriefing = phase === "debriefing";
+    const isInputLocked = phase === "awaiting_debrief" || isDebriefing;
+    for (const id of ["practiceSendBtn", "practiceHintBtn", "practiceNextQBtn"]) {
       const btn = el(id);
-      if (btn) btn.disabled = busy;
+      if (btn) btn.disabled = busy || isInputLocked;
     }
+    const debriefBtn = el("practiceDebriefBtn");
+    if (debriefBtn) debriefBtn.disabled = busy || isDebriefing;
+    const retryBtn = el("practiceRetrySubmitBtn");
+    if (retryBtn) retryBtn.disabled = busy;
   }
 
   async function startNewPractice() {
-    if (local.busy) return;
+    if (state.captureState && state.captureState !== "idle") {
+      showToast("Stop live Copilot capture before starting an AI mock interview.", 3200);
+      return;
+    }
+    if (opMachine.state !== "idle") return;
+    if (!opMachine.transition("starting", { event: "start_practice" })) return;
+
     local.sessionGen += 1;
     const mySessionGen = local.sessionGen;
     stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
+    resetWorkspaceSaveState();
     clearDraftInputs();
 
     const btn = el("practiceStartBtn");
@@ -960,6 +1176,10 @@ export function createPracticeStudioController({
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
+      if (state.captureState && state.captureState !== "idle") {
+        showToast("Live Copilot recording started — cancelled entering Practice Mode.", 3200);
+        return;
+      }
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not start practice session"));
       local.session = data.session;
       setPracticeVisible(true);
@@ -974,21 +1194,39 @@ export function createPracticeStudioController({
     } finally {
       if (btn) btn.disabled = false;
       if (lbl) lbl.textContent = "Start AI mock interview";
+      if (opMachine.state === "starting") {
+        opMachine.transition("idle", { event: "start_practice_done" });
+      }
+      if (mySessionGen === local.sessionGen) {
+        setBusy(false);
+      }
     }
   }
 
   async function openPracticeSession(sessionId) {
+    if (state.captureState && state.captureState !== "idle") {
+      showToast("Stop live Copilot capture before opening a Practice session.", 3200);
+      return;
+    }
+    if (opMachine.state !== "idle") return;
+    if (!opMachine.transition("opening", { event: "open_practice" })) return;
+
     local.sessionGen += 1;
     const mySessionGen = local.sessionGen;
     stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
+    resetWorkspaceSaveState();
     clearDraftInputs();
     try {
       const res = await fetch(`/api/practice/sessions/${encodeURIComponent(sessionId)}`);
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
+      if (state.captureState && state.captureState !== "idle") {
+        showToast("Live Copilot recording started — cancelled opening Practice session.", 3200);
+        return;
+      }
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not load practice session"));
       local.session = data.session;
       local.voiceEnabled = Boolean(local.session.config?.voice_enabled ?? true);
@@ -998,40 +1236,53 @@ export function createPracticeStudioController({
       if (mySessionGen === local.sessionGen) {
         showToast(String(err.message || err), 3200);
       }
+    } finally {
+      if (opMachine.state === "opening") {
+        opMachine.transition("idle", { event: "open_practice_done" });
+      }
+      if (mySessionGen === local.sessionGen) {
+        setBusy(false);
+      }
     }
   }
 
   async function submitTurn(explicitText = null) {
-    if (!local.session || local.busy || local.session.phase !== "active") return;
-    const mySessionGen = local.sessionGen;
-    if (local.recordingTarget === "answer") {
-      await stopMicAndTranscribe();
-      if (mySessionGen !== local.sessionGen || !local.session) return;
+    if (!local.session || opMachine.state !== "idle" || local.session.phase !== "active") return;
+    if (micMachine.state === "requesting_mic" || micMachine.state === "transcribing") {
+      showToast("Finishing voice capture — try again in a moment.", 2000);
+      return;
     }
-    stopSpeaking();
-
-    const inputEl = el("practiceAnswerInput");
-    const text = (explicitText !== null ? String(explicitText) : inputEl?.value || "").trim();
-    if (!text) return;
-
-    if (explicitText === null && inputEl) inputEl.value = "";
+    const mySessionGen = local.sessionGen;
+    if (!opMachine.transition("submitting_turn", { event: "submit_turn" })) return;
     setBusy(true);
 
-    // Optimistic render of candidate's message while AI thinks
-    const feed = el("practiceFeed");
-    if (feed) {
-      const pendingEl = document.createElement("div");
-      pendingEl.className = "pturn pturn-candidate";
-      pendingEl.innerHTML = `<div class="pturn-head">You</div><div class="pturn-body">${formatWithNewlines(text)}</div>`;
-      feed.appendChild(pendingEl);
-      const thinkingEl = document.createElement("div");
-      thinkingEl.className = "pturn pturn-interviewer is-thinking";
-      thinkingEl.innerHTML = `<div class="pturn-head">AI Interviewer</div><div class="pturn-body">Thinking…</div>`;
-      feed.appendChild(thinkingEl);
-      feed.scrollTop = feed.scrollHeight;
-    }
-
     try {
+      if (micMachine.state === "recording" && local.recordingTarget === "answer") {
+        await stopMicAndTranscribe();
+        if (mySessionGen !== local.sessionGen || !local.session || opMachine.state === "exiting") return;
+      }
+      stopSpeaking();
+
+      const inputEl = el("practiceAnswerInput");
+      const text = (explicitText !== null ? String(explicitText) : inputEl?.value || "").trim();
+      if (!text) return;
+
+      if (explicitText === null && inputEl) inputEl.value = "";
+
+      // Optimistic render of candidate's message while AI thinks
+      const feed = el("practiceFeed");
+      if (feed) {
+        const pendingEl = document.createElement("div");
+        pendingEl.className = "pturn pturn-candidate";
+        pendingEl.innerHTML = `<div class="pturn-head">You</div><div class="pturn-body">${formatWithNewlines(text)}</div>`;
+        feed.appendChild(pendingEl);
+        const thinkingEl = document.createElement("div");
+        thinkingEl.className = "pturn pturn-interviewer is-thinking";
+        thinkingEl.innerHTML = `<div class="pturn-head">AI Interviewer</div><div class="pturn-body">Thinking…</div>`;
+        feed.appendChild(thinkingEl);
+        feed.scrollTop = feed.scrollHeight;
+      }
+
       const wsCtx = getActiveWorkspaceContext();
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/turn`, {
         method: "POST",
@@ -1043,7 +1294,7 @@ export function createPracticeStudioController({
         }),
       });
       const data = await res.json();
-      if (mySessionGen !== local.sessionGen) return;
+      if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Turn failed"));
       local.session = data.session;
       renderPracticeSession();
@@ -1051,12 +1302,15 @@ export function createPracticeStudioController({
         speakText(data.interviewer_turn.text);
       }
     } catch (err) {
-      if (mySessionGen === local.sessionGen) {
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         showToast(String(err.message || err), 3200);
         renderPracticeSession();
       }
     } finally {
-      if (mySessionGen === local.sessionGen) {
+      if (opMachine.state === "submitting_turn") {
+        opMachine.transition("idle", { event: "submit_turn_done" });
+      }
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         setBusy(false);
         el("practiceAnswerInput")?.focus();
       }
@@ -1064,8 +1318,9 @@ export function createPracticeStudioController({
   }
 
   async function requestHint() {
-    if (!local.session || local.busy || local.session.phase !== "active") return;
+    if (!local.session || opMachine.state !== "idle" || local.session.phase !== "active") return;
     const mySessionGen = local.sessionGen;
+    if (!opMachine.transition("requesting_hint", { event: "request_hint" })) return;
     stopSpeaking();
     setBusy(true);
     try {
@@ -1076,23 +1331,32 @@ export function createPracticeStudioController({
         body: JSON.stringify({ workspace_context: wsCtx }),
       });
       const data = await res.json();
-      if (mySessionGen !== local.sessionGen) return;
+      if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not get hint"));
       local.session = data.session;
       renderPracticeSession();
     } catch (err) {
-      if (mySessionGen === local.sessionGen) {
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         showToast(String(err.message || err), 3000);
       }
     } finally {
-      if (mySessionGen === local.sessionGen) setBusy(false);
+      if (opMachine.state === "requesting_hint") {
+        opMachine.transition("idle", { event: "request_hint_done" });
+      }
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") setBusy(false);
     }
   }
 
   async function advanceNextQuestion() {
-    if (!local.session || local.busy || local.session.phase !== "active") return;
+    if (!local.session || opMachine.state !== "idle" || local.session.phase !== "active") return;
+    if (micMachine.state === "requesting_mic" || micMachine.state === "transcribing") {
+      showToast("Finishing voice capture — try again in a moment.", 2000);
+      return;
+    }
     const mySessionGen = local.sessionGen;
+    if (!opMachine.transition("advancing", { event: "advance_question" })) return;
     stopSpeaking();
+    abortMicRecording();
     setBusy(true);
     try {
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/next`, {
@@ -1101,8 +1365,10 @@ export function createPracticeStudioController({
         body: JSON.stringify({ expected_question_id: currentQuestionId() }),
       });
       const data = await res.json();
-      if (mySessionGen !== local.sessionGen) return;
+      if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not advance question"));
+      const ans = el("practiceAnswerInput");
+      if (ans) ans.value = "";
       local.session = data.session;
       renderPracticeSession();
       if (!data.has_more) {
@@ -1111,59 +1377,87 @@ export function createPracticeStudioController({
         speakText(data.interviewer_turn.text);
       }
     } catch (err) {
-      if (mySessionGen === local.sessionGen) {
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         showToast(String(err.message || err), 3000);
       }
     } finally {
-      if (mySessionGen === local.sessionGen) setBusy(false);
+      if (opMachine.state === "advancing") {
+        opMachine.transition("idle", { event: "advance_question_done" });
+      }
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") setBusy(false);
     }
   }
 
   async function runDebrief() {
-    if (!local.session || local.busy) return;
-    const mySessionGen = local.sessionGen;
-    stopSpeaking();
-    if (local.recordingTarget) {
-      await stopMicAndTranscribe();
-      if (mySessionGen !== local.sessionGen || !local.session) return;
+    if (!local.session || opMachine.state !== "idle") return;
+    if (local.session.phase === "debriefing" || local.session.phase === "completed") return;
+    if (micMachine.state === "requesting_mic" || micMachine.state === "transcribing") {
+      showToast("Finishing voice capture — try again in a moment.", 2000);
+      return;
     }
+    const mySessionGen = local.sessionGen;
+    if (!opMachine.transition("debriefing", { event: "run_debrief" })) return;
     setBusy(true);
+    stopSpeaking();
     const btn = el("practiceDebriefBtn");
     if (btn) btn.textContent = "Generating CARL coaching…";
     try {
-      await pushWorkspaceSnapshot();
-      if (mySessionGen !== local.sessionGen || !local.session) return;
+      if (micMachine.state === "recording" && local.recordingTarget) {
+        await stopMicAndTranscribe();
+        if (mySessionGen !== local.sessionGen || !local.session || opMachine.state === "exiting") return;
+      }
+      if (local.mountedPlugin) {
+        const savedOk = await pushWorkspaceSnapshot();
+        if (mySessionGen !== local.sessionGen || !local.session || opMachine.state === "exiting") return;
+        if (!savedOk && (local.workspaceDirty || workspaceSaveMachine.state === "error")) {
+          showToast(
+            "Could not save your latest workspace edits — retry saving before generating the debrief.",
+            4000
+          );
+          return;
+        }
+      }
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/debrief`, {
         method: "POST",
       });
       const data = await res.json();
-      if (mySessionGen !== local.sessionGen) return;
+      if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not generate debrief"));
       local.session = data.session;
       renderPracticeSession();
       refreshPracticeHistory();
     } catch (err) {
-      if (mySessionGen === local.sessionGen) {
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         showToast(String(err.message || err), 3400);
       }
     } finally {
-      if (btn) btn.textContent = "End & CARL Debrief";
-      if (mySessionGen === local.sessionGen) setBusy(false);
+      if (btn && local.session?.phase !== "debriefing") {
+        btn.textContent = "End & CARL Debrief";
+      }
+      if (opMachine.state === "debriefing") {
+        opMachine.transition("idle", { event: "run_debrief_done" });
+      }
+      if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") setBusy(false);
     }
   }
 
   /* ---------------- 45-Second Retry Weak Part Drill ---------------- */
 
-  function stopRetryTimer() {
+  function stopRetryTimer({ nextState = "idle" } = {}) {
     if (local.retryTimerHandle) {
       clearInterval(local.retryTimerHandle);
       local.retryTimerHandle = null;
     }
     local.retryDeadlineMs = 0;
+    if (retryTimerMachine.state !== nextState) {
+      if (!retryTimerMachine.transition(nextState, { event: `retry_timer_${nextState}` })) {
+        retryTimerMachine.reset(nextState, { event: `retry_timer_${nextState}` });
+      }
+    }
   }
 
   function resetRetryTimer() {
-    stopRetryTimer();
+    stopRetryTimer({ nextState: "idle" });
     local.retrySecondsLeft = 45;
     const clock = el("practiceRetryClock");
     const btn = el("practiceRetryTimerBtn");
@@ -1177,9 +1471,12 @@ export function createPracticeStudioController({
   function toggleRetryTimer() {
     const clock = el("practiceRetryClock");
     const btn = el("practiceRetryTimerBtn");
-    if (local.retryTimerHandle) {
+    if (retryTimerMachine.state === "running" || retryTimerMachine.state === "warning") {
       resetRetryTimer();
       return;
+    }
+    if (!retryTimerMachine.transition("running", { event: "start_retry_timer" })) {
+      retryTimerMachine.reset("running", { event: "start_retry_timer" });
     }
     local.retrySecondsLeft = 45;
     local.retryDeadlineMs = Date.now() + 45_000;
@@ -1195,10 +1492,13 @@ export function createPracticeStudioController({
         clock.textContent = fmtShortClock(remSec);
         clock.classList.toggle("is-warn", remSec <= 10);
       }
+      if (remSec <= 10 && remSec > 0 && retryTimerMachine.state === "running") {
+        retryTimerMachine.transition("warning", { event: "retry_timer_warning" });
+      }
       if (remSec <= 0) {
-        stopRetryTimer();
+        stopRetryTimer({ nextState: "expired" });
         if (btn) btn.textContent = "Restart 45s";
-        if (local.recordingTarget === "retry") {
+        if (micMachine.state === "recording" && local.recordingTarget === "retry") {
           stopMicAndTranscribe();
         }
         showToast("45 seconds up! Submit your retry to get immediate before→after feedback.", 3200);
@@ -1207,23 +1507,28 @@ export function createPracticeStudioController({
   }
 
   async function submitRetry() {
-    if (!local.session || local.busy) return;
-    const mySessionGen = local.sessionGen;
-    if (local.recordingTarget === "retry") {
-      await stopMicAndTranscribe();
-      if (mySessionGen !== local.sessionGen || !local.session) return;
-    }
-    stopRetryTimer();
-    const input = el("practiceRetryInput");
-    const text = (input?.value || "").trim();
-    if (!text) {
-      showToast("Record or type your 45-second retry answer first.", 2600);
+    if (!local.session || opMachine.state !== "idle") return;
+    if (micMachine.state === "requesting_mic" || micMachine.state === "transcribing") {
+      showToast("Finishing voice capture — try again in a moment.", 2000);
       return;
     }
+    const mySessionGen = local.sessionGen;
+    if (!opMachine.transition("submitting_retry", { event: "submit_retry" })) return;
     setBusy(true);
     const btn = el("practiceRetrySubmitBtn");
-    if (btn) btn.textContent = "Evaluating retry…";
     try {
+      if (micMachine.state === "recording" && local.recordingTarget === "retry") {
+        await stopMicAndTranscribe();
+        if (mySessionGen !== local.sessionGen || !local.session) return;
+      }
+      stopRetryTimer({ nextState: "idle" });
+      const input = el("practiceRetryInput");
+      const text = (input?.value || "").trim();
+      if (!text) {
+        showToast("Record or type your 45-second retry answer first.", 2600);
+        return;
+      }
+      if (btn) btn.textContent = "Evaluating retry…";
       const drill = local.session.debrief?.retry_drill || {};
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/retry`, {
         method: "POST",
@@ -1248,6 +1553,9 @@ export function createPracticeStudioController({
       }
     } finally {
       if (btn) btn.textContent = "Evaluate Retry";
+      if (opMachine.state === "submitting_retry") {
+        opMachine.transition("idle", { event: "submit_retry_done" });
+      }
       if (mySessionGen === local.sessionGen) setBusy(false);
     }
   }
@@ -1447,7 +1755,7 @@ export function createPracticeStudioController({
 
   function renderPracticeSession() {
     const sess = local.session;
-    if (!sess) return;
+    if (!sess || opMachine.state === "exiting") return;
 
     const isCompleted = sess.phase === "completed" && Boolean(sess.debrief);
     const isDebriefing = sess.phase === "debriefing";
@@ -1490,7 +1798,7 @@ export function createPracticeStudioController({
       if (isDebriefing) {
         debriefBtn.disabled = true;
         debriefBtn.textContent = "Generating debrief…";
-      } else if (!local.busy) {
+      } else if (opMachine.state === "idle") {
         debriefBtn.disabled = false;
         debriefBtn.textContent = "End & CARL Debrief";
       }
@@ -1507,14 +1815,18 @@ export function createPracticeStudioController({
         ? "All questions complete — click End & CARL Debrief above for your supportive coaching report."
         : "Type or speak your answer… (⌘/Ctrl+Enter to send)";
     }
-    if (sendBtn && !local.busy) sendBtn.disabled = isInputLocked;
-    if (micBtn && !local.recordingTarget) micBtn.disabled = isInputLocked;
+    if (sendBtn && opMachine.state === "idle") sendBtn.disabled = isInputLocked;
+    // Never re-enable mic button while requesting permission or transcribing
+    if (micBtn && micMachine.state === "idle") {
+      micBtn.disabled = isInputLocked;
+    }
 
     el("practiceActiveView")?.classList.toggle("hidden", isCompleted);
     el("practiceDebriefView")?.classList.toggle("hidden", !isCompleted);
 
-    // Sync M3 / M4 embedded studio slot
+    // Sync M3 / M4 embedded studio slot & save pill
     syncStudioSlot();
+    renderWorkspaceSaveStatus();
 
     // Render feed
     const feed = el("practiceFeed");
@@ -1591,6 +1903,32 @@ export function createPracticeStudioController({
     }
   }
 
+  function getStateSnapshot() {
+    const sess = local.session;
+    const mountedSnapshot =
+      typeof local.mountedPlugin?.getStateSnapshot === "function"
+        ? local.mountedPlugin.getStateSnapshot()
+        : null;
+    return {
+      active: Boolean(sess),
+      homeMode: local.homeMode,
+      sessionId: sess?.id || null,
+      phase: sess?.phase || null,
+      interviewType: sess?.config?.interview_type || null,
+      opState: opMachine.state,
+      micState: micMachine.state,
+      micTarget: local.micTarget,
+      voiceEnabled: local.voiceEnabled,
+      isSpeaking: local.isSpeaking,
+      retryTimerState: retryTimerMachine.state,
+      retrySecondsLeft: local.retrySecondsLeft,
+      workspaceSaveState: workspaceSaveMachine.state,
+      workspaceDirty: local.workspaceDirty,
+      mountedStudioKey: local.mountedPluginKey,
+      mountedStudio: mountedSnapshot,
+    };
+  }
+
   /* ---------------- Wire Event Listeners ---------------- */
 
   function bindEvents() {
@@ -1637,9 +1975,15 @@ export function createPracticeStudioController({
     });
 
     el("practiceHomeBtn")?.addEventListener("click", () => exitPracticeToHome());
-    el("practiceNewFromDebriefBtn")?.addEventListener("click", () => {
-      exitPracticeToHome();
-      setHomeMode("practice");
+    el("practiceNewFromDebriefBtn")?.addEventListener("click", async () => {
+      const exited = await exitPracticeToHome();
+      if (exited) setHomeMode("practice");
+    });
+
+    el("practiceWorkspaceSaveStatus")?.addEventListener("click", () => {
+      if (workspaceSaveMachine.state === "error" || workspaceSaveMachine.state === "dirty") {
+        pushWorkspaceSnapshot();
+      }
     });
 
     el("practiceBargeInBtn")?.addEventListener("click", () => stopSpeaking());
@@ -1703,7 +2047,10 @@ export function createPracticeStudioController({
     setHomeMode,
     registerStudioPlugin,
     pushWorkspaceSnapshot,
+    getStateSnapshot,
     isPracticeActive: () => Boolean(local.session),
+    isPracticeStartingOrActive: () =>
+      Boolean(local.session) || opMachine.state === "starting" || opMachine.state === "opening",
     isHomePracticeMode: () => local.homeMode === "practice",
   };
 }
