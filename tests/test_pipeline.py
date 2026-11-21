@@ -1680,5 +1680,150 @@ def test_vad_contiguous_buffer_and_ring_preroll_parity() -> None:
     np.testing.assert_allclose(p1.audio[-FRAME_SAMPLES:], 24 * 0.01, rtol=0, atol=1e-6)
 
 
+def test_fixed_conformer_conv_cache_preserves_committed_boundary() -> None:
+    import mlx.core as mx
+    from mock_helper.asr import _FixedRotatingConformerCache
+
+    # Chunk 1 has frames [1..10], drop_size=4 -> committed frames are [1..6], padding=2 -> next chunk should see [5, 6] prepended!
+    cache = _FixedRotatingConformerCache(capacity=64, cache_drop_size=4)
+    x1 = mx.arange(1, 11, dtype=mx.float32).reshape(1, 10, 1)
+    out1 = np.array(cache.update_and_fetch_conv(x1, padding=2))[0, :, 0]
+    # First chunk must prepend zeros [0, 0], NOT its own tail [9, 10]!
+    np.testing.assert_allclose(out1[:2], [0.0, 0.0])
+    np.testing.assert_allclose(out1[2:12], np.arange(1, 11, dtype=np.float32))
+    np.testing.assert_allclose(out1[12:], [0.0, 0.0])
+
+    # Chunk 2 starts at frame 7 (re-evaluating dropped [7..10] + new [11..14])
+    x2 = mx.arange(7, 15, dtype=mx.float32).reshape(1, 8, 1)
+    out2 = np.array(cache.update_and_fetch_conv(x2, padding=2))[0, :, 0]
+    # Must prepend committed tail [5, 6] right before frame 7!
+    np.testing.assert_allclose(out2[:2], [5.0, 6.0])
+    np.testing.assert_allclose(out2[2:10], np.arange(7, 15, dtype=np.float32))
+    np.testing.assert_allclose(out2[10:], [0.0, 0.0])
+
+
+def test_session_store_coalesced_live_save_and_lazy_markdown(tmp_path: Path) -> None:
+    from mock_helper.storage import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    sess = InterviewSession()
+    for i in range(5):
+        sess.upsert_utterance(
+            Utterance(
+                id=f"utt_{i}",
+                rev=1,
+                final=True,
+                speaker="candidate" if i % 2 else "interviewer",
+                text=f"Turn number {i}",
+                start_ms=i * 2000,
+                end_ms=i * 2000 + 1500,
+            )
+        )
+        store.save_live(sess)
+
+    # `load()` flushes pending coalesced saves and returns all 5 utterances without generating `.md` yet
+    loaded = store.load(sess.id)
+    assert loaded is not None
+    assert len(loaded.utterances) == 5
+    assert (tmp_path / "sessions" / f"{sess.id}.json").exists()
+    assert not (tmp_path / "sessions" / f"{sess.id}.md").exists()
+    assert not (tmp_path / "sessions" / f"{sess.id}.candidate.md").exists()
+
+    # Full `save()` writes both interviewer and candidate markdown exports
+    store.save(sess)
+    assert (tmp_path / "sessions" / f"{sess.id}.md").exists()
+    assert (tmp_path / "sessions" / f"{sess.id}.candidate.md").exists()
+    store.close()
+
+
+def test_calibration_streaming_deltas_and_skip_redundant_regroup(tmp_path: Path) -> None:
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    # Force configured path with mocked streaming LLM methods
+    rt.llm_config.provider = "openai"
+    rt.llm_config.base_url = "https://api.openai.com/v1"
+    rt.llm_config.api_key = "sk-test-key"
+
+    regroup_calls = 0
+
+    async def _fake_regroup(session: InterviewSession):
+        nonlocal regroup_calls
+        regroup_calls += 1
+        if not session.utterances:
+            return []
+        return [{"start_utterance_id": session.utterances[0].id, "title": "Core Architecture"}]
+
+    async def _fake_calibration(session: InterviewSession, *, on_delta=None):
+        chunks = [
+            "### 1. Calibration Check\n",
+            "Evidence supports **Lean Hire**.\n",
+            "### 2. Candidate Signal\n",
+            "- **Q1: Core Architecture — Strong**\n",
+        ]
+        if on_delta is not None:
+            for c in chunks:
+                await on_delta(c)
+        return "".join(chunks)
+
+    rt.llm.regroup_cards_full_context = _fake_regroup  # type: ignore[method-assign]
+    rt.llm.generate_calibration_report = _fake_calibration  # type: ignore[method-assign]
+
+    client = TestClient(app)
+    with client.websocket_connect("/ws/session") as ws:
+        _ = ws.receive_json()  # session_state
+        _ = ws.receive_json()  # asr_status
+
+        ws.send_json(
+            {
+                "type": "inject_utterance",
+                "id": "utt_1",
+                "speaker": "interviewer",
+                "text": "Design a distributed rate limiter.",
+                "start_ms": 1000,
+                "end_ms": 4000,
+            }
+        )
+        _ = ws.receive_json()
+
+        # First calibration runs regroup once and streams calibration_delta before calibration_ready
+        ws.send_json(
+            {
+                "type": "generate_calibration",
+                "rating": {"hire_signal": "lean_hire"},
+            }
+        )
+        assert ws.receive_json()["type"] == "calibration_loading"
+        deltas: list[str] = []
+        ready_msg = None
+        while True:
+            msg = ws.receive_json()
+            if msg["type"] == "calibration_delta":
+                deltas.append(msg["delta"])
+            elif msg["type"] == "calibration_ready":
+                ready_msg = msg
+                break
+        _ = ws.receive_json()  # final session_state
+
+        assert ready_msg is not None
+        assert "".join(deltas) == ready_msg["markdown"]
+        assert regroup_calls == 1
+
+        # Second calibration with changed rating & unchanged transcript SKIPS redundant regroup!
+        ws.send_json(
+            {
+                "type": "generate_calibration",
+                "rating": {"hire_signal": "strong_hire"},
+            }
+        )
+        assert ws.receive_json()["type"] == "calibration_loading"
+        while True:
+            msg = ws.receive_json()
+            if msg["type"] == "calibration_ready":
+                break
+        _ = ws.receive_json()  # final session_state
+        assert regroup_calls == 1
+
+
+
 
 

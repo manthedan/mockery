@@ -96,6 +96,8 @@ const state = {
   lastSyncedSessionId: null,
   activeCitationUttId: null,
   homeVisible: false,
+  streamingCalibrationMd: "",
+  calibrationStreamRaf: null,
 };
 
 Object.defineProperty(window, "__MOCK_HELPER_STATE__", {
@@ -359,6 +361,11 @@ function handleServerMessage(msg) {
   }
 
   if (msg.type === "calibration_loading") {
+    state.streamingCalibrationMd = "";
+    if (state.calibrationStreamRaf) {
+      cancelAnimationFrame(state.calibrationStreamRaf);
+      state.calibrationStreamRaf = null;
+    }
     if (state.session?.state_machines) {
       state.session.state_machines.jobs.calibration = "running";
       state.session.state_machines.session.phase = "calibrating";
@@ -370,7 +377,28 @@ function handleServerMessage(msg) {
     return;
   }
 
+  if (msg.type === "calibration_delta") {
+    if (!state.session || (msg.session_id && msg.session_id !== state.session.id)) {
+      return;
+    }
+    const delta = typeof msg.delta === "string" ? msg.delta : "";
+    if (!delta) return;
+    state.streamingCalibrationMd += delta;
+    if (!state.calibrationStreamRaf) {
+      state.calibrationStreamRaf = requestAnimationFrame(() => {
+        state.calibrationStreamRaf = null;
+        renderCalibrationPanel();
+      });
+    }
+    return;
+  }
+
   if (msg.type === "calibration_ready") {
+    state.streamingCalibrationMd = "";
+    if (state.calibrationStreamRaf) {
+      cancelAnimationFrame(state.calibrationStreamRaf);
+      state.calibrationStreamRaf = null;
+    }
     if (state.session) {
       state.session.calibration_markdown = msg.markdown;
     }
@@ -388,6 +416,13 @@ function handleServerMessage(msg) {
     const prevSelected = state.selectedQaId;
     const prevSessionId = state.session?.id;
     state.session = msg.session;
+    if (prevSessionId && msg.session.id !== prevSessionId) {
+      state.streamingCalibrationMd = "";
+      if (state.calibrationStreamRaf) {
+        cancelAnimationFrame(state.calibrationStreamRaf);
+        state.calibrationStreamRaf = null;
+      }
+    }
     if (msg.manual_speaker) {
       state.manualSpeaker = msg.manual_speaker;
     }
@@ -2453,7 +2488,8 @@ function renderCalibrationPanel() {
         .map((c) => `${c.badge}|${c.title}|${c.span_seconds}|${c.candidate_words}|${c.interviewer_words}`)
         .join(";")
     : "";
-  const reportSig = `${calibRunning ? 1 : 0}|${hasReport ? 1 : 0}|${showVerdictCard ? 1 : 0}|${srSig}|${perCardSig}|${reportMd}`;
+  const streamingMd = calibRunning ? state.streamingCalibrationMd : "";
+  const reportSig = `${calibRunning ? 1 : 0}|${hasReport ? 1 : 0}|${showVerdictCard ? 1 : 0}|${srSig}|${perCardSig}|${streamingMd.length}|${reportMd}`;
 
   if (outputEl._reportSig === reportSig) {
     if (showVerdictCard) {
@@ -2465,8 +2501,13 @@ function renderCalibrationPanel() {
 
   if (calibRunning) {
     toolbarEl.classList.add("hidden");
-    outputEl.classList.add("empty-report");
-    outputEl.textContent = "Reading the whole transcript against your call…";
+    if (streamingMd) {
+      outputEl.classList.remove("empty-report");
+      outputEl.innerHTML = renderMarkdownSafe(streamingMd);
+    } else {
+      outputEl.classList.add("empty-report");
+      outputEl.textContent = "Reading the whole transcript against your call…";
+    }
   } else if (hasReport) {
     const insights = parseCalibrationInsights(reportMd);
     if (showVerdictCard) {

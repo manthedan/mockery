@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import struct
+import threading
 import time
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -134,13 +135,77 @@ def _atomic_write_text(path: Path, content: str) -> None:
 class SessionStore:
     """
     Persists sessions with:
-    1. Append-only crash-safe `<session_id>.events.jsonl` log written on every utterance upsert.
+    1. Append-only crash-safe `<session_id>.events.jsonl` log written on utterance upserts.
     2. Atomic full state snapshot `<session_id>.json` + interviewer & candidate `.md` exports.
+    3. Fast non-blocking coalesced `save_live()` for per-utterance live capture (compact JSON
+       written on a single background thread; Markdown exports written on milestones/export).
     """
 
     def __init__(self, sessions_dir: Path) -> None:
         self.sessions_dir = sessions_dir
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.Lock()
+        self._bg_cond = threading.Condition()
+        self._bg_pending: dict[str, tuple[int, str]] = {}
+        self._bg_seq: dict[str, int] = {}
+        self._bg_in_flight: bool = False
+        self._bg_closed: bool = False
+        self._bg_thread: threading.Thread | None = None
+
+    def _ensure_bg_worker_locked(self) -> None:
+        if self._bg_thread is not None and self._bg_thread.is_alive():
+            return
+        self._bg_closed = False
+        self._bg_thread = threading.Thread(
+            target=self._bg_writer_loop,
+            name="session-store-writer",
+            daemon=True,
+        )
+        self._bg_thread.start()
+
+    def _bg_writer_loop(self) -> None:
+        while True:
+            with self._bg_cond:
+                while not self._bg_pending and not self._bg_closed:
+                    self._bg_cond.wait(timeout=5.0)
+                    if not self._bg_pending:
+                        # Exit cleanly when idle so short-lived stores never linger
+                        self._bg_thread = None
+                        return
+                if not self._bg_pending and self._bg_closed:
+                    self._bg_thread = None
+                    return
+                safe_id, (seq, payload) = self._bg_pending.popitem()
+                self._bg_in_flight = True
+
+            try:
+                with self._write_lock:
+                    with self._bg_cond:
+                        latest_seq = self._bg_seq.get(safe_id, 0)
+                    if seq == latest_seq:
+                        json_path = self.sessions_dir / f"{safe_id}.json"
+                        _atomic_write_text(json_path, payload)
+            except Exception:
+                pass
+            finally:
+                with self._bg_cond:
+                    self._bg_in_flight = False
+                    if not self._bg_pending:
+                        self._bg_cond.notify_all()
+
+    def flush_pending(self) -> None:
+        """Blocks until all coalesced background `save_live()` snapshots have hit disk."""
+        with self._bg_cond:
+            while self._bg_pending or self._bg_in_flight:
+                self._bg_cond.wait(timeout=0.05)
+
+    def close(self) -> None:
+        with self._bg_cond:
+            self._bg_closed = True
+            self._bg_cond.notify_all()
+            worker = self._bg_thread
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=2.0)
 
     def append_utterance_event(self, session_id: str, utt: Utterance) -> Path:
         safe_id = Path(session_id).name
@@ -155,15 +220,50 @@ class SessionStore:
             fh.flush()
         return jsonl_path
 
-    def save(self, session: InterviewSession) -> tuple[Path, Path]:
+    def save_live(self, session: InterviewSession) -> None:
+        """
+        Non-blocking live autosave: snapshots compact JSON immediately on the caller thread
+        (race-free) and coalesces the atomic disk write onto a single background worker thread,
+        skipping expensive dual-Markdown regeneration until session milestones/export.
+        """
+        safe_id = Path(session.id).name
+        payload = session.model_dump_json()
+        with self._bg_cond:
+            seq = self._bg_seq.get(safe_id, 0) + 1
+            self._bg_seq[safe_id] = seq
+            self._bg_pending[safe_id] = (seq, payload)
+            self._ensure_bg_worker_locked()
+            self._bg_cond.notify_all()
+
+    def save(
+        self,
+        session: InterviewSession,
+        *,
+        write_markdown: bool = True,
+        indent: int | None = 2,
+    ) -> tuple[Path, Path]:
         safe_id = Path(session.id).name
         json_path = self.sessions_dir / f"{safe_id}.json"
         md_path = self.sessions_dir / f"{safe_id}.md"
         cand_md_path = self.sessions_dir / f"{safe_id}.candidate.md"
-        metrics = session.compute_metrics()
-        _atomic_write_text(json_path, session.model_dump_json(indent=2))
-        _atomic_write_text(md_path, session.to_markdown(audience="interviewer", metrics=metrics))
-        _atomic_write_text(cand_md_path, session.to_markdown(audience="candidate", metrics=metrics))
+        json_payload = session.model_dump_json(indent=indent)
+        md_interviewer: str | None = None
+        md_candidate: str | None = None
+        if write_markdown:
+            metrics = session.compute_metrics()
+            md_interviewer = session.to_markdown(audience="interviewer", metrics=metrics)
+            md_candidate = session.to_markdown(audience="candidate", metrics=metrics)
+
+        with self._bg_cond:
+            # Supersede any queued background snapshot for this session
+            self._bg_seq[safe_id] = self._bg_seq.get(safe_id, 0) + 1
+            self._bg_pending.pop(safe_id, None)
+
+        with self._write_lock:
+            _atomic_write_text(json_path, json_payload)
+            if md_interviewer is not None and md_candidate is not None:
+                _atomic_write_text(md_path, md_interviewer)
+                _atomic_write_text(cand_md_path, md_candidate)
         return json_path, md_path
 
     def _recover_from_jsonl(self, safe_id: str) -> InterviewSession | None:
@@ -190,6 +290,7 @@ class SessionStore:
         return session if recovered_any else None
 
     def load(self, session_id: str) -> InterviewSession | None:
+        self.flush_pending()
         safe_id = Path(session_id).name
         json_path = self.sessions_dir / f"{safe_id}.json"
         if json_path.exists():
@@ -200,6 +301,7 @@ class SessionStore:
         return self._recover_from_jsonl(safe_id)
 
     def list_recent(self, limit: int = 25) -> list[dict[str, Any]]:
+        self.flush_pending()
         items: list[dict[str, Any]] = []
         for path in sorted(self.sessions_dir.glob("*.json"), reverse=True)[:limit]:
             try:
