@@ -17,7 +17,7 @@
         document.documentElement.setAttribute("data-theme", resolved);
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=mockery3" />
+    <link rel="stylesheet" href="/static/styles.css?v=mockery4" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -150,11 +150,23 @@
         <aside class="home-sidebar" aria-label="Past interviews">
           <div class="home-sidebar-head">Mockery</div>
           <div id="homeSessionList" class="home-list"></div>
+          <div id="homePracticeHistorySection" class="home-practice-history hidden">
+            <div class="home-sidebar-subhead">AI Mock Practice</div>
+            <div id="homePracticeList" class="home-list"></div>
+          </div>
         </aside>
 
         <section class="home-main">
           <div class="home-form">
-            <label class="home-kicker" for="setupRoleInput">New interview</label>
+            <div id="homeModeSwitchRow" class="home-mode-switch-row">
+              <div id="homeModeSwitch" class="seg" role="tablist" aria-label="Workspace mode">
+                <button type="button" class="seg-opt active" data-home-mode="copilot" role="tab" aria-selected="true">Interviewer Copilot</button>
+                <button type="button" class="seg-opt" data-home-mode="practice" role="tab" aria-selected="false">AI Mock Practice</button>
+              </div>
+              <span id="homeModeCaption" class="home-mode-caption">Real-time transcript &amp; probes while you interview someone</span>
+            </div>
+
+            <label id="homeKickerLabel" class="home-kicker" for="setupRoleInput">New interview</label>
             <div class="home-role-wrap">
               <input
                 id="setupRoleInput"
@@ -182,36 +194,86 @@
                 </div>
               </div>
 
-              <div class="prop">
-                <span class="prop-label">Audio</span>
-                <div class="prop-value">
-                  <div id="setupModePills" class="seg" role="radiogroup" aria-label="Audio source">
-                    <button type="button" class="seg-opt active" data-setup-mode="remote_meet">Google Meet</button>
-                    <button type="button" class="seg-opt" data-setup-mode="in_person">One microphone</button>
+              <div id="copilotLaunchRows" class="launch-group">
+                <div class="prop">
+                  <span class="prop-label">Audio</span>
+                  <div class="prop-value">
+                    <div id="setupModePills" class="seg" role="radiogroup" aria-label="Audio source">
+                      <button type="button" class="seg-opt active" data-setup-mode="remote_meet">Google Meet</button>
+                      <button type="button" class="seg-opt" data-setup-mode="in_person">One microphone</button>
+                    </div>
+                    <p id="setupModeDesc" class="prop-note">
+                      Your mic and the Meet tab are captured separately. Wear headphones.
+                    </p>
                   </div>
-                  <p id="setupModeDesc" class="prop-note">
-                    Your mic and the Meet tab are captured separately. Wear headphones.
-                  </p>
                 </div>
+
+                <label class="prop">
+                  <span class="prop-label">Listen for</span>
+                  <input
+                    id="setupRubricInput"
+                    class="prop-input"
+                    type="text"
+                    placeholder="Optional — ownership, scale, failure modes"
+                  />
+                </label>
+
+                <label class="prop" for="setupSaveAudioProxy">
+                  <span class="prop-label">Recording</span>
+                  <span class="check-line">
+                    <input id="setupSaveAudioProxy" class="studio-check" type="checkbox" />
+                    <span>Keep the audio file on this Mac</span>
+                  </span>
+                </label>
               </div>
 
-              <label class="prop">
-                <span class="prop-label">Listen for</span>
-                <input
-                  id="setupRubricInput"
-                  class="prop-input"
-                  type="text"
-                  placeholder="Optional — ownership, scale, failure modes"
-                />
-              </label>
+              <div id="practiceLaunchRows" class="launch-group hidden">
+                <div class="prop">
+                  <span class="prop-label">Questions</span>
+                  <div class="prop-value">
+                    <div id="practiceSourcePills" class="seg" role="radiogroup" aria-label="Question source">
+                      <button type="button" class="seg-opt active" data-practice-source="mixed">Mixed</button>
+                      <button type="button" class="seg-opt" data-practice-source="bank_only">Curated Bank</button>
+                      <button type="button" class="seg-opt" data-practice-source="resume_jd_tailored">Resume + JD</button>
+                    </div>
+                    <p id="practiceSourceDesc" class="prop-note">
+                      Blends curated role-ranked prompts with questions tailored to your locally redacted resume &amp; JD.
+                    </p>
+                  </div>
+                </div>
 
-              <label class="prop" for="setupSaveAudioProxy">
-                <span class="prop-label">Recording</span>
-                <span class="check-line">
-                  <input id="setupSaveAudioProxy" class="studio-check" type="checkbox" />
-                  <span>Keep the audio file on this Mac</span>
-                </span>
-              </label>
+                <div class="prop">
+                  <span class="prop-label">Level</span>
+                  <div id="practiceLevelPills" class="seg" role="radiogroup" aria-label="Target level">
+                    <button type="button" class="seg-opt" data-practice-level="L4">L4</button>
+                    <button type="button" class="seg-opt active" data-practice-level="L5">L5</button>
+                    <button type="button" class="seg-opt" data-practice-level="L6">L6</button>
+                    <button type="button" class="seg-opt" data-practice-level="L7">Staff+</button>
+                    <button type="button" class="seg-opt" data-practice-level="EM">EM</button>
+                  </div>
+                </div>
+
+                <label class="prop">
+                  <span class="prop-label">Starting Q</span>
+                  <select id="practiceQuestionPicker" class="field-select">
+                    <option value="">Auto-select best match for your target JD</option>
+                  </select>
+                </label>
+
+                <div class="prop">
+                  <span class="prop-label">Coaching</span>
+                  <div class="prop-value practice-checks">
+                    <label class="check-line" for="practiceNudgesCheckbox">
+                      <input id="practiceNudgesCheckbox" class="studio-check" type="checkbox" checked />
+                      <span>Supportive live CARL coach tips (leads with strengths)</span>
+                    </label>
+                    <label class="check-line" for="practiceVoiceCheckbox">
+                      <input id="practiceVoiceCheckbox" class="studio-check" type="checkbox" checked />
+                      <span id="practiceVoiceLabel">AI speaks questions aloud (local voice, instant barge-in)</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
 
               <div class="prop">
                 <span class="prop-label">Context</span>
@@ -227,12 +289,19 @@
               </div>
             </div>
 
-            <div class="home-cta">
+            <div id="copilotLaunchCta" class="home-cta">
               <button id="setupStartBtn" class="btn btn-primary btn-lg" type="button" aria-describedby="setupStartHint">
                 <span class="rec-dot" aria-hidden="true"></span>
                 <span>Start interview</span>
               </button>
               <span id="setupStartHint" class="home-cta-hint">Chrome will ask for your Meet tab, then your microphone.</span>
+            </div>
+
+            <div id="practiceLaunchCta" class="home-cta hidden">
+              <button id="practiceStartBtn" class="btn btn-primary btn-lg" type="button">
+                <span id="practiceStartBtnLabel">Start AI mock interview</span>
+              </button>
+              <span id="practiceStartHint" class="home-cta-hint">Answer by voice (local Parakeet mic) or typing. Supportive CARL debrief at the end.</span>
             </div>
           </div>
 
@@ -440,6 +509,150 @@
             </div>
           </div>
         </aside>
+      </main>
+
+      <!-- AI Mock Practice Workspace: Solo AI Interviewer, optional System Design/Coding Studio, & Supportive CARL Coach -->
+      <main id="practiceWorkspace" class="practice-workspace hidden" aria-label="AI Mock Practice">
+        <div class="practice-bar">
+          <div class="practice-bar-left">
+            <button id="practiceHomeBtn" class="btn btn-ghost btn-sm" type="button">← Home</button>
+            <div class="practice-title-block">
+              <span id="practiceRoleTitle" class="practice-role-title">Senior Software Engineer</span>
+              <span id="practiceMetaPill" class="practice-meta-pill">Behavioral · L5</span>
+            </div>
+            <span id="practiceProgressBadge" class="practice-progress-badge">Q1 of 4</span>
+          </div>
+
+          <div class="practice-bar-right">
+            <button id="practiceBargeInBtn" class="btn btn-outline btn-sm practice-speaking-btn hidden" type="button" title="Stop AI voice immediately">
+              <span class="speaking-wave" aria-hidden="true"></span>
+              <span>Stop speaking</span>
+            </button>
+            <button id="practiceVoiceToggleBtn" class="btn btn-ghost btn-sm" type="button" title="Toggle AI voice playback">
+              <span id="practiceVoiceToggleLabel">Voice: On</span>
+            </button>
+            <button id="practiceHintBtn" class="btn btn-outline btn-sm" type="button" title="Ask the supportive coach for a gentle hint">
+              Hint
+            </button>
+            <button id="practiceNextQBtn" class="btn btn-outline btn-sm" type="button" title="Move to the next question">
+              Next Q
+            </button>
+            <button id="practiceDebriefBtn" class="btn btn-primary btn-sm" type="button">
+              End &amp; CARL Debrief
+            </button>
+          </div>
+        </div>
+
+        <div class="practice-grid">
+          <section class="practice-main">
+            <!-- Extensible studio slot for Milestone 3 (System Design Canvas) & Milestone 4 (Coding Studio) -->
+            <div id="practiceStudioSlot" class="practice-studio-slot hidden"></div>
+
+            <!-- Active Interview View -->
+            <div id="practiceActiveView" class="practice-active-view">
+              <div id="practiceFeed" class="practice-feed" aria-live="polite"></div>
+
+              <div id="practiceComposerWrap" class="practice-composer">
+                <div class="practice-composer-tools">
+                  <button id="practiceMicBtn" class="btn btn-outline btn-sm practice-mic-btn" type="button" title="Record voice answer locally with Parakeet (stops AI voice immediately)">
+                    <span class="mic-dot" aria-hidden="true"></span>
+                    <span id="practiceMicLabel">Speak answer</span>
+                  </button>
+                  <span id="practiceMicStatus" class="practice-mic-status">100% local Parakeet speech-to-text · or type below</span>
+                </div>
+                <div class="practice-composer-input-row">
+                  <textarea
+                    id="practiceAnswerInput"
+                    class="practice-textarea"
+                    rows="3"
+                    placeholder="Share your answer here (or press Speak answer)…  ⌘↵ to send"
+                  ></textarea>
+                  <button id="practiceSendBtn" class="btn btn-primary practice-send-btn" type="button">
+                    Send
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Completed Supportive CARL Debrief View -->
+            <div id="practiceDebriefView" class="practice-debrief-view hidden">
+              <div id="practiceDebriefContent" class="practice-debrief-content"></div>
+
+              <section id="practiceRetryCard" class="practice-retry-card hidden">
+                <div class="practice-retry-head">
+                  <div>
+                    <div class="practice-kicker">45-Second Retry Weak Part Drill</div>
+                    <h3 id="practiceRetryFocus" class="practice-retry-focus">Sharpen your CARL finish</h3>
+                  </div>
+                  <div class="practice-retry-timer-wrap">
+                    <span id="practiceRetryClock" class="practice-retry-clock">0:45</span>
+                    <button id="practiceRetryTimerBtn" class="btn btn-outline btn-sm" type="button">Start 45s timer</button>
+                  </div>
+                </div>
+                <p id="practiceRetryPrompt" class="practice-retry-prompt"></p>
+                <div class="practice-composer-tools">
+                  <button id="practiceRetryMicBtn" class="btn btn-outline btn-sm practice-mic-btn" type="button">
+                    <span class="mic-dot" aria-hidden="true"></span>
+                    <span id="practiceRetryMicLabel">Speak retry</span>
+                  </button>
+                  <span id="practiceRetryMicStatus" class="practice-mic-status">Quick 45-second rep — voice or text</span>
+                </div>
+                <textarea
+                  id="practiceRetryInput"
+                  class="practice-textarea"
+                  rows="3"
+                  placeholder="Deliver your crisp 45-second improved version…"
+                ></textarea>
+                <div class="practice-retry-actions">
+                  <button id="practiceRetrySubmitBtn" class="btn btn-primary" type="button">Evaluate Retry</button>
+                </div>
+                <div id="practiceRetryHistory" class="practice-retry-history"></div>
+              </section>
+
+              <div class="practice-debrief-footer">
+                <button id="practiceExportMdBtn" class="btn btn-outline" type="button">Export Coaching Report (.md)</button>
+                <button id="practiceToggleTranscriptBtn" class="btn btn-ghost" type="button">Show full transcript</button>
+                <button id="practiceNewFromDebriefBtn" class="btn btn-primary" type="button">Start another practice</button>
+              </div>
+              <div id="practiceDebriefTranscript" class="practice-debrief-transcript hidden"></div>
+            </div>
+          </section>
+
+          <aside class="practice-side" aria-label="Supportive CARL Coach">
+            <section class="practice-side-card">
+              <div class="practice-side-head">
+                <span class="practice-kicker">Live CARL Meter</span>
+                <span id="practiceCarlScore" class="practice-carl-score">0 / 4</span>
+              </div>
+              <div id="practiceCarlPills" class="carl-meter-grid">
+                <div class="carl-pill" data-carl-dim="context"><span class="carl-letter">C</span><span class="carl-name">Context</span><span class="carl-state">Pending</span></div>
+                <div class="carl-pill" data-carl-dim="action"><span class="carl-letter">A</span><span class="carl-name">Action</span><span class="carl-state">Pending</span></div>
+                <div class="carl-pill" data-carl-dim="result"><span class="carl-letter">R</span><span class="carl-name">Result</span><span class="carl-state">Pending</span></div>
+                <div class="carl-pill" data-carl-dim="learning"><span class="carl-letter">L</span><span class="carl-name">Learning</span><span class="carl-state">Pending</span></div>
+              </div>
+              <p class="practice-carl-legend">
+                <strong>C</strong>ontext → <strong>A</strong>ction (what YOU drove) → <strong>R</strong>esult (metric/outcome) → <strong>L</strong>earning.
+              </p>
+            </section>
+
+            <section id="practiceCoachCard" class="practice-side-card practice-coach-card">
+              <div class="practice-side-head">
+                <span class="practice-kicker">Supportive Coach</span>
+                <span id="practiceCoachTone" class="practice-coach-tone">Ready</span>
+              </div>
+              <p id="practiceCoachMessage" class="practice-coach-msg">
+                Take a steady breath — think out loud, lead with clear context, and focus on what you personally decided and learned.
+              </p>
+            </section>
+
+            <section class="practice-side-card">
+              <div class="practice-side-head">
+                <span class="practice-kicker">Question Roadmap</span>
+              </div>
+              <div id="practiceRoadmap" class="practice-roadmap"></div>
+            </section>
+          </aside>
+        </div>
       </main>
 
       <div id="toastBanner" class="toast hidden" role="status" aria-live="polite"></div>
@@ -805,6 +1018,6 @@
       </div>
     </div>
 
-    <script type="module" src="/static/app.js?v=mockery3"></script>
+    <script type="module" src="/static/app.js?v=mockery4"></script>
   </body>
 </html>
