@@ -6,8 +6,8 @@ A local-first 45-minute mock interview assistant for macOS (Apple Silicon), buil
 
 ## Core Architecture
 
-1. **Consent-First Capture & Shared Sample Clock:**
-   - Explicit pre-capture **Candidate Consent Gate** (with a 1-click verbal consent script, headphones reminder, optional local 16kHz WAV archiving for offline re-transcription, and a clean **Candidate Copy `.md`** export).
+1. **One-Click Capture & Shared Sample Clock:**
+   - **Start Live Capture** is available the moment a session opens — there is no in-app consent gate (the interviewer handles consent verbally). Optional local 16kHz WAV archiving for offline re-transcription, plus a clean **Candidate Copy `.md`** export.
    - **Google Meet Mode (Phase 1):** Routes your **Mic (`Interviewer`)** and isolated **Google Meet Chrome Tab Audio (`Candidate`)** through a **single shared `AudioContext`** (`AudioWorklet` downsampling to 16kHz PCM) with cross-channel acoustic echo-bleed suppression if speaker audio leaks into the mic.
    - **Single-Mic Seam (Phase 2 Ready):** Routes room audio through a `SpeakerDiarizer` protocol (`src/mock_helper/sources.py`) ready for drop-in **NVIDIA Nemotron 3 Diarization** or **Streaming Sortformer**—using `(id, rev)` utterance upserts so delayed speaker-label corrections update turns cleanly in place.
 2. **Upsertable Canonical Utterance Log (`id`, `rev`, `final`) + Derived Cards:**

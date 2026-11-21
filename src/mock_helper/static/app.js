@@ -2,8 +2,49 @@ const CHANNEL_INTERVIEWER = 0x01;
 const CHANNEL_CANDIDATE = 0x02;
 const CHANNEL_ROOM_MIC = 0x03;
 
-const CONSENT_SCRIPT =
-  "Quick heads-up before we jump in: I'm running a local mock-interview helper on my Mac to organize our Q&A transcript and generate coaching notes afterward. Is it okay with you if I transcribe our session? I'll share a clean copy of the transcript with you right after!";
+const TYPE_SHORT_LABELS = {
+  behavioral: "Behavioral",
+  system_design: "System Design",
+  coding: "Coding",
+  general: "General",
+};
+
+const SIGNAL_LABELS = {
+  strong_hire: "Strong Hire",
+  lean_hire: "Lean Hire",
+  lean_no_hire: "Lean No",
+  strong_no_hire: "Strong No",
+};
+
+const HUMANIZED_ENUMS = {
+  strong_hire: "Strong Hire",
+  lean_hire: "Lean Hire",
+  lean_no_hire: "Lean No",
+  strong_no_hire: "Strong No",
+  system_design: "System Design",
+  behavioral: "Behavioral",
+  coding: "Coding",
+  general: "General",
+};
+
+const PHASE_LABELS = {
+  ready: "Not started",
+  capturing: "Recording",
+  awaiting_self_rating: "Waiting for your call",
+  rated: "Call locked",
+  calibrating: "Auditing…",
+  calibrated: "Calibrated",
+};
+
+const MODE_NOTES = {
+  remote_meet: "Your mic and the Meet tab are recorded separately. Wear headphones.",
+  in_person: "For in-person or solo practice. Speakers are told apart automatically.",
+};
+
+const START_HINTS = {
+  remote_meet: "Chrome will ask for your Meet tab, then your microphone.",
+  in_person: "Chrome will ask for your microphone.",
+};
 
 /* ---------------- Explicit Client Finite State Machines ---------------- */
 
@@ -20,44 +61,43 @@ const CAPTURE_TRANSITIONS = {
   stopping: new Set(["idle"]),
 };
 
-const PHASE_LABELS = {
-  setup: "Phase: Setup",
-  ready: "Phase: Ready",
-  capturing: "● Live Capture",
-  awaiting_self_rating: "Phase: Self-Rate",
-  rated: "Phase: Rated",
-  calibrating: "Phase: Calibrating...",
-  calibrated: "Phase: Calibrated",
-};
-
 const state = {
-  wsState: "connecting", // connecting | connected | reconnecting
-  captureState: "idle", // idle | requesting_permissions | streaming | stopping
-  modalState: "none", // none | settings | history
-  rightTab: "probes", // probes | calibration
+  wsState: "connecting",
+  captureState: "idle",
+  modalState: "none",
+  rightTab: "probes",
+  wideCopilot: false,
+  editingSelfRating: false,
+  searchQuery: "",
+  simulatorOpen: false,
+  forceWorkspace: false,
 
   ws: null,
   outbox: [],
   session: null,
   selectedQaId: null,
   asr: { state: "loading", generation: 0, last_inference_ms: 0 },
+  diarizer: null,
   llm: null,
   manualSpeaker: "interviewer",
+  askedProbes: new Set(),
 
   baseElapsedMs: 0,
   localSegmentStartedAt: null,
   timerHandle: null,
   stopFallbackTimer: null,
   toastTimer: null,
+  navLockUntil: 0,
   pendingNewSession: false,
   pendingQARerender: false,
 
   sharedAudioCtx: null,
   audioCleanupFns: [],
   lastSyncedSessionId: null,
+  activeCitationUttId: null,
+  homeVisible: false,
 };
 
-// Expose read-only state snapshot for Agent Experience (AX) & DevTools inspection
 Object.defineProperty(window, "__MOCK_HELPER_STATE__", {
   get() {
     return {
@@ -65,14 +105,60 @@ Object.defineProperty(window, "__MOCK_HELPER_STATE__", {
       captureState: state.captureState,
       modalState: state.modalState,
       rightTab: state.rightTab,
+      wideCopilot: state.wideCopilot,
       selectedQaId: state.selectedQaId,
+      themePref: document.documentElement.getAttribute("data-theme-pref"),
+      theme: document.documentElement.getAttribute("data-theme"),
       asr: state.asr,
+      diarizer: state.diarizer,
       serverMachines: state.session?.state_machines || null,
     };
   },
 });
 
 const el = (id) => document.getElementById(id);
+
+/* ---------------- Theme Management (Auto / Light / Dark) ---------------- */
+
+const colorSchemeMql = window.matchMedia
+  ? window.matchMedia("(prefers-color-scheme: light)")
+  : null;
+
+function applyTheme(pref) {
+  const validPref = pref === "light" || pref === "dark" || pref === "auto" ? pref : "auto";
+  localStorage.setItem("mock_helper_theme", validPref);
+  const resolved =
+    validPref === "auto"
+      ? colorSchemeMql && colorSchemeMql.matches
+        ? "light"
+        : "dark"
+      : validPref;
+  document.documentElement.setAttribute("data-theme-pref", validPref);
+  document.documentElement.setAttribute("data-theme", resolved);
+
+  for (const btn of document.querySelectorAll("[data-theme-set]")) {
+    const active = btn.getAttribute("data-theme-set") === validPref;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function initTheme() {
+  const initial = localStorage.getItem("mock_helper_theme") || "auto";
+  applyTheme(initial);
+  if (colorSchemeMql && colorSchemeMql.addEventListener) {
+    colorSchemeMql.addEventListener("change", () => {
+      if ((localStorage.getItem("mock_helper_theme") || "auto") === "auto") {
+        applyTheme("auto");
+      }
+    });
+  }
+  for (const btn of document.querySelectorAll("[data-theme-set]")) {
+    btn.addEventListener("click", () => applyTheme(btn.getAttribute("data-theme-set")));
+  }
+}
+
+/* ---------------- Core State Helpers ---------------- */
 
 function setWsState(next) {
   if (next === state.wsState) return;
@@ -83,9 +169,9 @@ function setWsState(next) {
   state.wsState = next;
   renderConnectionIndicator();
   if (next === "reconnecting" && prev === "connected") {
-    showToast("Connection to local server lost — reconnecting...", 3000);
+    showToast("Lost the connection. Reconnecting…", 3000);
   } else if (next === "connected" && prev !== "connecting") {
-    showToast("Reconnected to Mock Helper server.", 2000);
+    showToast("Reconnected.", 2000);
   }
 }
 
@@ -96,6 +182,7 @@ function setCaptureState(next) {
   }
   state.captureState = next;
   renderCaptureControls();
+  renderWorkspaceMode();
 }
 
 function setModalState(next) {
@@ -104,7 +191,16 @@ function setModalState(next) {
   el("historyModal").classList.toggle("hidden", next !== "history");
 }
 
-function showToast(message, durationMs = 4200) {
+function closeAllPopovers() {
+  const setupPop = el("sessionSetupPopover");
+  const menuPop = el("transcriptMenuPopover");
+  if (setupPop) setupPop.classList.add("hidden");
+  if (menuPop) menuPop.classList.add("hidden");
+  el("sessionContextBtn")?.setAttribute("aria-expanded", "false");
+  el("transcriptMenuBtn")?.setAttribute("aria-expanded", "false");
+}
+
+function showToast(message, durationMs = 4000) {
   const banner = el("toastBanner");
   banner.textContent = message;
   banner.classList.remove("hidden");
@@ -125,6 +221,18 @@ function fmtMs(ms) {
   return fmtClock(Math.floor((ms || 0) / 1000));
 }
 
+function fmtFriendlyDate(isoStr) {
+  if (!isoStr) return "";
+  const d = new Date(isoStr);
+  if (Number.isNaN(d.getTime())) return isoStr;
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function escapeHtml(str) {
   return String(str ?? "")
     .replace(/&/g, "&amp;")
@@ -132,6 +240,10 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function allowedEventsSet() {
@@ -193,14 +305,17 @@ function handleServerMessage(msg) {
     state.asr = msg.asr;
     renderAsrBadge();
   }
+  if (msg.diarizer) {
+    state.diarizer = msg.diarizer;
+  }
 
   if (msg.type === "transition_rejected") {
-    showToast(`${msg.remediation || "Action unavailable in current state."}`);
+    showToast(`${msg.remediation || "That isn't available right now."}`);
     return;
   }
 
   if (msg.type === "error") {
-    showToast(msg.message || "Error");
+    showToast(msg.message || "Something went wrong.");
     return;
   }
 
@@ -247,6 +362,7 @@ function handleServerMessage(msg) {
     if (state.session?.state_machines) {
       state.session.state_machines.jobs.calibration = "running";
       state.session.state_machines.session.phase = "calibrating";
+      state.editingSelfRating = false;
       renderPhaseAndControls();
       renderCalibrationPanel();
     }
@@ -258,6 +374,7 @@ function handleServerMessage(msg) {
     if (state.session) {
       state.session.calibration_markdown = msg.markdown;
     }
+    state.editingSelfRating = false;
     renderCalibrationPanel();
     return;
   }
@@ -280,9 +397,11 @@ function handleServerMessage(msg) {
 
     if (state.pendingNewSession && prevSessionId && msg.session.id !== prevSessionId) {
       state.pendingNewSession = false;
+      state.askedProbes.clear();
+      state.editingSelfRating = false;
+      state.forceWorkspace = false;
     }
 
-    // Sync cumulative elapsed timer from server state when not mid-local tick
     if (state.captureState !== "streaming" && typeof msg.session.live_elapsed_ms === "number") {
       state.baseElapsedMs = msg.session.live_elapsed_ms;
       renderTimerPill(state.baseElapsedMs / 1000);
@@ -299,10 +418,17 @@ function handleServerMessage(msg) {
       activateRightTab("calibration");
     }
     if (msg.regrouped) {
-      showToast("Cards regrouped cleanly across full utterance history.", 2500);
+      showToast("Cards regrouped.", 2600);
+    }
+    if (msg.roles_auto_swapped) {
+      const why = msg.roles_auto_swapped_rationale ? ` (${msg.roles_auto_swapped_rationale})` : "";
+      showToast(`Speakers were the wrong way round, so they were swapped${why}.`, 5500);
+    } else if (msg.roles_swapped) {
+      showToast("Speakers swapped.", 2600);
     }
 
     syncConfigInputsFromSession();
+    renderWorkspaceMode();
     renderPhaseAndControls();
     renderQAList();
     renderProbesPanel();
@@ -329,15 +455,10 @@ async function ensureSharedAudioContext() {
 async function startCapture() {
   if (state.captureState !== "idle") return;
 
-  if (!el("consentCheckbox").checked) {
-    showToast(
-      "Confirm upfront candidate consent first (check 'Candidate consent confirmed' above—use 'Copy Verbal Consent Prompt' if helpful)."
-    );
-    return;
-  }
-
   const mode = el("modeSelect").value;
   pushSessionConfig();
+  closeAllPopovers();
+  state.forceWorkspace = true;
   setCaptureState("requesting_permissions");
 
   try {
@@ -348,7 +469,6 @@ async function startCapture() {
       streamsToAttach = await acquireSingleMicStreams();
     }
 
-    // Notify server BEFORE worklets start streaming PCM frames so consent & phase transition lead
     sendCmd({ type: "start_capture" });
     state.localSegmentStartedAt = Date.now();
     setCaptureState("streaming");
@@ -363,12 +483,11 @@ async function startCapture() {
     stopAudioStreamsOnly();
     setCaptureState("idle");
     sendCmd({ type: "cancel_capture" });
-    showToast(`Could not start capture: ${err.message || err}`, 5500);
+    showToast(`Could not start recording: ${err.message || err}`, 5500);
   }
 }
 
 async function acquireRemoteMeetStreams() {
-  // Invoke getDisplayMedia FIRST while the button click's transient user activation is fresh!
   let tabStream;
   try {
     tabStream = await navigator.mediaDevices.getDisplayMedia({
@@ -383,9 +502,9 @@ async function acquireRemoteMeetStreams() {
   } catch (err) {
     const detail =
       err && err.name === "NotAllowedError"
-        ? "Tab selection cancelled."
+        ? "no tab was chosen."
         : err?.message || String(err);
-    throw new Error(`Google Meet tab capture failed: ${detail}`);
+    throw new Error(`the Meet tab was not shared — ${detail}`);
   }
 
   tabStream.getVideoTracks().forEach((t) => t.stop());
@@ -394,7 +513,7 @@ async function acquireRemoteMeetStreams() {
   if (tabAudioTracks.length === 0) {
     tabStream.getTracks().forEach((t) => t.stop());
     throw new Error(
-      "No tab audio track shared! Select your Google Meet Chrome Tab and keep 'Share tab audio' checked."
+      "the tab was shared without sound. Pick your Meet tab again and turn on “Also share tab audio”."
     );
   }
 
@@ -531,10 +650,54 @@ function updateTimer() {
   renderTimerPill(totalMs / 1000);
 }
 
+function isSessionCompleted() {
+  return Boolean(state.session?.calibration_markdown) && state.captureState === "idle";
+}
+
 function renderTimerPill(elapsedSec) {
   const pill = el("timerPill");
-  pill.textContent = `${fmtClock(elapsedSec)} / 45:00`;
-  pill.classList.toggle("warn", elapsedSec >= 38 * 60);
+  el("timerText").textContent = fmtClock(elapsedSec);
+  const pct = Math.min(100, Math.max(0, (elapsedSec / (45 * 60)) * 100));
+  el("timerProgress").style.width = `${pct.toFixed(1)}%`;
+  const completed = isSessionCompleted();
+  pill.classList.toggle("completed", completed);
+  pill.classList.toggle("warn", !completed && elapsedSec >= 38 * 60);
+}
+
+/* ---------------- Workspace Mode (Launchpad vs Active Split Studio) ---------------- */
+
+function renderWorkspaceMode() {
+  const qas = state.session?.qa_groups_resolved || [];
+  const warmup = state.session?.warmup_resolved || [];
+  const hasContent = qas.length > 0 || warmup.length > 0;
+  const isCapturing = state.captureState !== "idle";
+  const showLaunchpad = !hasContent && !isCapturing && !state.forceWorkspace;
+
+  el("appShell").classList.toggle("setup-mode", showLaunchpad);
+  el("setupLaunchpad").classList.toggle("hidden", !showLaunchpad);
+  el("workspaceGrid").classList.toggle("hidden", showLaunchpad);
+
+  // Start Live Capture is live from first paint; it only goes busy while a capture request is in flight
+  const setupStartBtn = el("setupStartBtn");
+  if (setupStartBtn) {
+    setupStartBtn.disabled = state.captureState !== "idle";
+  }
+  const setupHint = el("setupStartHint");
+  if (setupHint) {
+    setupHint.textContent = START_HINTS[el("modeSelect").value] || START_HINTS.remote_meet;
+  }
+  if (showLaunchpad && !state.homeVisible) {
+    refreshHomeSessions();
+  }
+  state.homeVisible = showLaunchpad;
+
+  // Show live audio meters only while streaming; hide topbar talk-ratio pill on Calibration tab to avoid duplicating the Talk Time card
+  const m = state.session?.metrics;
+  const hasSpeech = Boolean(m && (m.interviewer_words > 0 || m.candidate_words > 0));
+  const isStreaming = state.captureState === "streaming";
+  const showRatioInTopbar = isStreaming || (hasSpeech && state.rightTab !== "calibration");
+  el("liveMetersGroup")?.classList.toggle("hidden", !isStreaming);
+  el("liveTelemetryCluster")?.classList.toggle("hidden", !showRatioInTopbar);
 }
 
 /* ---------------- State-Driven UI Rendering ---------------- */
@@ -548,35 +711,76 @@ function renderConnectionIndicator() {
 function renderCaptureControls() {
   const startBtn = el("startCaptureBtn");
   const stopBtn = el("stopCaptureBtn");
+  const startLabel = el("startCaptureLabel");
+  const stopLabel = el("stopCaptureLabel");
   const dot = el("brandDot");
+  const statusEl = el("captureStatusPill");
+  const statusText = el("captureStatusText");
   const cs = state.captureState;
-  const phase = state.session?.state_machines?.session?.phase || "setup";
+  const phase = state.session?.state_machines?.session?.phase || "ready";
+  const hasCalib = Boolean(state.session?.calibration_markdown);
+  const completed = hasCalib && cs === "idle";
+  // Once a recording has been stopped the interview has ended, but it can still be picked back up.
+  const isResumable =
+    phase === "awaiting_self_rating" || phase === "rated" || phase === "calibrated";
 
   dot.classList.toggle("recording", cs === "streaming");
   el("modeSelect").disabled = cs !== "idle";
+
+  // Live-only transcript controls disappear once the session is complete
+  el("newCardBtn")?.classList.toggle("hidden", completed);
+
+  if (statusEl && statusText) {
+    let tone = "idle";
+    let label = "Not recording";
+    if (cs === "streaming") {
+      tone = "rec";
+      label = "Recording";
+    } else if (cs === "stopping") {
+      tone = "busy";
+      label = "Saving…";
+    } else if (cs === "requesting_permissions") {
+      tone = "busy";
+      label = "Waiting for permission…";
+    } else if (phase === "calibrating") {
+      tone = "busy";
+      label = "Ended";
+    } else if (isResumable) {
+      tone = "ended";
+      label = "Ended";
+    }
+    statusEl.className = `capture-state ${tone}`;
+    statusText.textContent = label;
+  }
+
+  renderTimerPill(state.baseElapsedMs / 1000);
 
   if (cs === "streaming") {
     startBtn.classList.add("hidden");
     stopBtn.classList.remove("hidden");
     stopBtn.disabled = false;
-    stopBtn.textContent = "Stop & Calibrate";
+    stopLabel.textContent = "End interview";
   } else if (cs === "requesting_permissions") {
     startBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
     startBtn.disabled = true;
-    startBtn.textContent = "Select Tab & Mic...";
+    startBtn.classList.add("btn-primary");
+    startBtn.classList.remove("btn-outline");
+    startLabel.textContent = "Starting…";
   } else if (cs === "stopping") {
     startBtn.classList.add("hidden");
     stopBtn.classList.remove("hidden");
     stopBtn.disabled = true;
-    stopBtn.textContent = "Flushing audio...";
+    stopLabel.textContent = "Saving…";
   } else {
     startBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
     startBtn.disabled = phase === "calibrating";
-    const isResumable =
-      phase === "awaiting_self_rating" || phase === "rated" || phase === "calibrated";
-    startBtn.textContent = isResumable ? "Resume Capture" : "Start Live Capture";
+    startLabel.textContent = isResumable ? "Resume recording" : "Start recording";
+    // Starting is the one solid-ink action; resuming an ended interview is a quiet outline so the
+    // transcript and audit lead.
+    startBtn.classList.toggle("btn-primary", !isResumable);
+    startBtn.classList.toggle("btn-outline", isResumable);
   }
 }
 
@@ -584,42 +788,44 @@ function renderPhaseAndControls() {
   const sm = state.session?.state_machines;
   if (!sm) return;
 
-  const phase = sm.session?.phase || "setup";
+  const phase = sm.session?.phase || "ready";
   const allowed = allowedEventsSet();
   const blocked = sm.session?.blocked_reasons || {};
   const regroupRunning = sm.jobs?.regroup === "running";
 
   const phaseBadge = el("phaseBadge");
-  phaseBadge.textContent = PHASE_LABELS[phase] || `Phase: ${phase}`;
-  phaseBadge.className = `status-badge ${
-    phase === "capturing" || phase === "calibrated" ? "ready" : phase === "calibrating" ? "loading" : "phase-active"
-  }`;
+  phaseBadge.textContent = PHASE_LABELS[phase] || phase;
 
   const regroupBtn = el("regroupBtn");
   regroupBtn.disabled = !allowed.has("regroup_cards");
-  regroupBtn.textContent = regroupRunning ? "Regrouping..." : "Regroup";
-  regroupBtn.title = blocked.regroup_cards || "Clean up card boundaries across full utterance log";
+  regroupBtn.querySelector("span").textContent = regroupRunning ? "Regrouping…" : "Regroup cards";
+  regroupBtn.title = blocked.regroup_cards || "Re-draw card boundaries from the whole transcript";
 
   const newCardBtn = el("newCardBtn");
   newCardBtn.disabled = !allowed.has("force_new_card");
+
+  const hasCalib = Boolean(state.session?.calibration_markdown);
+  el("calibReadyDot").classList.toggle("hidden", !hasCalib);
 
   renderCaptureControls();
 }
 
 function renderAsrBadge() {
+  // The speech model only earns screen space when it is not ready.
   const badge = el("asrBadge");
+  const textEl = el("asrBadgeText");
+  if (!badge || !textEl) return;
   const st = state.asr.state;
-  const shortModel = (state.asr.model_id || "").endsWith("-v2") ? "v2-en" : "v3";
-  badge.className = `status-badge ${st === "ready" ? "ready" : "loading"}`;
-  if (st === "ready") {
-    const lat = state.asr.last_inference_ms ? ` · ${state.asr.last_inference_ms}ms` : "";
-    badge.textContent = `Parakeet ${shortModel} · Ready${lat}`;
+  const failed = st === "error" || st === "failed";
+  badge.classList.toggle("hidden", !(st === "loading" || st === "switching" || failed));
+  badge.classList.toggle("error", failed);
+  badge.removeAttribute("title");
+  if (st === "loading") {
+    textEl.textContent = "The speech model is still loading.";
   } else if (st === "switching") {
-    badge.textContent = `Parakeet · Switching to ${shortModel}...`;
-  } else if (st === "loading") {
-    badge.textContent = `Parakeet ${shortModel} · Warming up...`;
-  } else {
-    badge.textContent = "ASR Error";
+    textEl.textContent = "Switching speech model…";
+  } else if (failed) {
+    textEl.textContent = "The speech model failed to load.";
     badge.title = state.asr.error || "";
   }
 }
@@ -627,16 +833,54 @@ function renderAsrBadge() {
 function renderSpeakerToggle() {
   const mode = el("modeSelect").value;
   const btn = el("speakerToggleBtn");
+  const swapBtn = el("swapAllSpeakersBtn");
   const candMeter = el("candMeterWrap");
-  if (mode === "in_person") {
+  const tabKbd = el("speakerTabKbd");
+  const hasUtts = (state.session?.utterances || []).length > 0;
+  const autoDiarize = Boolean(state.session?.config?.auto_diarize ?? true);
+  const diarizerReady = Boolean(state.diarizer?.embedder_ready);
+  const completed = isSessionCompleted();
+
+  if (mode === "in_person" && !completed) {
     btn.classList.remove("hidden");
     candMeter.classList.add("hidden");
-    el("manualSpeakerLabel").textContent =
-      state.manualSpeaker === "interviewer" ? "You (Interviewer)" : "Candidate";
+    swapBtn.classList.toggle("hidden", !hasUtts);
+
+    const dot = el("diarizerModeDot");
+    const label = el("manualSpeakerLabel");
+    if (autoDiarize && diarizerReady && !state.diarizer?.manual_override) {
+      const enrolled = state.diarizer?.enrolled_speakers || 0;
+      label.textContent = enrolled >= 2 ? "Auto (2)" : "Auto";
+      dot.classList.remove("you");
+      tabKbd.classList.add("hidden");
+    } else {
+      const isYou = state.manualSpeaker === "interviewer";
+      label.textContent = isYou ? "You" : "Cand";
+      dot.classList.toggle("you", isYou);
+      tabKbd.classList.remove("hidden");
+    }
   } else {
     btn.classList.add("hidden");
-    candMeter.classList.remove("hidden");
+    candMeter.classList.toggle("hidden", mode === "in_person");
+    swapBtn.classList.add("hidden");
   }
+}
+
+function updateContextSummaryChip() {
+  const role = el("roleInput").value.trim() || "Untitled interview";
+  const typeVal = el("typeSelect").value || "behavioral";
+  el("contextRoleSummary").textContent = role;
+  el("contextTypeSummary").textContent = TYPE_SHORT_LABELS[typeVal] || typeVal;
+
+  for (const btn of document.querySelectorAll("#setupTypePills [data-setup-type]")) {
+    btn.classList.toggle("active", btn.getAttribute("data-setup-type") === typeVal);
+  }
+  const modeVal = el("modeSelect").value || "remote_meet";
+  for (const btn of document.querySelectorAll("#setupModePills [data-setup-mode]")) {
+    btn.classList.toggle("active", btn.getAttribute("data-setup-mode") === modeVal);
+  }
+  const modeNote = el("setupModeDesc");
+  if (modeNote) modeNote.textContent = MODE_NOTES[modeVal] || "";
 }
 
 function syncConfigInputsFromSession() {
@@ -645,60 +889,86 @@ function syncConfigInputsFromSession() {
   if (document.activeElement !== el("roleInput")) {
     el("roleInput").value = cfg.role_title;
   }
+  if (document.activeElement !== el("setupRoleInput")) {
+    el("setupRoleInput").value = cfg.role_title;
+  }
   if (document.activeElement !== el("typeSelect")) {
     el("typeSelect").value = cfg.interview_type;
   }
   if (document.activeElement !== el("rubricInput")) {
     el("rubricInput").value = cfg.rubric_notes || "";
   }
-  el("consentCheckbox").checked = Boolean(cfg.consent_confirmed);
-  el("saveAudioCheckbox").checked = Boolean(cfg.save_raw_audio);
+  if (document.activeElement !== el("setupRubricInput")) {
+    el("setupRubricInput").value = cfg.rubric_notes || "";
+  }
+
+  const wavVal = Boolean(cfg.save_raw_audio);
+  el("saveAudioCheckbox").checked = wavVal;
+  el("setupSaveAudioProxy").checked = wavVal;
+
   if (state.captureState === "idle" && document.activeElement !== el("modeSelect")) {
     el("modeSelect").value = cfg.mode;
   }
 
+  updateContextSummaryChip();
+
   const isPhase = cfg.interview_type === "system_design" || cfg.interview_type === "coding";
-  el("leftPaneTitle").textContent = isPhase ? "Live Phase Cards" : "Live Q&A Cards";
+  el("leftPaneTitle").textContent = isPhase ? "Phases" : "Q&A";
 
   const sessionChanged = state.lastSyncedSessionId !== state.session.id;
   state.lastSyncedSessionId = state.session.id;
 
   if (state.session.self_rating) {
     const sr = state.session.self_rating;
-    if (document.activeElement !== el("selfHireSignal")) el("selfHireSignal").value = sr.hire_signal;
-    if (document.activeElement !== el("selfLevelInput")) el("selfLevelInput").value = sr.perceived_level || "";
-    if (document.activeElement !== el("selfRationaleInput")) el("selfRationaleInput").value = sr.gut_rationale || "";
-    if (document.activeElement !== el("selfConcernInput")) el("selfConcernInput").value = sr.biggest_concern || "";
+    if (document.activeElement !== el("selfHireSignal")) {
+      setHireSignalValue(sr.hire_signal || "lean_hire");
+    }
+    if (document.activeElement !== el("selfLevelInput")) {
+      el("selfLevelInput").value = sr.perceived_level || "";
+    }
+    if (document.activeElement !== el("selfRationaleInput")) {
+      el("selfRationaleInput").value = sr.gut_rationale || "";
+    }
+    if (document.activeElement !== el("selfConcernInput")) {
+      el("selfConcernInput").value = sr.biggest_concern || "";
+    }
   } else if (sessionChanged) {
-    el("selfHireSignal").value = "lean_hire";
+    setHireSignalValue("lean_hire");
     el("selfLevelInput").value = "";
     el("selfRationaleInput").value = "";
     el("selfConcernInput").value = "";
-    el("calibrationOutput").textContent =
-      "Lock in your gut rating above and click 'Submit My Call & Reveal AI Audit'.";
+  }
+}
+
+function setHireSignalValue(val) {
+  el("selfHireSignal").value = val;
+  for (const btn of document.querySelectorAll("#hireSignalPills [data-signal]")) {
+    btn.classList.toggle("active", btn.getAttribute("data-signal") === val);
   }
 }
 
 function renderMetricsBar() {
   const m = state.session?.metrics;
+  const youEl = el("ratioYouText");
+  const candEl = el("ratioCandText");
+  const isStreaming = state.captureState === "streaming";
   if (!m || (m.interviewer_words === 0 && m.candidate_words === 0)) {
-    el("ratioPill").textContent = "Talk Ratio: —";
+    if (youEl) youEl.textContent = "You —";
+    if (candEl) candEl.textContent = "Candidate —";
+    el("liveTelemetryCluster")?.classList.toggle("hidden", !isStreaming);
     return;
   }
-  const bleedHint = m.echo_bleed_dropped ? ` · ${m.echo_bleed_dropped} echo dropped` : "";
-  el("ratioPill").textContent = `Time: You ${m.interviewer_time_pct}% · Cand ${m.candidate_time_pct}%${bleedHint}`;
+  const youPct = Math.round(m.interviewer_time_pct);
+  const candPct = Math.round(m.candidate_time_pct);
+  if (youEl) youEl.textContent = `You ${youPct}%`;
+  if (candEl) candEl.textContent = `Candidate ${candPct}%`;
+  el("liveTelemetryCluster")?.classList.toggle("hidden", false);
 }
 
 function renderCardProbePill(probeState) {
-  if (probeState === "ready_cached") {
-    return `<span class="cached-pill" title="Probes pre-computed and current—0ms reveal">⚡ Instant</span>`;
-  }
-  if (probeState === "warming" || probeState === "loading") {
-    return `<span class="warming-pill">⏳ Thinking...</span>`;
-  }
-  if (probeState === "stale_cached" || probeState === "revealed_stale") {
-    return `<span class="stale-pill" title="New turns arrived since last probe">↻ Newer turns</span>`;
-  }
+  if (probeState === "ready_cached") return "follow-ups ready";
+  if (probeState === "warming" || probeState === "loading") return "thinking…";
+  if (probeState === "stale_cached" || probeState === "revealed_stale") return "new answers";
   return "";
 }
 
@@ -707,25 +977,25 @@ function renderPendingReviewsHtml(uttId) {
   if (!reviews.length) return "";
   return reviews
     .map((r) => {
-      let label = "Suggested edit";
+      let label = "Suggestion";
       if (r.kind === "flip_speaker") {
-        const target = r.suggested_speaker === "interviewer" ? "YOU" : "CANDIDATE";
-        label = `Flip speaker → ${target}`;
+        const target = r.suggested_speaker === "interviewer" ? "You" : "Candidate";
+        label = `This sounds like ${target === "You" ? "you" : "the candidate"}`;
       } else if (r.kind === "split_mixed_turn") {
         const segCount = (r.suggested_segments || []).length || 2;
-        label = `Split handoff (${segCount} speakers)`;
+        label = `${segCount} speakers in one turn — split it`;
       } else if (r.kind === "split_card") {
-        label = r.suggested_title ? `New card: “${r.suggested_title}”` : "Split into new card";
+        label = r.suggested_title ? `Start a new card here: “${r.suggested_title}”` : "Start a new card here";
       }
       const rationale = r.rationale ? ` — ${r.rationale}` : "";
       return `
         <div class="review-chip" data-review-chip="${escapeHtml(r.id)}">
           <span class="review-chip-text">
-            <strong>[${escapeHtml(r.confidence)}]</strong> ${escapeHtml(label)}${escapeHtml(rationale)}
+            <strong>${escapeHtml(label)}</strong>${escapeHtml(rationale)}
           </span>
           <span class="review-chip-actions">
-            <button type="button" class="btn btn-sm btn-accept-review" data-action="accept-review" data-review="${escapeHtml(r.id)}">Accept</button>
-            <button type="button" class="btn btn-sm" data-action="dismiss-review" data-review="${escapeHtml(r.id)}">Dismiss</button>
+            <button type="button" class="link-quiet is-strong" data-action="accept-review" data-review="${escapeHtml(r.id)}">Accept</button>
+            <button type="button" class="link-quiet" data-action="dismiss-review" data-review="${escapeHtml(r.id)}">Dismiss</button>
           </span>
         </div>
       `;
@@ -733,55 +1003,198 @@ function renderPendingReviewsHtml(uttId) {
     .join("");
 }
 
-function renderWarmupRowsHtml(warmup) {
-  return warmup
-    .map(
-      (u) => `
-      <div class="utterance-row ${u.speaker} ${u.final ? "" : "draft-utt"}" data-utt-row="${escapeHtml(u.id)}">
-        <div class="utt-meta">
-          <span class="${u.speaker === "interviewer" ? "role-you" : "role-cand"}">
-            <button type="button" class="role-flip-btn ${u.speaker === "interviewer" ? "role-you" : "role-cand"}" data-action="flip-speaker" data-utt="${escapeHtml(u.id)}" title="Click to flip speaker (You ↔ Candidate)">
-              ${u.speaker === "interviewer" ? "YOU" : "CANDIDATE"}
-            </button>
-            · ${fmtMs(u.start_ms)} · <code>${escapeHtml(u.id)}</code>
-            ${u.final ? "" : `<span class="draft-pill">live r${u.rev}</span>`}
-          </span>
+function highlightSearchHtml(rawText, query) {
+  const safe = escapeHtml(rawText);
+  if (!query) return safe;
+  const re = new RegExp(`(${escapeRegExp(escapeHtml(query))})`, "gi");
+  return safe.replace(re, "<mark>$1</mark>");
+}
+
+const BACKCHANNEL_RE = /^(um+|uh+|hmm+|mhm+|yeah|yep|ok(ay)?|right|sure|got it)\.?$/i;
+
+function isBackchannelFiller(text) {
+  const t = String(text || "").trim();
+  return t.length <= 10 && BACKCHANNEL_RE.test(t);
+}
+
+function renderUtteranceRowsHtml(utts, { qaId = null, canSplitAny = false } = {}) {
+  const q = state.searchQuery.trim();
+  const filtered = q
+    ? utts.filter((u) => (u.text || "").toLowerCase().includes(q.toLowerCase()))
+    : utts;
+
+  if (!filtered.length) {
+    return q
+      ? `<div class="utt-empty-note">Nothing here matches.</div>`
+      : `<div class="utt-empty-note">Listening…</div>`;
+  }
+
+  // Group consecutive turns by the same speaker into cohesive Granola/Metaview prose blocks
+  // while keeping every utterance individually addressable via [data-utt-row] for citations & edits.
+  const blocks = [];
+  for (let i = 0; i < filtered.length; i++) {
+    const u = filtered[i];
+    const hasReviews = (state.session?.pending_reviews || []).some((r) => r.utterance_id === u.id);
+    const prevBlock = blocks[blocks.length - 1];
+    if (
+      prevBlock &&
+      prevBlock.speaker === u.speaker &&
+      !q &&
+      !hasReviews &&
+      !prevBlock.hasReviews &&
+      u.final &&
+      prevBlock.allFinal
+    ) {
+      prevBlock.items.push({ u, idx: i });
+    } else {
+      blocks.push({
+        speaker: u.speaker,
+        hasReviews,
+        allFinal: Boolean(u.final),
+        items: [{ u, idx: i }],
+      });
+    }
+  }
+
+  return blocks
+    .map((block) => {
+      const firstItem = block.items[0];
+      const firstUtt = firstItem.u;
+      const isYou = block.speaker === "interviewer";
+      const canSplit = qaId && firstItem.idx > 0 && canSplitAny && !q;
+
+      // Break long monologues into breathable ~65-word paragraphs or at >= 10s pauses
+      const paragraphs = [];
+      let curPara = [];
+      let curWords = 0;
+      let prevEndMs = null;
+
+      for (const { u } of block.items) {
+        const text = String(u.text || "").trim();
+        const isFiller = isBackchannelFiller(text);
+        const words = text ? text.split(/\s+/).length : 0;
+        const pauseMs = prevEndMs != null && u.start_ms != null ? u.start_ms - prevEndMs : 0;
+        if (curPara.length > 0 && !isFiller && (pauseMs >= 10000 || curWords >= 65)) {
+          paragraphs.push(curPara);
+          curPara = [];
+          curWords = 0;
+        }
+        curPara.push({ u, text, isFiller });
+        curWords += words;
+        prevEndMs = u.end_ms || u.start_ms;
+      }
+      if (curPara.length > 0) {
+        paragraphs.push(curPara);
+      }
+
+      const parasHtml = paragraphs
+        .map((para, pIdx) => {
+          const paraStartTs = fmtMs(para[0].u.start_ms);
+          const spansHtml = para
+            .map(({ u, text, isFiller }, sIdx) => {
+              const isSelectedCite = state.activeCitationUttId === u.id;
+              const fillerCls = isFiller && para.length > 1 ? " utt-filler-inline" : "";
+              const citeCls = isSelectedCite ? " cite-selected" : "";
+              const draftCls = u.final ? "" : " draft-utt";
+              const body = highlightSearchHtml(text, q);
+              const space = sIdx < para.length - 1 ? " " : "";
+              return `<span class="utt-seg${fillerCls}${citeCls}${draftCls}" data-utt-row="${escapeHtml(u.id)}" title="${fmtMs(u.start_ms)}">${body}</span>${space}`;
+            })
+            .join("");
+
+          // Continuation turns carry their timestamp in the fixed left gutter (never inline mid-paragraph);
+          // the first paragraph's time already sits in the same gutter column on the block header row.
+          const gutterHtml =
+            pIdx > 0
+              ? `<span class="utt-ts" title="Continued at ${paraStartTs}">${paraStartTs}</span>`
+              : `<span class="utt-ts" aria-hidden="true"></span>`;
+          return `<div class="utt-row${pIdx > 0 ? " utt-row-cont" : ""}">${gutterHtml}<p class="utt-para">${spansHtml}</p></div>`;
+        })
+        .join("");
+
+      const reviewsHtml = block.items.map(({ u }) => renderPendingReviewsHtml(u.id)).join("");
+
+      return `
+        <div class="utterance-block ${block.speaker}">
+          <div class="utt-row utt-row-head">
+            <span class="utt-ts utt-ts-head">${fmtMs(firstUtt.start_ms)}</span>
+            <div class="utt-meta">
+              <div class="utt-meta-left">
+                <button
+                  type="button"
+                  class="role-flip-btn ${isYou ? "role-you" : "role-cand"}"
+                  data-action="flip-speaker"
+                  data-utt="${escapeHtml(firstUtt.id)}"
+                  title="Wrong speaker? Click to switch."
+                >
+                  ${isYou ? "You" : "Candidate"}
+                </button>
+                ${firstUtt.final ? "" : `<span class="draft-pill">live</span>`}
+              </div>
+              <div class="utt-actions">
+                ${
+                  canSplit
+                    ? `<button type="button" class="link-quiet" data-action="split" data-qa="${escapeHtml(qaId)}" data-utt="${escapeHtml(firstUtt.id)}" title="Start a new card from this turn">New card from here</button>`
+                    : ""
+                }
+              </div>
+            </div>
+          </div>
+          <div class="utt-prose">${parasHtml}</div>
+          ${reviewsHtml ? `<div class="utt-reviews">${reviewsHtml}</div>` : ""}
         </div>
-        <div>${escapeHtml(u.text)}</div>
-        ${renderPendingReviewsHtml(u.id)}
-      </div>`
-    )
+      `;
+    })
     .join("");
 }
 
-function renderCardUtterancesHtml(qa, canSplitAny) {
-  const utts = qa.utterances || [];
-  if (!utts.length) {
-    return `<div style="color:var(--text-dim); font-size:12.5px;">Waiting for next utterance...</div>`;
+const PHASE_STOPWORDS = new Set([
+  "the", "and", "for", "of", "with", "to", "in", "a", "an", "on", "at", "by",
+  "phase", "question", "topic", "discussion", "overview", "system", "design",
+  "interview", "deep", "dive", "follow", "up", "final", "initial", "general",
+]);
+
+function shortPhaseKeyword(title) {
+  const clean = String(title || "")
+    .replace(/^(?:P|Q)\d+\s*[:—–-]\s*/i, "")
+    .replace(/[&/]+/g, " ")
+    .trim();
+  if (!clean) return "";
+  const words = clean
+    .split(/\s+/)
+    .map((w) => w.replace(/[^A-Za-z0-9-]/g, ""))
+    .filter(Boolean);
+  if (!words.length) return "";
+  const meaningful = words.filter((w) => !PHASE_STOPWORDS.has(w.toLowerCase()) && w.length >= 3);
+  let pick = meaningful.length >= 2 ? meaningful[meaningful.length - 1] : meaningful[0] || words[0];
+  if (clean.toLowerCase().includes("wrap")) pick = "Wrap-up";
+  else if (clean.toLowerCase().includes("intro") && clean.toLowerCase().includes("scop")) pick = "Scope";
+  else if (clean.toLowerCase().includes("fan-out") || clean.toLowerCase().includes("messaging")) pick = "Messaging";
+  else if (clean.toLowerCase().includes("schema")) pick = "Schema";
+  else if (clean.toLowerCase().includes("scale") || clean.toLowerCase().includes("scaling")) pick = "Scale";
+  else if (clean.toLowerCase().includes("sync")) pick = "Sync";
+  else if (clean.toLowerCase().includes("api")) pick = "API";
+  if (pick.length > 10) pick = `${pick.slice(0, 9)}…`;
+  return pick;
+}
+
+function renderPhaseNavStrip(qas) {
+  const strip = el("phaseNavStrip");
+  if (!qas.length) {
+    strip.innerHTML = "";
+    return;
   }
-  return utts
-    .map((u, j) => {
-      const canSplit = j > 0 && canSplitAny;
+  strip.innerHTML = qas
+    .map((qa) => {
+      const kw = shortPhaseKeyword(qa.title);
       return `
-        <div class="utterance-row ${u.speaker} ${u.final ? "" : "draft-utt"}" data-utt-row="${escapeHtml(u.id)}">
-          <div class="utt-meta">
-            <span class="${u.speaker === "interviewer" ? "role-you" : "role-cand"}">
-              <button type="button" class="role-flip-btn ${u.speaker === "interviewer" ? "role-you" : "role-cand"}" data-action="flip-speaker" data-utt="${escapeHtml(u.id)}" title="Click to flip speaker (You ↔ Candidate)">
-                ${u.speaker === "interviewer" ? "YOU" : "CANDIDATE"}
-              </button>
-              · ${fmtMs(u.start_ms)} · <code>${escapeHtml(u.id)}</code>
-              ${u.final ? "" : `<span class="draft-pill">live r${u.rev}</span>`}
-            </span>
-            ${
-              canSplit
-                ? `<button class="split-btn" data-action="split" data-qa="${qa.id}" data-utt="${u.id}" title="Split from this utterance into a new card">Split card ↵</button>`
-                : ""
-            }
-          </div>
-          <div>${escapeHtml(u.text)}</div>
-          ${renderPendingReviewsHtml(u.id)}
-        </div>
-      `;
+      <button
+        type="button"
+        class="phase-tab ${qa.id === state.selectedQaId ? "active" : ""}"
+        data-jump-qa="${escapeHtml(qa.id)}"
+        title="${escapeHtml(qa.badge)}: ${escapeHtml(qa.title)}"
+      ><span class="phase-tab-code">${escapeHtml(qa.badge)}</span>${kw ? `<span>${escapeHtml(kw)}</span>` : ""}</button>
+    `;
     })
     .join("");
 }
@@ -797,24 +1210,28 @@ function renderQAList() {
   const canSplitAny = allowed.has("split_card");
   const canMergeAny = allowed.has("merge_card");
 
+  renderPhaseNavStrip(qas);
+
   const activeEl = document.activeElement;
   if (
     activeEl &&
     container.contains(activeEl) &&
     (activeEl.classList.contains("qa-title-input") || activeEl.classList.contains("qa-note-input"))
   ) {
-    // Keep live transcript flowing inside existing cards without disturbing focused inputs
     state.pendingQARerender = true;
     const warmList = container.querySelector('[data-warmup-list="true"]');
     if (warmList && warmup.length > 0) {
-      warmList.innerHTML = renderWarmupRowsHtml(warmup);
+      warmList.innerHTML = renderUtteranceRowsHtml(warmup);
     }
     for (const qa of qas) {
       const cardEl = container.querySelector(`[data-qa-card="${CSS.escape(qa.id)}"]`);
       if (!cardEl) continue;
       const uttListEl = cardEl.querySelector(".utterance-list");
       if (uttListEl) {
-        uttListEl.innerHTML = renderCardUtterancesHtml(qa, canSplitAny);
+        uttListEl.innerHTML = renderUtteranceRowsHtml(qa.utterances || [], {
+          qaId: qa.id,
+          canSplitAny,
+        });
       }
       const pillHost = cardEl.querySelector(".qa-probe-pill-host");
       if (pillHost) {
@@ -828,19 +1245,20 @@ function renderQAList() {
   const prevScrollTop = container.scrollTop;
   const hadContent = container.querySelector(".qa-card") !== null;
   const wasNearBottom =
-    !hadContent || container.scrollHeight - container.scrollTop - container.clientHeight < 48;
+    !hadContent || container.scrollHeight - container.scrollTop - container.clientHeight < 64;
 
   if (qas.length === 0 && warmup.length === 0) {
     container.innerHTML = `
-      <div class="empty-state">
-        <h3>Ready for Your 45-Minute Mock Interview</h3>
-        <ol>
-          <li>Tell the candidate up front &amp; check <strong>Candidate consent confirmed</strong> above (put on headphones!).</li>
-          <li>Click <strong>Start Live Capture</strong>, choose your <strong>Google Meet Chrome Tab</strong>, and check <strong>"Share tab audio"</strong>.</li>
-          <li>Press <kbd>D</kbd> anytime—even mid-answer—for <strong>3 follow-up probes</strong>, or <kbd>N</kbd> to split a new card.</li>
-        </ol>
+      <div class="quiet-state">
+        <p class="quiet-title">${state.captureState === "streaming" ? "Listening…" : "Nothing said yet."}</p>
+        <p>${
+          state.simulatorOpen
+            ? "Type a turn below and the transcript will build itself into cards."
+            : "The transcript appears here as you talk, grouped into cards as the interview moves along."
+        }</p>
       </div>
     `;
+    updateJumpToBottomVisibility();
     return;
   }
 
@@ -848,59 +1266,56 @@ function renderQAList() {
 
   if (warmup.length > 0) {
     parts.push(`
-      <div class="qa-card" style="opacity:0.86;">
+      <article class="qa-card warmup-card">
         <div class="qa-card-header">
-          <span class="qa-badge">INTRO</span>
-          <span style="font-weight:600; flex:1;">Warm-up / Audio Check</span>
+          <span class="qa-badge"></span>
+          <span class="qa-title-static">Before the first question</span>
+          <div class="qa-card-actions"><span>${warmup.length} turn${warmup.length === 1 ? "" : "s"}</span></div>
         </div>
-        <div class="utterance-list" data-warmup-list="true">${renderWarmupRowsHtml(warmup)}</div>
-      </div>
+        <div class="utterance-list" data-warmup-list="true">${renderUtteranceRowsHtml(warmup)}</div>
+      </article>
     `);
   }
 
   for (let i = 0; i < qas.length; i++) {
     const qa = qas[i];
     const isSelected = qa.id === state.selectedQaId;
-    const probeCount = (qa.dive_deeper_history || []).length;
     const pState = qa.probe_state || "idle";
+    const utts = qa.utterances || [];
 
     parts.push(`
-      <div class="qa-card ${isSelected ? "selected" : ""}" data-qa-card="${qa.id}">
+      <article class="qa-card ${isSelected ? "selected" : ""}" data-qa-card="${escapeHtml(qa.id)}">
         <div class="qa-card-header">
           <span class="qa-badge">${escapeHtml(qa.badge)}</span>
           <input
             class="qa-title-input"
-            data-qa-title="${qa.id}"
+            data-qa-title="${escapeHtml(qa.id)}"
             value="${escapeHtml(qa.title)}"
-            title="Click to rename card title"
+            title="Click to rename"
+            spellcheck="false"
           />
           <div class="qa-card-actions">
-            <span class="qa-probe-pill-host">${renderCardProbePill(pState)}</span>
             ${
-              i > 0 && canMergeAny
-                ? `<button class="btn btn-sm" data-action="merge" data-qa="${qa.id}" title="Merge into previous card">Merge ↑</button>`
+              i > 0 && canMergeAny && !isSessionCompleted()
+                ? `<button type="button" class="link-quiet qa-merge-btn" data-action="merge" data-qa="${escapeHtml(qa.id)}" title="Merge this card into the one above">Merge up</button>`
                 : ""
             }
-            <button
-              class="btn btn-sm btn-dive"
-              data-action="dive"
-              data-qa="${qa.id}"
-              ${pState === "empty" || pState === "loading" ? "disabled" : ""}
-            >
-              ${pState === "loading" ? "Probing..." : `Dive Deeper${probeCount ? ` (${probeCount})` : ""}`}
-            </button>
+            <span class="qa-probe-pill-host qa-probe-state">${renderCardProbePill(pState)}</span>
+            <span>${utts.length} turn${utts.length === 1 ? "" : "s"}</span>
           </div>
         </div>
         <div class="utterance-list">
-          ${renderCardUtterancesHtml(qa, canSplitAny)}
+          ${renderUtteranceRowsHtml(utts, { qaId: qa.id, canSplitAny })}
         </div>
-        <input
-          class="qa-note-input"
-          data-qa-note="${qa.id}"
-          placeholder="Quick interviewer note for ${escapeHtml(qa.badge)}..."
-          value="${escapeHtml(qa.notes || "")}"
-        />
-      </div>
+        <div class="qa-card-footer">
+          <input
+            class="qa-note-input"
+            data-qa-note="${escapeHtml(qa.id)}"
+            placeholder="Add a private note…"
+            value="${escapeHtml(qa.notes || "")}"
+          />
+        </div>
+      </article>
     `);
   }
 
@@ -910,6 +1325,52 @@ function renderQAList() {
   } else {
     container.scrollTop = prevScrollTop;
   }
+  updateJumpToBottomVisibility();
+}
+
+function updateJumpToBottomVisibility() {
+  const container = el("qaList");
+  const btn = el("jumpToBottomBtn");
+  if (!container || !btn) return;
+  if (isSessionCompleted()) {
+    btn.classList.add("hidden");
+    return;
+  }
+  const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+  const hasCards = container.querySelector(".qa-card") !== null;
+  btn.classList.toggle("hidden", !hasCards || distFromBottom < 140);
+}
+
+/* ---------------- Follow-ups (the teleprompter) ---------------- */
+
+const ICON_COPY = `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5.5" y="5.5" width="7.75" height="7.75" rx="1.75" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 5.5V4.25A1.5 1.5 0 009 2.75H4.25a1.5 1.5 0 00-1.5 1.5V9a1.5 1.5 0 001.5 1.5H5.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+const ICON_CHECK = `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.4l3 3 6-6.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+function sentenceCase(str) {
+  const t = String(str || "").trim();
+  if (!t) return "";
+  // Keep acronyms (API, SQL) intact; lower-case ordinary Title Case words after the first.
+  return t
+    .split(/\s+/)
+    .map((w, i) => (i === 0 || /^[A-Z0-9&/+-]{2,}$/.test(w) ? w : w.toLowerCase()))
+    .join(" ");
+}
+
+// The probe keys of the follow-ups currently on screen, in order (used by the 1–3 hotkeys).
+function visibleProbeKeys() {
+  return [...el("probesContent").querySelectorAll("[data-probe-asked]")].map((n) =>
+    n.getAttribute("data-probe-asked")
+  );
+}
+
+function toggleProbeAsked(key) {
+  if (!key) return;
+  if (state.askedProbes.has(key)) {
+    state.askedProbes.delete(key);
+  } else {
+    state.askedProbes.add(key);
+  }
+  renderProbesPanel();
 }
 
 function renderProbesPanel() {
@@ -917,18 +1378,28 @@ function renderProbesPanel() {
   const qa = qas.find((q) => q.id === state.selectedQaId) || qas[qas.length - 1] || null;
 
   const diveBtn = el("diveDeeperBtn");
-  const refreshBtn = el("refreshProbesBtn");
   const label = el("selectedQaLabel");
+  const stateEl = el("probeReadinessBadge");
   const content = el("probesContent");
+  const setDiveBtn = (text, { disabled = false, hidden = false } = {}) => {
+    diveBtn.disabled = disabled;
+    diveBtn.classList.toggle("hidden", hidden);
+    diveBtn.innerHTML = `<span id="diveDeeperLabel">${text}</span> <kbd>D</kbd>`;
+  };
+  const setState = (text, ready = false) => {
+    stateEl.textContent = text;
+    stateEl.className = `probes-context-state${text ? "" : " hidden"}${ready ? " is-ready" : ""}`;
+  };
 
   if (!qa) {
-    label.textContent = "Select or start a card";
-    diveBtn.disabled = true;
-    diveBtn.innerHTML = `Dive Deeper <kbd>D</kbd>`;
-    refreshBtn.classList.add("hidden");
+    label.textContent = "";
+    label.removeAttribute("title");
+    setState("");
+    setDiveBtn("Ask now", { disabled: true, hidden: true });
     content.innerHTML = `
-      <div style="color:var(--text-muted); font-size:13px; padding:6px 2px;">
-        Start live capture or inject a sample exchange below, then press <kbd>D</kbd> on any card for 3 high-signal follow-up questions.
+      <div class="quiet-state">
+        <p class="quiet-title">Follow-ups will appear here.</p>
+        <p>When the candidate gives a real answer, three follow-up questions are written in the background. Press <kbd>D</kbd> to see them — even mid-sentence.</p>
       </div>
     `;
     return;
@@ -936,97 +1407,352 @@ function renderProbesPanel() {
 
   state.selectedQaId = qa.id;
   const pState = qa.probe_state || "idle";
-  label.textContent = `${qa.badge}: ${qa.title}`;
-  const utts = qa.utterances || [];
-
-  diveBtn.disabled = pState === "empty" || pState === "loading";
-  diveBtn.innerHTML =
-    pState === "ready_cached"
-      ? `⚡ Dive Deeper (Instant) <kbd>D</kbd>`
-      : pState === "loading"
-      ? `Generating...`
-      : `Dive Deeper <kbd>D</kbd>`;
-
   const history = qa.dive_deeper_history || [];
-  refreshBtn.classList.toggle(
-    "hidden",
-    pState === "loading" || (history.length === 0 && pState !== "ready_cached" && pState !== "stale_cached")
-  );
+  const hasProbes = history.length > 0;
+
+  // One muted line names what these follow-ups are about; the transcript header carries the rest.
+  label.textContent = `${qa.badge} · ${qa.title}`;
+  label.title = qa.title;
 
   if (pState === "loading") {
-    content.innerHTML = `<div class="quick-read-box">Generating non-repeating follow-up probes for <strong>${escapeHtml(qa.badge)}</strong>...</div>`;
+    setState("");
+    setDiveBtn("Thinking…", { disabled: true });
+    content.innerHTML = `<p class="probe-thinking">Thinking of follow-ups…</p>`;
     return;
   }
 
-  if (history.length === 0) {
-    let statusHint = `Press <kbd>D</kbd> anytime (even while the candidate is mid-sentence) to generate 3 follow-up questions.`;
+  if (!hasProbes) {
+    let title = "No follow-ups yet.";
+    let body = `Press <kbd>D</kbd> to get three, grounded in what the candidate has said in ${escapeHtml(qa.badge)}.`;
+    let action = "";
     if (pState === "ready_cached") {
-      statusHint = `<span style="color:var(--candidate); font-weight:600;">Probes are pre-cached for all ${utts.length} turns—press <kbd>D</kbd> for instant 0ms reveal!</span>`;
+      title = "Three follow-ups are ready.";
+      body = `Press <kbd>D</kbd> to see them.`;
+      action = `<button type="button" class="btn btn-primary" data-trigger-dive="true">Show follow-ups</button>`;
     } else if (pState === "warming") {
-      statusHint = `<span style="color:#a5b4fc;">Pre-warming background follow-up probes...</span>`;
+      title = "Writing follow-ups…";
+      body = `They are prepared in the background while the candidate talks.`;
     } else if (pState === "stale_cached") {
-      statusHint = `<span style="color:var(--amber);">Candidate added newer turns since pre-warm—press <kbd>D</kbd> to probe latest turns.</span>`;
+      title = "The candidate has said more.";
+      body = `Press <kbd>D</kbd> for follow-ups on the latest answer.`;
+    } else if (pState === "empty") {
+      title = "Nothing to follow up on yet.";
+      body = `Follow-ups appear once the candidate has answered.`;
     }
+    setState("");
+    setDiveBtn("Ask now", { disabled: pState === "empty", hidden: pState === "empty" });
     content.innerHTML = `
-      <div style="color:var(--text-muted); font-size:13px; padding:6px 2px;">
-        <strong>${escapeHtml(qa.badge)}</strong> selected (${utts.length} utterance${utts.length === 1 ? "" : "s"}).
-        ${statusHint}
+      <div class="quiet-state">
+        <p class="quiet-title">${title}</p>
+        <p>${body}</p>
+        ${action}
       </div>
     `;
     return;
   }
 
   const latest = history[history.length - 1];
-  const staleBanner =
-    pState === "revealed_stale"
-      ? `<div style="font-size:12px; color:var(--amber);">↻ Candidate spoke additional turns since these probes—press <kbd>D</kbd> to probe the newer material.</div>`
-      : "";
+  const isStale = pState === "revealed_stale" || pState === "stale_cached";
+  setState(pState === "ready_cached" ? "new ones ready" : pState === "warming" ? "writing new ones…" : "", pState === "ready_cached");
+  setDiveBtn(pState === "ready_cached" ? "Show new" : "New angles");
 
-  const cardsHtml = (latest.probes || [])
-    .map(
-      (p) => `
-      <div class="probe-card">
-        <div class="probe-angle">${escapeHtml(p.angle)}</div>
-        <div class="probe-question">“${escapeHtml(p.question)}”</div>
-        <div class="probe-why">${escapeHtml(p.why)}</div>
-      </div>
-    `
-    )
+  const rowsHtml = (latest.probes || [])
+    .map((p, idx) => {
+      const probeKey = `${qa.id}:${history.length}:${idx}`;
+      const isAsked = state.askedProbes.has(probeKey);
+      return `
+        <li
+          class="probe${isAsked ? " asked" : ""}"
+          data-probe-asked="${escapeHtml(probeKey)}"
+          role="button"
+          tabindex="0"
+          aria-pressed="${isAsked}"
+          title="${isAsked ? "Asked — click to undo" : "Click once you've asked it"}"
+        >
+          <span class="probe-num">${isAsked ? ICON_CHECK : idx + 1}</span>
+          <div class="probe-body">
+            <p class="probe-question">${escapeHtml(p.question)}</p>
+            <p class="probe-why"><span class="probe-angle">${escapeHtml(sentenceCase(p.angle))}.</span> ${escapeHtml(p.why)}</p>
+          </div>
+          <button type="button" class="probe-copy" data-probe-copy="${escapeHtml(p.question)}" title="Copy question" aria-label="Copy question">${ICON_COPY}</button>
+        </li>
+      `;
+    })
     .join("");
 
   content.innerHTML = `
-    ${staleBanner}
-    <div class="quick-read-box">
-      <strong>Signal Read:</strong> ${escapeHtml(latest.quick_read)}
-    </div>
-    ${cardsHtml}
-    <div style="font-size:11px; color:var(--text-dim); text-align:right;">
-      Model: ${escapeHtml(latest.model_used || "default")} · Press <kbd>D</kbd> or ↻ for fresh non-repeating angles
-    </div>
+    <p class="probe-read">${escapeHtml(latest.quick_read)}</p>
+    ${isStale ? `<p class="probe-stale">The candidate has said more since these were written.</p>` : ""}
+    <ol class="probe-list" title="Written by ${escapeHtml(latest.model_used || "the default model")}">${rowsHtml}</ol>
+    <p class="probe-hint"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> mark a question as asked &nbsp;·&nbsp; <kbd>D</kbd> new angles</p>
   `;
 }
 
+/* ---------------- Metaview-Grade Calibration Parser, Scorecard & Markdown ---------------- */
+
+const CALIB_SCALE = [
+  { key: "strong_no_hire", short: "Strong No" },
+  { key: "lean_no_hire", short: "Lean No" },
+  { key: "lean_hire", short: "Lean Hire" },
+  { key: "strong_hire", short: "Strong Hire" },
+];
+
+// "evidence supports **No Hire (or Lean No Hire) for Senior**" -> captures the bolded lead recommendation
+const VERDICT_LEAD_RE =
+  /(?:supports?|recommends?|recommendation(?:\s+is)?|verdict\s*(?:is|:)?|points?\s+to|indicates?|suggests?|warrants?|lands?\s+(?:at|on)|reads?\s+as)\s*:?\s*(?:(?:an?|the|your)\s+)?(?:(?:clear|firm|solid|borderline)\s+)?\*\*([^*]+)\*\*/i;
+
+const VERDICT_PHRASE_RE =
+  /\b(strong(?:ly)?[\s_-]+no(?:[\s_-]+hire)?|lean[\s_-]+no(?:[\s_-]+hire)?|no[\s_-]+hire|strong[\s_-]+hire|lean[\s_-]+hire|hire)\b/gi;
+
+function classifyVerdictPhrase(phrase) {
+  const p = String(phrase).toLowerCase().replace(/[\s_-]+/g, " ").trim();
+  if (p.startsWith("strong") && p.includes(" no")) return { key: "strong_no_hire", label: "Strong No" };
+  if (p.startsWith("lean no")) return { key: "lean_no_hire", label: "Lean No" };
+  // An unqualified "No Hire" is a firm no: it sits below "Lean No" on the 4-step scale and keeps its own label.
+  if (p === "no hire") return { key: "strong_no_hire", label: "No Hire" };
+  if (p === "strong hire") return { key: "strong_hire", label: "Strong Hire" };
+  return { key: "lean_hire", label: p === "hire" ? "Hire" : "Lean Hire" };
+}
+
+// Returns every verdict phrase in reading order (first = primary lead recommendation, rest = alternatives).
+function findVerdictPhrases(source, { allowBareHire = true } = {}) {
+  const found = [];
+  for (const m of String(source || "").matchAll(VERDICT_PHRASE_RE)) {
+    if (!allowBareHire && m[1].toLowerCase() === "hire") continue;
+    found.push({ ...classifyVerdictPhrase(m[1]), index: m.index });
+  }
+  return found;
+}
+
+function sectionOneText(text) {
+  const firstHeading = text.search(/^#{1,4}\s+/m);
+  const from = firstHeading >= 0 ? firstHeading + 1 : 0;
+  const nextHeading = text.slice(from).search(/\n#{1,4}\s+/);
+  return nextHeading >= 0 ? text.slice(0, from + nextHeading) : text.slice(0, 2400);
+}
+
+function parsePhaseSignalLine(line) {
+  const m = String(line).trim().match(/^(?:[-*]\s+\*\*|#{2,5}\s+\*{0,2})((?:P|Q)\d+)\s*:\s*(.+)$/);
+  if (!m) return null;
+  // Drop bold markers and any trailing stats parenthetical, then split on the LAST dash so hyphenated
+  // titles ("Wrap-Up", "Fan-out") stay intact.
+  const body = m[2].replace(/\*\*/g, "").replace(/\s*\(`.*$/, "").trim();
+  let cut = Math.max(body.lastIndexOf("—"), body.lastIndexOf("–"));
+  let sepLen = 1;
+  if (cut < 0) {
+    cut = body.lastIndexOf(" - ");
+    sepLen = 3;
+  }
+  if (cut <= 0) return null;
+  const title = body.slice(0, cut).trim();
+  const rating = body
+    .slice(cut + sepLen)
+    .replace(/\s*signal\s*$/i, "")
+    .split("/")[0]
+    .replace(/[:.]+$/, "")
+    .trim();
+  if (!title || !rating || rating.length > 24) return null;
+  const rl = rating.toLowerCase();
+  const tone =
+    rl.includes("strong") || rl.includes("positive") || rl.includes("solid")
+      ? "strong"
+      : rl.includes("weak") || /\bno\b/.test(rl) || rl.includes("red") || rl.includes("concern")
+      ? "weak"
+      : "mixed";
+  return { badge: m[1].toUpperCase(), title, rating, tone };
+}
+
+function parseCalibrationInsights(md) {
+  const text = String(md || "");
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+
+  // 1. Extract section headings for quick jump nav
+  const allHeadings = [];
+  for (const line of lines) {
+    const m = line.trim().match(/^(#{1,4})\s+(.+)$/);
+    if (m) {
+      const rawTitle = m[2].replace(/\*\*/g, "").trim();
+      const shortMatch = rawTitle.match(/^(\d+\.)\s*([^:–—(]+)/);
+      let shortLabel = shortMatch ? shortMatch[2].trim() : rawTitle;
+      shortLabel = shortLabel
+        .replace(/\bCalibration Check\b/i, "Calibration")
+        .replace(/\bInterviewer Probing\b/i, "Probing")
+        .replace(/\bConstructive Takeaways\b/i, "Takeaways");
+      if (shortLabel.length > 20) {
+        // Keep the first two words, but never end a tab on a dangling connector ("Probing &").
+        const words = shortLabel.split(/\s+/).slice(0, 2);
+        if (words.length > 1 && /^(?:&|and|for|of|the|vs\.?|to|in|on)$/i.test(words[1])) words.pop();
+        shortLabel = words.join(" ");
+      }
+      allHeadings.push({
+        id: `audit-sec-${allHeadings.length + 1}`,
+        level: m[1].length,
+        title: rawTitle,
+        short: shortLabel,
+      });
+    }
+  }
+  // Pinned tabs list only the top-level audit sections (per-phase sub-headings stay in the document flow)
+  const topLevel = allHeadings.reduce((min, h) => Math.min(min, h.level), 9);
+  const sections = allHeadings.filter((h) => h.level === topLevel);
+
+  // 2. Extract the AI Evidence Verdict from Section 1 (first 950 chars).
+  //    The chip must mirror the *primary* (lead) recommendation of the first sentence, so the earliest
+  //    verdict phrase wins and softer parenthetical alternatives ("No Hire (or Lean No Hire)") are kept
+  //    only as a secondary note. Scanning for "lean no" anywhere used to downgrade that lead to Lean No.
+  const intro = text.slice(0, 950);
+  let aiKey = null;
+  let aiLabel = "See Audit";
+  let aiDetail = "";
+  let aiAlt = "";
+  let aiLead = "";
+
+  const verdictMatch = intro.match(VERDICT_LEAD_RE);
+  let verdicts = [];
+  if (verdictMatch) {
+    verdicts = findVerdictPhrases(verdictMatch[1], { allowBareHire: true });
+    aiLead = cleanAuditLine(verdictMatch[0]).replace(/[*`]/g, "").replace(/\s+/g, " ").trim();
+  }
+  if (!verdicts.length) {
+    // No bolded lead verdict: drop every echo of the interviewer's own blind call (raw `lean_hire` enum
+    // tokens and "Your blind rating of **…**" clauses) so it is never mistaken for the AI read, then take
+    // the first explicit verdict phrase that remains.
+    const withoutUserCall = intro
+      .replace(/`(?:strong|lean)_(?:no_)?hire`/gi, " ")
+      .replace(
+        /\b(?:your|the\s+interviewer'?s?)\s+(?:blind\s+|gut\s+|initial\s+|pre-calibration\s+)*(?:rating|call|signal|read|verdict)\b[^.\n]*?\*\*[^*]+\*\*/gi,
+        " "
+      );
+    verdicts = findVerdictPhrases(withoutUserCall, { allowBareHire: false });
+    if (!verdicts.length) {
+      // Only when the lead paragraph endorses the blind call (and never disputes it) does the AI read
+      // equal the interviewer's own rating; otherwise stay neutral rather than invent an agreement.
+      const leadPara = intro.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#")) || "";
+      const disputes =
+        /\btoo\s+(?:generous|harsh|strict|lenient|high|low)\b|unsupported|not\s+supported|cannot\s+support|inflated|over-?rated|under-?rated/i.test(
+          leadPara
+        );
+      const endorses =
+        /\b(?:well[-\s]calibrated|accurate|spot[-\s]on|aligned|aligns|matches|agrees?|captures|consistent\s+with|defensible)\b/i.test(
+          intro
+        );
+      if (endorses && !disputes) {
+        verdicts = findVerdictPhrases(intro, { allowBareHire: false }).slice(0, 1);
+      }
+    }
+  }
+  if (verdicts.length) {
+    aiKey = verdicts[0].key;
+    aiLabel = verdicts[0].label;
+    const alt = verdicts.find((v) => v.label !== aiLabel);
+    if (verdictMatch && alt) aiAlt = alt.label;
+  } else if (/insufficient\s+signal|\bno[-\s]read\b|inconclusive/i.test(sectionOneText(text))) {
+    aiLabel = "No Read";
+    aiDetail = "Insufficient signal to rate";
+  }
+
+  const downlevelMatch = intro.match(
+    /down-?level(?:ing|ed)?\s+(?:the\s+candidate\s+)?to\s+(?:an?\s+)?([A-Za-z][\w/-]*(?:\s+(?:[A-Z][\w/-]*|\d+))?)/
+  );
+  if (downlevelMatch && aiKey) {
+    const lvl = downlevelMatch[1].trim();
+    aiDetail = `Down-level → ${lvl.charAt(0).toUpperCase()}${lvl.slice(1)}`;
+  } else if (aiKey && verdictMatch && /for\s+(Senior|Staff|Mid|Junior|L\d)/i.test(verdictMatch[1])) {
+    const barM = verdictMatch[1].match(/for\s+(Senior|Staff|Mid|Junior|L\d)/i);
+    aiDetail = `For ${barM[1]} bar`;
+  }
+
+  // 3. Extract Per-Phase Signals from Section 2 (`* **P1: Intro — Mixed Signal**` or `#### P1: Intro — **Mixed**`)
+  const phaseSignals = [];
+  const seenBadges = new Set();
+  for (const line of lines) {
+    const sig = parsePhaseSignalLine(line);
+    if (sig && !seenBadges.has(sig.badge)) {
+      seenBadges.add(sig.badge);
+      phaseSignals.push(sig);
+    }
+  }
+
+  return { sections, aiKey, aiLabel, aiDetail, aiAlt, aiLead, phaseSignals };
+}
+
+function cleanAuditLine(raw) {
+  // Gracefully strip raw empty-metadata parentheticals like "(with `Perceived Level: Unspecified`, `Initial Rationale: None`, and `Biggest Concern: None`)"
+  return String(raw || "").replace(
+    /\s*\(with\s+`?Perceived Level:\s*Unspecified`?,\s*`?Initial Rationale:\s*None`?,?\s*and\s+`?Biggest Concern:\s*None`?\)/gi,
+    ""
+  );
+}
+
 function formatInlineMarkdown(raw) {
-  let s = escapeHtml(raw);
-  const codeTokens = [];
-  s = s.replace(/`([^`]+)`/g, (_, code) => {
-    const idx = codeTokens.length;
-    codeTokens.push(`<code>${code}</code>`);
-    return `\u0000CODE${idx}\u0000`;
+  let s = escapeHtml(cleanAuditLine(raw));
+  const tokens = [];
+  const stash = (html) => {
+    const idx = tokens.length;
+    tokens.push(html);
+    return `\u0000TOK${idx}\u0000`;
+  };
+
+  // 1. Handle backticked spans cleanly:
+  //    - `[MM:SS, utt_id]` -> clickable citation chip
+  //    - `"quoted speech..."` -> pure italic editorial quote (ZERO jagged multi-line box!)
+  //    - raw enum codes (`lean_hire`, `system_design`) -> clean readable text (not noisy chips)
+  //    - short technical identifiers (`Redis`, `channels`) -> subtle inline <code>
+  s = s.replace(/`([^`]+)`/g, (_, inner) => {
+    const trimmed = inner.trim();
+    const citeMatch = trimmed.match(/^\[(\d{1,2}:\d{2}),\s*(utt_[A-Za-z0-9_-]+)\]$/);
+    if (citeMatch) {
+      const isAct = state.activeCitationUttId === citeMatch[2] ? " active" : "";
+      return stash(
+        `<button type="button" class="cite-link${isAct}" data-cite-utt="${citeMatch[2]}" title="Show this moment in the transcript">${citeMatch[1]}</button>`
+      );
+    }
+
+    const quoteMatch = trimmed.match(/^&quot;([\s\S]+)&quot;$/);
+    if (quoteMatch) {
+      return stash(`<q class="evidence-quote">${quoteMatch[1]}</q>`);
+    }
+
+    const enumHuman = HUMANIZED_ENUMS[trimmed];
+    if (enumHuman) {
+      return stash(`<strong>${enumHuman}</strong>`);
+    }
+
+    if (/^(Perceived Level|Initial Rationale|Biggest Concern):/i.test(trimmed)) {
+      return stash(trimmed);
+    }
+
+    return stash(`<code>${inner}</code>`);
   });
 
-  // Make [MM:SS, utt_id] citations clickable links into the live transcript
-  s = s.replace(
-    /\[(\d{1,2}:\d{2}),\s*(utt_[A-Za-z0-9_-]+)\]/g,
-    (_, ts, uttId) =>
-      `<button type="button" class="cite-link" data-cite-utt="${uttId}" title="Jump to ${uttId}">[${ts}, ${uttId}]</button>`
-  );
+  // 2. Also handle bare (un-backticked) [MM:SS, utt_id] citations
+  s = s.replace(/\[(\d{1,2}:\d{2}),\s*(utt_[A-Za-z0-9_-]+)\]/g, (_, ts, uttId) => {
+    const isAct = state.activeCitationUttId === uttId ? " active" : "";
+    return stash(
+      `<button type="button" class="cite-link${isAct}" data-cite-utt="${uttId}" title="Show this moment in the transcript">${ts}</button>`
+    );
+  });
+
+  // 3. Remove awkward outer parentheses wrapping a quote + citation chip: `("..." [12:08 ↗])` -> `— "..." [12:08 ↗]`
+  s = s.replace(/\(\s*(\u0000TOK\d+\u0000(?:\s*\u0000TOK\d+\u0000)*)\s*\)/g, "$1");
 
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
 
-  s = s.replace(/\u0000CODE(\d+)\u0000/g, (_, idx) => codeTokens[Number(idx)] || "");
+  s = s.replace(/\u0000TOK(\d+)\u0000/g, (_, idx) => tokens[Number(idx)] || "");
   return s;
+}
+
+function parseTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+function isTableSeparator(line) {
+  const cells = parseTableRow(line);
+  return cells.length >= 2 && cells.every((c) => /^:?-{2,}:?$/.test(c));
 }
 
 function renderMarkdownSafe(md) {
@@ -1035,6 +1761,7 @@ function renderMarkdownSafe(md) {
   let inUl = false;
   let inOl = false;
   let para = [];
+  let secIdx = 0;
 
   const flushPara = () => {
     if (para.length) {
@@ -1053,25 +1780,47 @@ function renderMarkdownSafe(md) {
     }
   };
 
-  for (const rawLine of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
     const trimmed = rawLine.trim();
     if (!trimmed) {
       flushPara();
       closeLists();
       continue;
     }
+
+    if (trimmed.includes("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1].trim())) {
+      flushPara();
+      closeLists();
+      const headers = parseTableRow(trimmed);
+      i += 2;
+      const bodyRows = [];
+      while (i < lines.length && lines[i].trim().includes("|") && lines[i].trim() !== "") {
+        bodyRows.push(parseTableRow(lines[i].trim()));
+        i++;
+      }
+      i--;
+      const thead = `<thead><tr>${headers.map((h) => `<th>${formatInlineMarkdown(h)}</th>`).join("")}</tr></thead>`;
+      const tbody = `<tbody>${bodyRows
+        .map((r) => `<tr>${r.map((c) => `<td>${formatInlineMarkdown(c)}</td>`).join("")}</tr>`)
+        .join("")}</tbody>`;
+      out.push(`<div class="md-table-wrap"><table class="md-table">${thead}${tbody}</table></div>`);
+      continue;
+    }
+
     const hMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
     if (hMatch) {
       flushPara();
       closeLists();
+      secIdx += 1;
       const level = Math.min(4, Math.max(2, hMatch[1].length));
-      out.push(`<h${level}>${formatInlineMarkdown(hMatch[2])}</h${level}>`);
+      out.push(`<h${level} id="audit-sec-${secIdx}">${formatInlineMarkdown(hMatch[2])}</h${level}>`);
       continue;
     }
     if (/^[-*_]{3,}$/.test(trimmed)) {
       flushPara();
       closeLists();
-      out.push(`<hr style="border:none; border-top:1px solid var(--border); margin:10px 0;" />`);
+      out.push(`<hr />`);
       continue;
     }
     const bqMatch = trimmed.match(/^>\s?(.*)$/);
@@ -1081,6 +1830,22 @@ function renderMarkdownSafe(md) {
       out.push(`<blockquote>${formatInlineMarkdown(bqMatch[1])}</blockquote>`);
       continue;
     }
+
+    // Top-level semantic category header bullets (e.g. `* **Where your gut was spot-on:**`) -> crisp visual subhead!
+    const topSubheadMatch = rawLine.match(/^[-*]\s+\*\*([^*]+:?)\*\*\s*$/);
+    if (topSubheadMatch) {
+      flushPara();
+      closeLists();
+      const label = topSubheadMatch[1].replace(/:$/, "").trim();
+      const phaseSig = parsePhaseSignalLine(rawLine);
+      out.push(
+        phaseSig
+          ? `<div class="audit-subhead">${escapeHtml(phaseSig.badge)} · ${escapeHtml(phaseSig.title)}<span class="audit-subhead-rating ${phaseSig.tone}">${escapeHtml(phaseSig.rating)}</span></div>`
+          : `<div class="audit-subhead">${escapeHtml(label)}</div>`
+      );
+      continue;
+    }
+
     const ulMatch = trimmed.match(/^[-*]\s+(.+)$/);
     if (ulMatch) {
       flushPara();
@@ -1117,14 +1882,42 @@ function renderMarkdownSafe(md) {
   return out.join("\n");
 }
 
-function jumpToUtteranceCitation(uttId) {
+function jumpToUtteranceCitation(uttId, triggerBtn = null) {
   if (!uttId) return;
   const container = el("qaList");
   const row = container.querySelector(`[data-utt-row="${CSS.escape(uttId)}"]`);
   if (!row) {
-    showToast(`Utterance ${uttId} not found in current view.`);
+    if (state.searchQuery) {
+      state.searchQuery = "";
+      el("transcriptSearchInput").value = "";
+      renderQAList();
+      return jumpToUtteranceCitation(uttId, triggerBtn);
+    }
+    showToast("That moment is no longer in the transcript.");
     return;
   }
+
+  state.activeCitationUttId = uttId;
+
+  // Keep active state on clicked citation chip
+  for (const chip of el("calibrationOutput").querySelectorAll(".cite-link.active")) {
+    chip.classList.remove("active");
+  }
+  if (triggerBtn) {
+    triggerBtn.classList.add("active");
+  } else {
+    el("calibrationOutput")
+      .querySelector(`[data-cite-utt="${CSS.escape(uttId)}"]`)
+      ?.classList.add("active");
+  }
+
+  // The cited words get a single highlighter stroke — the timestamp already lives in the citation
+  // that was clicked, so it is never printed a second time inside the transcript.
+  for (const prevSeg of container.querySelectorAll("[data-utt-row].cite-selected")) {
+    prevSeg.classList.remove("cite-selected");
+  }
+  row.classList.add("cite-selected");
+
   const card = row.closest("[data-qa-card]");
   if (card) {
     const qaId = card.getAttribute("data-qa-card");
@@ -1134,60 +1927,190 @@ function jumpToUtteranceCitation(uttId) {
         c.classList.remove("selected");
       }
       card.classList.add("selected");
+      renderPhaseNavStrip(state.session?.qa_groups_resolved || []);
       renderProbesPanel();
     }
   }
-  row.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  const containerRect = container.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const rowTopInContainer = rowRect.top - containerRect.top + container.scrollTop;
+  let targetTop = rowTopInContainer - Math.round((container.clientHeight - rowRect.height) * 0.42);
+
+  if (card) {
+    const header = card.querySelector(".qa-card-header");
+    const headerH = header ? header.offsetHeight : 44;
+    const cutoff = targetTop + headerH;
+    const cardBlocks = card.querySelectorAll(".utterance-block");
+    for (const blk of cardBlocks) {
+      const br = blk.getBoundingClientRect();
+      const bTop = br.top - containerRect.top + container.scrollTop;
+      const bBot = bTop + br.height;
+      if (bTop < cutoff + 6 && bBot > cutoff) {
+        // Snap cleanly so the top visible speaker block starts with its full speaker/timestamp header intact
+        targetTop = bTop - headerH - 8;
+        break;
+      }
+    }
+  }
+  const finalTop = Math.max(0, targetTop);
+  const jumpDist = Math.abs(finalTop - container.scrollTop);
+  container.scrollTo({ top: finalTop, behavior: jumpDist > 2200 ? "auto" : "smooth" });
   row.classList.remove("cite-highlight");
   void row.offsetWidth;
   row.classList.add("cite-highlight");
-  setTimeout(() => row.classList.remove("cite-highlight"), 2200);
+  setTimeout(() => row.classList.remove("cite-highlight"), 1600);
+}
+
+/* ---------------- Final Calibration Panel ---------------- */
+
+const NOTCH_WORDS = ["", "One notch", "Two notches", "Three notches"];
+
+// The verdict is one sentence, said once: your call, then what the evidence says.
+function renderVerdictCompareCard(insights) {
+  const sr = state.session?.self_rating || {};
+  const userKey = sr.hire_signal || "lean_hire";
+  const userLabel = SIGNAL_LABELS[userKey] || userKey;
+  const userIdx = CALIB_SCALE.findIndex((s) => s.key === userKey);
+  const aiIdx = CALIB_SCALE.findIndex((s) => s.key === insights.aiKey);
+  const aiTone = insights.aiKey ? (insights.aiKey.includes("no_hire") ? "tone-no" : "tone-hire") : "";
+
+  const headline = el("verdictHeadline");
+  const you = `You said ${escapeHtml(userLabel)}.`;
+  let sub = "";
+  if (userIdx >= 0 && aiIdx >= 0) {
+    const diff = Math.abs(userIdx - aiIdx);
+    const crossedLine = userIdx >= 2 !== aiIdx >= 2;
+    if (diff === 0) {
+      headline.innerHTML = `${you} <span class="verdict-ai ${aiTone}">The evidence agrees.</span>`;
+      sub = "Your call matches what the transcript supports.";
+    } else {
+      headline.innerHTML = `${you} The evidence says <span class="verdict-ai ${aiTone}">${escapeHtml(insights.aiLabel)}</span>.`;
+      const notches = NOTCH_WORDS[diff] || `${diff} notches`;
+      sub = crossedLine
+        ? `${notches} apart, on opposite sides of the hire line.`
+        : `${notches} ${userIdx > aiIdx ? "more generous" : "stricter"} than the evidence.`;
+    }
+  } else if (insights.aiLabel === "No Read") {
+    headline.innerHTML = `${you} The evidence is too thin to say.`;
+    sub = "There was not enough signal in the transcript to compare against.";
+  } else {
+    headline.innerHTML = you;
+    sub = "The audit below weighs that against the transcript.";
+  }
+  headline.title = insights.aiLead ? `From the audit: “${insights.aiLead}”` : "";
+
+  const downLevel = (insights.aiDetail || "").match(/^Down-level → (.+)$/);
+  if (downLevel) sub += ` The audit suggests ${downLevel[1]} instead.`;
+  const yourNote = [sr.perceived_level, sr.gut_rationale].filter(Boolean).join(" — ");
+  if (yourNote) sub += ` Your note: ${yourNote}.`;
+  el("verdictSub").textContent = sub;
+
+  renderPhaseTable(insights);
+}
+
+// One calm table under the verdict: every phase, how it read, and how long it ran.
+function renderPhaseTable(insights) {
+  const perCard = state.session?.metrics?.per_card || [];
+  const signals = new Map((insights.phaseSignals || []).map((ps) => [ps.badge, ps]));
+  const table = el("phaseSignalsStrip");
+
+  const rows = perCard.length
+    ? perCard.map((c) => ({ badge: String(c.badge || "").toUpperCase(), title: c.title, stats: c }))
+    : [...signals.values()].map((ps) => ({ badge: ps.badge, title: ps.title, stats: null }));
+
+  table.innerHTML = rows
+    .map(({ badge, title, stats }) => {
+      const sig = signals.get(badge);
+      const detail = stats
+        ? `${fmtClock(stats.span_seconds)} · candidate ${stats.candidate_words} words · you ${stats.interviewer_words} words`
+        : "";
+      return `
+        <button type="button" class="phase-row" data-jump-badge="${escapeHtml(badge)}" title="${escapeHtml(detail || title)}">
+          <span class="phase-row-code">${escapeHtml(badge)}</span>
+          <span class="phase-row-title">${escapeHtml(title)}</span>
+          <span class="phase-row-rating ${sig ? sig.tone : ""}">${sig ? escapeHtml(sig.rating) : ""}</span>
+          <span class="phase-row-time">${stats ? fmtClock(stats.span_seconds) : ""}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+// Keep the pinned section tabs in sync with whichever audit section is currently being read
+function syncReportNavToScroll() {
+  if (Date.now() < (state.navLockUntil || 0)) return;
+  const view = el("calibrationView");
+  const pills = [...el("reportSectionNav").querySelectorAll("[data-scroll-sec]")];
+  if (!pills.length || view.classList.contains("hidden")) return;
+  const threshold = view.getBoundingClientRect().top + el("reportToolbar").offsetHeight + 24;
+  let activePill = pills[0];
+  for (const pill of pills) {
+    const heading = document.getElementById(pill.getAttribute("data-scroll-sec"));
+    if (heading && heading.getBoundingClientRect().top <= threshold) {
+      activePill = pill;
+    }
+  }
+  for (const pill of pills) {
+    const isAct = pill === activePill;
+    pill.classList.toggle("active", isAct);
+    pill.setAttribute("aria-selected", String(isAct));
+  }
 }
 
 function renderCalibrationPanel() {
-  const m = state.session?.metrics;
   const sm = state.session?.state_machines;
   const calibRunning = sm?.jobs?.calibration === "running";
   const allowed = allowedEventsSet();
+  const hasReport = Boolean(state.session?.calibration_markdown);
 
   el("runCalibrationBtn").disabled = !allowed.has("generate_calibration") || calibRunning;
-  el("runCalibrationBtn").textContent = calibRunning
-    ? "Calibrating..."
-    : "Submit My Call & Reveal AI Audit";
-
-  if (m) {
-    el("statQaCount").textContent = String(m.qa_count);
-    el("statTalkRatio").textContent =
-      m.interviewer_speak_seconds + m.candidate_speak_seconds > 0
-        ? `${Math.round(m.interviewer_time_pct)}% / ${Math.round(m.candidate_time_pct)}%`
-        : "—";
-    el("statAvgDepth").textContent = `${Math.round(m.avg_candidate_words_per_qa)}w`;
-
-    const perCardBox = el("perCardStatsBox");
-    if (m.per_card && m.per_card.length > 0) {
-      perCardBox.classList.remove("hidden");
-      perCardBox.innerHTML =
-        `<div style="font-weight:600; color:var(--text);">Code-Computed Time &amp; Words Per Card</div>` +
-        m.per_card
-          .map(
-            (c) =>
-              `<div><strong>${escapeHtml(c.badge)}</strong> (${escapeHtml(c.title)}): <strong>${fmtClock(c.span_seconds)}</strong> span · Cand ${c.candidate_speak_seconds}s (${c.candidate_words}w) · You ${c.interviewer_speak_seconds}s (${c.interviewer_words}w)</div>`
-          )
-          .join("");
-    } else {
-      perCardBox.classList.add("hidden");
-    }
+  el("runCalibrationBtn").textContent = calibRunning ? "Reading the transcript…" : "Reveal the audit";
+  const blindNote = el("blindCallNote");
+  if (blindNote) {
+    const blockedWhy = sm?.session?.blocked_reasons?.generate_calibration || "";
+    blindNote.textContent =
+      !calibRunning && !allowed.has("generate_calibration")
+        ? state.captureState === "streaming"
+          ? "Available when the interview ends."
+          : blockedWhy
+        : "";
   }
 
+  const showVerdictCard = hasReport && !state.editingSelfRating && !calibRunning;
+  el("verdictCompareCard").classList.toggle("hidden", !showVerdictCard);
+  el("selfRatingCard").classList.toggle("hidden", showVerdictCard);
+  el("collapseSelfRatingBtn").classList.toggle("hidden", !hasReport);
+
   const outputEl = el("calibrationOutput");
+  const toolbarEl = el("reportToolbar");
+  const secNavEl = el("reportSectionNav");
+
   if (calibRunning) {
-    outputEl.textContent =
-      "Regrouping full transcript context & auditing your call against [MM:SS, utt_id] evidence...";
-  } else if (state.session?.calibration_markdown) {
+    toolbarEl.classList.add("hidden");
+    outputEl.classList.add("empty-report");
+    outputEl.textContent = "Reading the whole transcript against your call…";
+  } else if (hasReport) {
+    const insights = parseCalibrationInsights(state.session.calibration_markdown);
+    if (showVerdictCard) {
+      renderVerdictCompareCard(insights);
+    }
+
+    toolbarEl.classList.remove("hidden");
+    secNavEl.innerHTML = insights.sections
+      .map(
+        (s, idx) =>
+          `<button type="button" class="report-nav-link${idx === 0 ? " active" : ""}" role="tab" aria-selected="${idx === 0}" data-scroll-sec="${escapeHtml(s.id)}" title="${escapeHtml(s.title)}">${escapeHtml(s.short)}</button>`
+      )
+      .join("");
+
+    outputEl.classList.remove("empty-report");
     outputEl.innerHTML = renderMarkdownSafe(state.session.calibration_markdown);
+    syncReportNavToScroll();
   } else {
-    outputEl.textContent =
-      "Lock in your gut rating above and click 'Submit My Call & Reveal AI Audit'.";
+    toolbarEl.classList.add("hidden");
+    outputEl.classList.remove("empty-report");
+    outputEl.textContent = "";
   }
 }
 
@@ -1195,14 +2118,29 @@ function activateRightTab(which) {
   state.rightTab = which;
   const isProbes = which === "probes";
   el("tabProbes").classList.toggle("active", isProbes);
+  el("tabProbes").setAttribute("aria-selected", String(isProbes));
   el("tabCalibration").classList.toggle("active", !isProbes);
+  el("tabCalibration").setAttribute("aria-selected", String(!isProbes));
   el("probesView").classList.toggle("hidden", !isProbes);
   el("calibrationView").classList.toggle("hidden", isProbes);
+  renderCaptureControls();
+  renderMetricsBar();
 }
 
 /* ---------------- Settings & History Modals ---------------- */
 
+function syncActiveModelChips() {
+  for (const group of document.querySelectorAll(".quick-chips[data-target-input]")) {
+    const input = el(group.getAttribute("data-target-input"));
+    const curVal = (input?.value || "").trim();
+    for (const chip of group.querySelectorAll("[data-chip-val]")) {
+      chip.classList.toggle("active", chip.getAttribute("data-chip-val") === curVal);
+    }
+  }
+}
+
 async function openSettingsModal() {
+  closeAllPopovers();
   const res = await fetch("/api/status");
   const data = await res.json();
   state.llm = data.llm;
@@ -1219,7 +2157,7 @@ async function openSettingsModal() {
   const presetSelect = el("llmPresetSelect");
   const presets = data.llm.presets || {};
   presetSelect.innerHTML = Object.entries(presets)
-    .map(([key, val]) => `<option value="${key}">${escapeHtml(val.label)}</option>`)
+    .map(([key, val]) => `<option value="${key}">${escapeHtml(String(val.label || key).replace(/\s*\(.*\)\s*$/, ""))}</option>`)
     .join("");
 
   if (presets[data.llm.provider]) {
@@ -1229,21 +2167,29 @@ async function openSettingsModal() {
   el("llmFastModelInput").value = data.llm.fast_model || "";
   el("llmCalibModelInput").value = data.llm.calibration_model || "";
   el("llmApiKeyInput").value = "";
-  const updateApiKeyHint = (providerKey) => {
-    if (providerKey === "agy" || providerKey === "pi") {
-      el("maskedKeyHint").textContent = `(Zero API key — uses local ${providerKey} CLI)`;
-      el("llmApiKeyInput").placeholder = `Not required for local ${providerKey} CLI`;
+
+  const updateProviderFields = (providerKey) => {
+    const isCli = providerKey === "agy" || providerKey === "pi";
+    el("cliAuthNotice").classList.toggle("hidden", !isCli);
+    el("apiEndpointFields").classList.toggle("hidden", isCli);
+    // Named presets only exist for the agy tool; every other provider just shows its model IDs.
+    for (const group of document.querySelectorAll(".quick-chips")) {
+      group.classList.toggle("hidden", providerKey !== "agy");
+    }
+    if (isCli) {
+      el("cliAuthNoticeText").textContent = `Signs in through the ${providerKey} command-line tool on this Mac. No API key needed.`;
     } else if (providerKey === "ollama") {
-      el("maskedKeyHint").textContent = "(Optional for local Ollama)";
-      el("llmApiKeyInput").placeholder = "Not required for local Ollama";
+      el("maskedKeyHint").textContent = "Ollama runs on this Mac and doesn't need a key.";
+      el("llmApiKeyInput").placeholder = "Not needed";
     } else {
       el("maskedKeyHint").textContent = data.llm.has_api_key
-        ? `(Saved: ${data.llm.masked_api_key})`
-        : "(None configured yet)";
-      el("llmApiKeyInput").placeholder = "Paste API key (saved to .env.local)";
+        ? `Saved key: ${data.llm.masked_api_key}`
+        : "No key saved yet.";
+      el("llmApiKeyInput").placeholder = "Paste a key, or leave blank to keep the saved one";
     }
   };
-  updateApiKeyHint(presetSelect.value);
+  updateProviderFields(presetSelect.value);
+  syncActiveModelChips();
 
   presetSelect.onchange = () => {
     const p = presets[presetSelect.value];
@@ -1252,7 +2198,8 @@ async function openSettingsModal() {
       el("llmFastModelInput").value = p.fast_model;
       el("llmCalibModelInput").value = p.calibration_model;
     }
-    updateApiKeyHint(presetSelect.value);
+    updateProviderFields(presetSelect.value);
+    syncActiveModelChips();
   };
 
   setModalState("settings");
@@ -1289,39 +2236,128 @@ async function saveSettings() {
     state.asr = data.asr;
     renderAsrBadge();
   }
-  showToast("Settings saved to .env.local", 2200);
+  showToast("Settings saved.", 2200);
   setModalState("none");
 }
 
-async function openHistoryModal() {
+function fmtDayLabel(isoStr) {
+  const d = new Date(isoStr);
+  if (Number.isNaN(d.getTime())) return "Earlier";
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(new Date()) - startOf(d)) / 86400000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return d.toLocaleDateString(undefined, { month: "long", day: "numeric" });
+}
+
+function sessionMetaLine(s, { withDay = false } = {}) {
+  const d = new Date(s.created_at_iso);
+  const time = Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const mins = Math.round((s.duration_seconds || 0) / 60);
+  return [
+    TYPE_SHORT_LABELS[s.interview_type] || s.interview_type,
+    withDay ? `${fmtDayLabel(s.created_at_iso)}, ${time}` : time,
+    mins >= 1 ? `${mins} min` : "under a minute",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+async function fetchSavedSessions() {
   const res = await fetch("/api/sessions");
   const data = await res.json();
-  const list = el("historyList");
-  const sessions = data.sessions || [];
+  return data.sessions || [];
+}
+
+// Home sidebar: past interviews, grouped by day, one click to reopen.
+async function refreshHomeSessions() {
+  const list = el("homeSessionList");
+  if (!list) return;
+  let sessions = [];
+  try {
+    sessions = await fetchSavedSessions();
+  } catch (_) {
+    return;
+  }
   if (!sessions.length) {
-    list.innerHTML = `<div style="color:var(--text-muted); font-size:13px;">No saved sessions yet.</div>`;
+    list.innerHTML = `<div class="home-empty">Interviews you run are kept here, with their transcript and calibration.</div>`;
+    return;
+  }
+  let lastDay = null;
+  list.innerHTML = sessions
+    .map((s) => {
+      const day = fmtDayLabel(s.created_at_iso);
+      const head = day !== lastDay ? `<div class="home-group">${escapeHtml(day)}</div>` : "";
+      lastDay = day;
+      return `${head}
+        <button type="button" class="home-item" data-load-session="${escapeHtml(s.id)}">
+          <span class="home-item-title">${escapeHtml(s.role_title || "Untitled interview")}</span>
+          <span class="home-item-meta">${escapeHtml(sessionMetaLine(s))}</span>
+        </button>`;
+    })
+    .join("");
+}
+
+async function openHistoryModal() {
+  closeAllPopovers();
+  const sessions = await fetchSavedSessions();
+  const list = el("historyList");
+  if (!sessions.length) {
+    list.innerHTML = `<div class="history-empty">No interviews saved yet.</div>`;
   } else {
     list.innerHTML = sessions
       .map(
         (s) => `
         <div class="history-item">
-          <div>
-            <div style="font-weight:600;">${escapeHtml(s.role_title)} (${escapeHtml(s.interview_type)})</div>
-            <div style="font-size:11.5px; color:var(--text-muted);">
-              ${escapeHtml(s.created_at_iso)} · ${s.qa_count} cards · ${fmtClock(s.duration_seconds)}
-            </div>
-          </div>
-          <div style="display:flex; gap:6px;">
-            <button class="btn btn-sm" data-load-session="${escapeHtml(s.id)}">Open</button>
-            <a class="btn btn-sm" href="/api/sessions/${encodeURIComponent(s.id)}/markdown?audience=interviewer" style="text-decoration:none;">Interviewer .md</a>
-            <a class="btn btn-sm" href="/api/sessions/${encodeURIComponent(s.id)}/markdown?audience=candidate" style="text-decoration:none;">Candidate .md</a>
-          </div>
+          <button type="button" class="history-open" data-load-session="${escapeHtml(s.id)}">
+            <span class="history-title">${escapeHtml(s.role_title || "Untitled interview")}</span>
+            <span class="history-meta">${escapeHtml(sessionMetaLine(s, { withDay: true }))}</span>
+          </button>
+          <span class="history-actions">
+            <a class="link-quiet" href="/api/sessions/${encodeURIComponent(s.id)}/markdown?audience=interviewer" title="Download the full debrief as Markdown">Debrief</a>
+            <a class="link-quiet" href="/api/sessions/${encodeURIComponent(s.id)}/markdown?audience=candidate" title="Download a clean transcript for the candidate">Candidate copy</a>
+          </span>
         </div>
       `
       )
       .join("");
   }
   setModalState("history");
+}
+
+async function loadSavedSession(id) {
+  if (!id) return;
+  if (!allowedEventsSet().has("load_historical_session") || state.captureState !== "idle") {
+    showToast("End the recording before opening another interview.");
+    return;
+  }
+  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/load`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const msg = typeof err.detail === "string" ? err.detail : err.detail?.message;
+    showToast(msg || "Could not open that interview.");
+    return;
+  }
+  const data = await res.json();
+  state.session = data.session;
+  state.activeCitationUttId = null;
+  state.editingSelfRating = false;
+  state.baseElapsedMs = data.session.live_elapsed_ms || 0;
+  renderTimerPill(state.baseElapsedMs / 1000);
+  const qas = state.session.qa_groups_resolved || [];
+  state.selectedQaId = qas.length ? qas[0].id : null;
+  syncConfigInputsFromSession();
+  renderWorkspaceMode();
+  renderSpeakerToggle();
+  renderPhaseAndControls();
+  renderQAList();
+  renderProbesPanel();
+  renderCalibrationPanel();
+  renderMetricsBar();
+  activateRightTab(state.session.calibration_markdown ? "calibration" : "probes");
+  setModalState("none");
 }
 
 /* ---------------- Event Listeners & Hotkeys ---------------- */
@@ -1332,77 +2368,276 @@ function currentConfigPayload() {
     interview_type: el("typeSelect").value,
     mode: el("modeSelect").value,
     rubric_notes: el("rubricInput").value,
-    consent_confirmed: el("consentCheckbox").checked,
     save_raw_audio: el("saveAudioCheckbox").checked,
   };
 }
 
 function pushSessionConfig() {
+  updateContextSummaryChip();
+  renderWorkspaceMode();
   sendCmd({ type: "configure_session", config: currentConfigPayload() });
+}
+
+function selectAndJumpToQa(qaId) {
+  state.selectedQaId = qaId;
+  renderPhaseNavStrip(state.session?.qa_groups_resolved || []);
+  renderProbesPanel();
+  const container = el("qaList");
+  const card = container.querySelector(`[data-qa-card="${CSS.escape(qaId)}"]`);
+  if (card) {
+    for (const c of container.querySelectorAll(".qa-card.selected")) {
+      c.classList.remove("selected");
+    }
+    card.classList.add("selected");
+    const targetTop = Math.max(
+      0,
+      card.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+    );
+    const jumpDist = Math.abs(targetTop - container.scrollTop);
+    container.scrollTo({ top: targetTop, behavior: jumpDist > 2200 ? "auto" : "smooth" });
+  }
 }
 
 function initEvents() {
   el("startCaptureBtn").onclick = startCapture;
+  el("setupStartBtn").onclick = startCapture;
   el("stopCaptureBtn").onclick = () => stopCaptureSession({ flush: true });
 
-  el("consentCheckbox").onchange = pushSessionConfig;
-  el("saveAudioCheckbox").onchange = pushSessionConfig;
-  el("copyConsentScriptBtn").onclick = async () => {
-    const btn = el("copyConsentScriptBtn");
-    try {
-      await navigator.clipboard.writeText(CONSENT_SCRIPT);
-      const orig = btn.textContent;
-      btn.textContent = "Copied!";
-      setTimeout(() => {
-        btn.textContent = orig;
-      }, 1400);
-    } catch (_) {
-      showToast("Clipboard blocked — read the consent note directly to the candidate.");
+  el("setupSimulateBtn").onclick = () => {
+    state.forceWorkspace = true;
+    state.simulatorOpen = true;
+    el("manualForm").classList.remove("hidden");
+    el("toggleSimulatorLabel").textContent = "Stop typing turns by hand";
+    renderWorkspaceMode();
+    el("manualTextInput").focus();
+  };
+
+  // Sync Setup Launchpad inputs <-> Topbar Popover inputs
+  el("setupRoleInput").oninput = () => {
+    el("roleInput").value = el("setupRoleInput").value;
+    updateContextSummaryChip();
+  };
+  el("setupRoleInput").onchange = pushSessionConfig;
+
+  el("roleInput").oninput = () => {
+    el("setupRoleInput").value = el("roleInput").value;
+    updateContextSummaryChip();
+  };
+  el("roleInput").onchange = pushSessionConfig;
+
+  el("setupRubricInput").onchange = () => {
+    el("rubricInput").value = el("setupRubricInput").value;
+    pushSessionConfig();
+  };
+  el("rubricInput").onchange = () => {
+    el("setupRubricInput").value = el("rubricInput").value;
+    pushSessionConfig();
+  };
+
+  el("setupTypePills").onclick = (ev) => {
+    const btn = ev.target.closest("[data-setup-type]");
+    if (!btn) return;
+    el("typeSelect").value = btn.getAttribute("data-setup-type");
+    pushSessionConfig();
+  };
+
+  el("setupModePills").onclick = (ev) => {
+    const btn = ev.target.closest("[data-setup-mode]");
+    if (!btn) return;
+    el("modeSelect").value = btn.getAttribute("data-setup-mode");
+    renderSpeakerToggle();
+    pushSessionConfig();
+  };
+
+  el("saveAudioCheckbox").onchange = () => {
+    el("setupSaveAudioProxy").checked = el("saveAudioCheckbox").checked;
+    pushSessionConfig();
+  };
+  el("setupSaveAudioProxy").onchange = () => {
+    el("saveAudioCheckbox").checked = el("setupSaveAudioProxy").checked;
+    pushSessionConfig();
+  };
+
+  // Popover toggles
+  el("sessionContextBtn").onclick = (ev) => {
+    ev.stopPropagation();
+    const pop = el("sessionSetupPopover");
+    const willOpen = pop.classList.contains("hidden");
+    closeAllPopovers();
+    if (willOpen) {
+      pop.classList.remove("hidden");
+      el("sessionContextBtn").setAttribute("aria-expanded", "true");
     }
   };
+
+  el("transcriptMenuBtn").onclick = (ev) => {
+    ev.stopPropagation();
+    const pop = el("transcriptMenuPopover");
+    const willOpen = pop.classList.contains("hidden");
+    closeAllPopovers();
+    if (willOpen) {
+      pop.classList.remove("hidden");
+      el("transcriptMenuBtn").setAttribute("aria-expanded", "true");
+    }
+  };
+
+  document.addEventListener("click", (ev) => {
+    if (!ev.target.closest(".popover-anchor")) {
+      closeAllPopovers();
+    }
+  });
 
   el("modeSelect").onchange = () => {
     renderSpeakerToggle();
     pushSessionConfig();
   };
-  el("roleInput").onchange = pushSessionConfig;
   el("typeSelect").onchange = pushSessionConfig;
-  el("rubricInput").onchange = pushSessionConfig;
 
   el("speakerToggleBtn").onclick = () => {
     const next = state.manualSpeaker === "interviewer" ? "candidate" : "interviewer";
     sendCmd({ type: "set_manual_speaker", speaker: next });
   };
 
+  const triggerSwapAll = () => {
+    closeAllPopovers();
+    sendCmd({ type: "swap_all_speakers" });
+  };
+  el("swapAllSpeakersBtn").onclick = triggerSwapAll;
+  el("menuSwapSpeakersBtn").onclick = triggerSwapAll;
+
   el("newSessionBtn").onclick = () => {
+    closeAllPopovers();
     state.pendingNewSession = true;
+    state.forceWorkspace = false;
+    state.activeCitationUttId = null;
     if (state.captureState === "streaming") {
       stopCaptureSession({ flush: false });
     }
-    el("consentCheckbox").checked = false;
     state.selectedQaId = null;
     state.baseElapsedMs = 0;
     state.localSegmentStartedAt = null;
+    state.editingSelfRating = false;
+    state.searchQuery = "";
+    el("transcriptSearchInput").value = "";
     renderTimerPill(0);
     activateRightTab("probes");
-    sendCmd({
-      type: "new_session",
-      config: { ...currentConfigPayload(), consent_confirmed: false },
-    });
+    sendCmd({ type: "new_session", config: currentConfigPayload() });
   };
 
   el("newCardBtn").onclick = () => sendCmd({ type: "force_new_card" });
-  el("regroupBtn").onclick = () => sendCmd({ type: "regroup_cards" });
+  el("regroupBtn").onclick = () => {
+    closeAllPopovers();
+    sendCmd({ type: "regroup_cards" });
+  };
 
-  el("diveDeeperBtn").onclick = () => {
-    if (state.selectedQaId) {
-      sendCmd({ type: "dive_deeper", qa_id: state.selectedQaId, force_refresh: false });
+  el("toggleSearchBtn").onclick = () => {
+    const wrap = el("searchWrap");
+    const opening = wrap.classList.contains("hidden");
+    wrap.classList.toggle("hidden", !opening);
+    if (opening) {
+      el("transcriptSearchInput").focus();
+    } else {
+      state.searchQuery = "";
+      el("transcriptSearchInput").value = "";
+      renderQAList();
     }
   };
-  el("refreshProbesBtn").onclick = () => {
-    if (state.selectedQaId) {
-      sendCmd({ type: "dive_deeper", qa_id: state.selectedQaId, force_refresh: true });
+  el("transcriptSearchInput").oninput = (ev) => {
+    state.searchQuery = ev.target.value;
+    renderQAList();
+  };
+
+  el("phaseNavStrip").onclick = (ev) => {
+    const btn = ev.target.closest("[data-jump-qa]");
+    if (!btn) return;
+    selectAndJumpToQa(btn.getAttribute("data-jump-qa"));
+  };
+
+  el("qaList").addEventListener("scroll", updateJumpToBottomVisibility, { passive: true });
+  el("jumpToBottomBtn").onclick = () => {
+    const container = el("qaList");
+    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  };
+
+  el("toggleSimulatorBtn").onclick = () => {
+    closeAllPopovers();
+    state.simulatorOpen = !state.simulatorOpen;
+    el("manualForm").classList.toggle("hidden", !state.simulatorOpen);
+    el("toggleSimulatorLabel").textContent = state.simulatorOpen
+      ? "Stop typing turns by hand"
+      : "Type turns by hand";
+    renderQAList();
+    if (state.simulatorOpen) {
+      el("manualTextInput").focus();
     }
+  };
+
+  el("toggleWideCalibBtn").onclick = () => {
+    state.wideCopilot = !state.wideCopilot;
+    el("workspaceGrid").classList.toggle("wide-copilot", state.wideCopilot);
+    const hint = state.wideCopilot ? "Narrow this pane" : "Widen this pane";
+    el("toggleWideCalibBtn").title = hint;
+    el("toggleWideCalibBtn").setAttribute("aria-label", hint);
+  };
+
+  el("diveDeeperBtn").onclick = () => {
+    if (!state.selectedQaId) return;
+    const qa = (state.session?.qa_groups_resolved || []).find((q) => q.id === state.selectedQaId);
+    const hasProbes = Boolean(qa?.dive_deeper_history?.length);
+    sendCmd({ type: "dive_deeper", qa_id: state.selectedQaId, force_refresh: hasProbes });
+  };
+
+  el("probesContent").onclick = async (ev) => {
+    if (ev.target.closest("[data-trigger-dive]")) {
+      if (state.selectedQaId) {
+        sendCmd({ type: "dive_deeper", qa_id: state.selectedQaId, force_refresh: false });
+      }
+      return;
+    }
+    const copyBtn = ev.target.closest("[data-probe-copy]");
+    if (copyBtn) {
+      try {
+        await navigator.clipboard.writeText(copyBtn.getAttribute("data-probe-copy") || "");
+        copyBtn.classList.add("is-copied");
+        copyBtn.innerHTML = ICON_CHECK;
+        setTimeout(() => {
+          copyBtn.classList.remove("is-copied");
+          copyBtn.innerHTML = ICON_COPY;
+        }, 1200);
+      } catch (_) {
+        showToast("Could not copy to the clipboard.");
+      }
+      return;
+    }
+    // The whole question is the control: click it once you've asked it.
+    const probe = ev.target.closest("[data-probe-asked]");
+    if (probe) {
+      toggleProbeAsked(probe.getAttribute("data-probe-asked"));
+    }
+  };
+
+  el("probesContent").addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    const probe = ev.target.closest?.("[data-probe-asked]");
+    if (probe && ev.target === probe) {
+      ev.preventDefault();
+      toggleProbeAsked(probe.getAttribute("data-probe-asked"));
+    }
+  });
+
+  el("hireSignalPills").onclick = (ev) => {
+    const btn = ev.target.closest("[data-signal]");
+    if (!btn) return;
+    setHireSignalValue(btn.getAttribute("data-signal"));
+  };
+
+  el("editSelfRatingBtn").onclick = () => {
+    state.editingSelfRating = true;
+    renderCalibrationPanel();
+  };
+  el("collapseSelfRatingBtn").onclick = () => {
+    state.editingSelfRating = false;
+    renderCalibrationPanel();
   };
 
   el("runCalibrationBtn").onclick = () => {
@@ -1412,6 +2647,7 @@ function initEvents() {
       gut_rationale: el("selfRationaleInput").value.trim(),
       biggest_concern: el("selfConcernInput").value.trim(),
     };
+    state.editingSelfRating = false;
     sendCmd({
       type: "generate_calibration",
       rating,
@@ -1419,18 +2655,70 @@ function initEvents() {
     });
   };
 
+  el("copyCalibrationBtn").onclick = async () => {
+    const md = state.session?.calibration_markdown;
+    if (!md) return;
+    try {
+      await navigator.clipboard.writeText(md);
+      const btn = el("copyCalibrationBtn");
+      btn.textContent = "Copied";
+      setTimeout(() => {
+        btn.textContent = "Copy as Markdown";
+      }, 1400);
+    } catch (_) {
+      showToast("Could not copy to the clipboard.");
+    }
+  };
+
   el("calibrationOutput").onclick = (ev) => {
     const btn = ev.target.closest("[data-cite-utt]");
     if (!btn) return;
-    jumpToUtteranceCitation(btn.getAttribute("data-cite-utt"));
+    jumpToUtteranceCitation(btn.getAttribute("data-cite-utt"), btn);
   };
 
+  const sectionNav = el("reportSectionNav");
+  if (sectionNav) {
+    sectionNav.onclick = (ev) => {
+      const btn = ev.target.closest("[data-scroll-sec]");
+      if (!btn) return;
+      const target = document.getElementById(btn.getAttribute("data-scroll-sec"));
+      if (target) {
+        // Hold the clicked tab active while the smooth scroll settles (scroll-spy resumes afterwards)
+        state.navLockUntil = Date.now() + 900;
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      for (const pill of sectionNav.querySelectorAll(".report-nav-link")) {
+        const isAct = pill === btn;
+        pill.classList.toggle("active", isAct);
+        pill.setAttribute("aria-selected", String(isAct));
+      }
+    };
+  }
+
+  el("calibrationView").addEventListener("scroll", syncReportNavToScroll, { passive: true });
+
+  const phaseSignals = el("phaseSignalsStrip");
+  if (phaseSignals) {
+    phaseSignals.onclick = (ev) => {
+      const chip = ev.target.closest("[data-jump-badge]");
+      if (!chip) return;
+      const badge = chip.getAttribute("data-jump-badge");
+      const qas = state.session?.qa_groups_resolved || [];
+      const match = qas.find((q) => (q.badge || "").toUpperCase() === (badge || "").toUpperCase());
+      if (match) {
+        selectAndJumpToQa(match.id);
+      }
+    };
+  }
+
   el("exportInterviewerMdBtn").onclick = () => {
+    closeAllPopovers();
     if (state.session?.id) {
       window.location.href = `/api/sessions/${encodeURIComponent(state.session.id)}/markdown?audience=interviewer`;
     }
   };
   el("exportCandidateMdBtn").onclick = () => {
+    closeAllPopovers();
     if (state.session?.id) {
       window.location.href = `/api/sessions/${encodeURIComponent(state.session.id)}/markdown?audience=candidate`;
     }
@@ -1439,42 +2727,45 @@ function initEvents() {
   el("tabProbes").onclick = () => activateRightTab("probes");
   el("tabCalibration").onclick = () => activateRightTab("calibration");
 
+  // Settings Modal
   el("settingsBtn").onclick = openSettingsModal;
   el("closeSettingsBtn").onclick = () => setModalState("none");
+  el("cancelSettingsBtn").onclick = () => setModalState("none");
   el("saveSettingsBtn").onclick = saveSettings;
+  el("llmFastModelInput").oninput = syncActiveModelChips;
+  el("llmCalibModelInput").oninput = syncActiveModelChips;
 
+  el("settingsModal").onclick = (ev) => {
+    if (ev.target === el("settingsModal")) {
+      setModalState("none");
+      return;
+    }
+    const chip = ev.target.closest("[data-chip-val]");
+    if (chip) {
+      const group = chip.closest("[data-target-input]");
+      const targetId = group?.getAttribute("data-target-input");
+      if (targetId && el(targetId)) {
+        el(targetId).value = chip.getAttribute("data-chip-val");
+        syncActiveModelChips();
+      }
+    }
+  };
+
+  // History Modal
   el("historyBtn").onclick = openHistoryModal;
   el("closeHistoryBtn").onclick = () => setModalState("none");
-  el("historyList").onclick = async (ev) => {
-    const btn = ev.target.closest("[data-load-session]");
-    if (!btn) return;
-    if (!allowedEventsSet().has("load_historical_session") || state.captureState !== "idle") {
-      showToast("Stop live capture before opening a saved session.");
-      return;
+  el("historyModal").onclick = (ev) => {
+    if (ev.target === el("historyModal")) {
+      setModalState("none");
     }
-    const id = btn.getAttribute("data-load-session");
-    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/load`, { method: "POST" });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const msg = typeof err.detail === "string" ? err.detail : err.detail?.message;
-      showToast(msg || "Could not load session.");
-      return;
-    }
-    const data = await res.json();
-    state.session = data.session;
-    state.baseElapsedMs = data.session.live_elapsed_ms || 0;
-    renderTimerPill(state.baseElapsedMs / 1000);
-    const qas = state.session.qa_groups_resolved || [];
-    state.selectedQaId = qas.length ? qas[0].id : null;
-    syncConfigInputsFromSession();
-    renderSpeakerToggle();
-    renderPhaseAndControls();
-    renderQAList();
-    renderProbesPanel();
-    renderCalibrationPanel();
-    renderMetricsBar();
-    setModalState("none");
   };
+
+  const onSessionListClick = (ev) => {
+    const btn = ev.target.closest("[data-load-session]");
+    if (btn) loadSavedSession(btn.getAttribute("data-load-session"));
+  };
+  el("historyList").onclick = onSessionListClick;
+  el("homeSessionList").onclick = onSessionListClick;
 
   const qaList = el("qaList");
   qaList.onclick = (ev) => {
@@ -1486,6 +2777,7 @@ function initEvents() {
       if (action === "dive") {
         state.selectedQaId = qaId;
         renderQAList();
+        activateRightTab("probes");
         sendCmd({ type: "dive_deeper", qa_id: qaId, force_refresh: false });
       } else if (action === "merge") {
         sendCmd({ type: "merge_card", qa_id: qaId });
@@ -1582,9 +2874,19 @@ function initEvents() {
   };
 
   window.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape" && state.modalState !== "none") {
+    if (ev.key === "Escape") {
+      if (state.modalState !== "none") {
+        ev.preventDefault();
+        setModalState("none");
+        return;
+      }
+      closeAllPopovers();
+      return;
+    }
+
+    if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter" && state.modalState === "settings") {
       ev.preventDefault();
-      setModalState("none");
+      saveSettings();
       return;
     }
 
@@ -1592,7 +2894,7 @@ function initEvents() {
     const isTyping = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     if (isTyping || state.modalState !== "none") return;
 
-    if (ev.key === "d" || ev.key === "D") {
+    if ((ev.key === "d" || ev.key === "D") && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
       ev.preventDefault();
       const qas = state.session?.qa_groups_resolved || [];
       const selectedQa = qas.find((q) => q.id === state.selectedQaId);
@@ -1603,6 +2905,12 @@ function initEvents() {
         allowedEventsSet().has("dive_deeper")
       ) {
         sendCmd({ type: "dive_deeper", qa_id: state.selectedQaId, force_refresh: false });
+      }
+    } else if (/^[1-9]$/.test(ev.key) && !ev.metaKey && !ev.ctrlKey && !ev.altKey && state.rightTab === "probes") {
+      const key = visibleProbeKeys()[Number(ev.key) - 1];
+      if (key) {
+        ev.preventDefault();
+        toggleProbeAsked(key);
       }
     } else if (ev.key === "n" || ev.key === "N") {
       ev.preventDefault();
@@ -1617,6 +2925,7 @@ function initEvents() {
   });
 }
 
+initTheme();
 initEvents();
 renderSpeakerToggle();
 renderCaptureControls();

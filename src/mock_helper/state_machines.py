@@ -161,8 +161,7 @@ class AsyncJobState(StrEnum):
 
 
 class SessionPhase(StrEnum):
-    SETUP = "setup"  # Fresh session; consent not yet confirmed and no transcript turns
-    READY = "ready"  # Consent confirmed; ready to start live capture
+    READY = "ready"  # Fresh session with no transcript turns; live capture can start immediately
     CAPTURING = "capturing"  # Live audio streaming; historical session loads blocked (409)
     AWAITING_SELF_RATING = "awaiting_self_rating"  # Turns recorded & paused/stopped; lock in blind rating next
     RATED = "rated"  # Blind self-rating submitted; ready to reveal AI calibration
@@ -171,15 +170,7 @@ class SessionPhase(StrEnum):
 
 
 SESSION_PHASE_TRANSITIONS: dict[SessionPhase, set[SessionPhase]] = {
-    SessionPhase.SETUP: {
-        SessionPhase.READY,
-        SessionPhase.CAPTURING,
-        SessionPhase.AWAITING_SELF_RATING,
-        SessionPhase.RATED,
-        SessionPhase.CALIBRATING,
-    },
     SessionPhase.READY: {
-        SessionPhase.SETUP,
         SessionPhase.CAPTURING,
         SessionPhase.AWAITING_SELF_RATING,
         SessionPhase.RATED,
@@ -234,9 +225,7 @@ def derive_session_phase(
         return SessionPhase.RATED
     if session.utterances or session.ended_epoch_ms is not None:
         return SessionPhase.AWAITING_SELF_RATING
-    if session.config.consent_confirmed:
-        return SessionPhase.READY
-    return SessionPhase.SETUP
+    return SessionPhase.READY
 
 
 def compute_allowed_session_events(
@@ -260,11 +249,8 @@ def compute_allowed_session_events(
         blocked["start_capture"] = "Wait for calibration to finish before starting capture."
         blocked["load_historical_session"] = "Wait for calibration to finish before opening a saved session."
     else:
-        allowed.append("load_historical_session")
-        if session.config.consent_confirmed:
-            allowed.append("start_capture")
-        else:
-            blocked["start_capture"] = "Confirm candidate consent (`consent_confirmed=true`) before starting mic/tab capture."
+        # Any idle phase (fresh, paused, rated, calibrated) may start or resume live capture.
+        allowed.extend(["load_historical_session", "start_capture"])
 
     if regroup_job == AsyncJobState.RUNNING or phase == SessionPhase.CALIBRATING:
         blocked["force_new_card"] = "Card boundaries are locked while regrouping/calibration is running."
@@ -351,8 +337,7 @@ def export_machine_specs() -> dict[str, Any]:
                 "transitions": {k.value: sorted(v.value for v in vs) for k, vs in SESSION_PHASE_TRANSITIONS.items()},
                 "mermaid": (
                     "stateDiagram-v2\n"
-                    "  [*] --> setup\n"
-                    "  setup --> ready : confirm_consent\n"
+                    "  [*] --> ready\n"
                     "  ready --> capturing : start_capture\n"
                     "  capturing --> awaiting_self_rating : flush_and_end\n"
                     "  awaiting_self_rating --> capturing : start_capture (resume)\n"
