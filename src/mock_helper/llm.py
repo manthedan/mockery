@@ -16,6 +16,7 @@ from dotenv import dotenv_values
 from openai import AsyncOpenAI
 
 from .models import (
+    DEFAULT_PARAKEET_MODEL,
     LLM_PRESETS,
     DiveDeeperResponse,
     InterviewSession,
@@ -71,7 +72,7 @@ class LLMRuntimeConfig:
         self.parakeet_model: str = (
             merged.get("PARAKEET_MODEL")
             or os.getenv("PARAKEET_MODEL")
-            or "mlx-community/parakeet-tdt-0.6b-v3"
+            or DEFAULT_PARAKEET_MODEL
         )
 
     @property
