@@ -2017,7 +2017,7 @@ function renderProbesPanel() {
   if (pState === "loading") {
     setState("");
     setDiveBtn("Thinking…", { disabled: true });
-    content.innerHTML = `<p class="probe-thinking">Thinking of follow-ups…</p>`;
+    content.innerHTML = `<p class="probe-thinking"><span class="typing-dots" aria-hidden="true"><span></span><span></span><span></span></span><span>Thinking of follow-ups…</span></p>`;
     return;
   }
 
@@ -2704,8 +2704,11 @@ function renderCalibrationPanel() {
   const reportMd = state.session?.calibration_markdown || "";
   const hasReport = Boolean(reportMd);
 
-  el("runCalibrationBtn").disabled = !allowed.has("generate_calibration") || calibRunning;
-  el("runCalibrationBtn").textContent = calibRunning ? "Reading the transcript…" : "Reveal the audit";
+  const calibBtn = el("runCalibrationBtn");
+  calibBtn.disabled = !allowed.has("generate_calibration") || calibRunning;
+  calibBtn.classList.toggle("is-loading", calibRunning);
+  calibBtn.setAttribute("aria-busy", calibRunning ? "true" : "false");
+  calibBtn.textContent = calibRunning ? "Reading the transcript…" : "Reveal the audit";
   const blindNote = el("blindCallNote");
   if (blindNote) {
     const blockedWhy = sm?.session?.blocked_reasons?.generate_calibration || "";
@@ -2754,7 +2757,7 @@ function renderCalibrationPanel() {
       outputEl.innerHTML = renderMarkdownSafe(streamingMd);
     } else {
       outputEl.classList.add("empty-report");
-      outputEl.textContent = "Reading the whole transcript against your call…";
+      outputEl.innerHTML = `<p class="probe-thinking" role="status" aria-live="polite"><span class="typing-dots" aria-hidden="true"><span></span><span></span><span></span></span><span>Reading the whole transcript against your call…</span></p>`;
     }
   } else if (hasReport) {
     const insights = parseCalibrationInsights(reportMd);
@@ -3094,6 +3097,8 @@ async function testSettingsConnection() {
   const btn = el("testLlmBtn");
   const out = el("testLlmResult");
   btn.disabled = true;
+  btn.classList.add("is-loading");
+  btn.setAttribute("aria-busy", "true");
   const origLabel = btn.textContent;
   btn.textContent = "Testing…";
   out.classList.remove("hidden", "is-ok", "is-err");
@@ -3117,6 +3122,8 @@ async function testSettingsConnection() {
     showInlineTestResult(out, { ok: false, error: err.message || "Network error" });
   } finally {
     btn.disabled = false;
+    btn.classList.remove("is-loading");
+    btn.setAttribute("aria-busy", "false");
     btn.textContent = origLabel;
   }
 }
@@ -3526,6 +3533,8 @@ async function testAndSaveOnboardingKey() {
   }
   const btn = el("onboardTestSaveBtn");
   btn.disabled = true;
+  btn.classList.add("is-loading");
+  btn.setAttribute("aria-busy", "true");
   btn.textContent = "Testing…";
   statusEl.classList.remove("hidden", "is-ok", "is-err");
   statusEl.textContent = `Testing ${p.label || provKey}…`;
@@ -3574,6 +3583,8 @@ async function testAndSaveOnboardingKey() {
     showInlineTestResult(statusEl, { ok: false, error: err.message || "Network error" });
   } finally {
     btn.disabled = false;
+    btn.classList.remove("is-loading");
+    btn.setAttribute("aria-busy", "false");
     btn.textContent = "Test & Save";
   }
 }

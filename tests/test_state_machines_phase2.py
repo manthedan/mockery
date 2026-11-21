@@ -339,3 +339,50 @@ def test_phase2_codex_regression_guards():
     # P3-5: Module toggle patches in place to keep focus
     assert "canPatchInPlace" in profile_js
 
+
+def test_inference_latency_indicators_contract():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    practice_js = (STATIC_DIR / "practice_studio.js").read_text(encoding="utf-8")
+
+    # Voice preparing vs speaking barge-in button markup
+    assert 'id="practiceBargeInLabel"' in html
+    assert 'class="speaking-bars"' in html
+
+    # Shared animation & indicator primitives in styles.css (with reduced-motion coverage)
+    for token in (
+        "@keyframes spin-ring",
+        "@keyframes typing-wave",
+        "@keyframes progress-glide",
+        "@keyframes eq-bar",
+        ".btn.is-loading::before",
+        ".typing-dots",
+        ".pturn.is-thinking",
+        ".practice-coach-card.is-thinking",
+        ".debrief-pending-card",
+        ".speaking-bars",
+        ".practice-speaking-btn.is-preparing",
+        ".practice-mic-btn.is-transcribing",
+        "prefers-reduced-motion: reduce",
+    ):
+        assert token in css, f"Missing CSS primitive: {token}"
+
+    # Practice Studio staged latency indicators & clean persistence across debrief polling
+    for hook in (
+        "speakingState",
+        'setSpeakingUI("preparing"',
+        'setSpeakingUI("speaking"',
+        "showPendingTurnCard",
+        "showPendingDebriefCard",
+        "setCoachRailThinking",
+        "clearPendingOpUI",
+        "debriefStartedAt",
+        "is-transcribing",
+    ):
+        assert hook in practice_js, f"Missing practice_studio.js hook: {hook}"
+
+    # Live Copilot probes, calibration, and LLM test indicators
+    assert "typing-dots" in app_js
+    assert 'calibBtn.classList.toggle("is-loading", calibRunning)' in app_js
+    assert 'btn.classList.add("is-loading")' in app_js
