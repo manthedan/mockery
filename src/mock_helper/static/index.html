@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mock Helper — Live Interview Copilot</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <!-- Top Studio Control Bar -->
+      <header class="topbar">
+        <div class="brand-group">
+          <div class="brand">
+            <span id="brandDot" class="brand-dot"></span>
+            <span>Mock Helper</span>
+          </div>
+          <span id="timerPill" class="timer-pill" title="45-minute mock interview pacing timer">00:00 / 45:00</span>
+          <span id="phaseBadge" class="status-badge" title="Current interview session lifecycle state">Phase: Setup</span>
+          <span id="asrBadge" class="status-badge loading">Parakeet TDT · Loading...</span>
+        </div>
+
+        <div class="controls-group">
+          <select id="modeSelect" class="select-compact" title="Audio ingestion mode">
+            <option value="remote_meet">Google Meet (Mic + Tab Audio)</option>
+            <option value="in_person">Single Mic (Practice / In-Person)</option>
+          </select>
+
+          <button id="speakerToggleBtn" class="btn hidden" title="Toggle active speaker in Single-Mic mode (Hotkey: Tab)">
+            Speaker: <strong id="manualSpeakerLabel">You</strong> <kbd>Tab</kbd>
+          </button>
+
+          <button id="startCaptureBtn" class="btn btn-primary">Start Live Capture</button>
+          <button id="stopCaptureBtn" class="btn btn-danger hidden">Stop &amp; Calibrate</button>
+
+          <button id="newSessionBtn" class="btn" title="Reset and start a fresh interview session">New Session</button>
+          <button id="historyBtn" class="btn">History</button>
+          <button id="settingsBtn" class="btn">Settings</button>
+        </div>
+      </header>
+
+      <!-- Consent & Audio Hygiene Strip -->
+      <div id="toastBanner" class="toast-banner hidden"></div>
+      <section class="consent-bar">
+        <label class="consent-check">
+          <input id="consentCheckbox" type="checkbox" />
+          <span><strong>Candidate consent confirmed</strong> (wear headphones so Meet audio doesn't bleed into your mic)</span>
+        </label>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <label class="consent-check" title="Saves 16kHz WAV files in sessions/ so you can re-transcribe or A/B test models offline">
+            <input id="saveAudioCheckbox" type="checkbox" />
+            <span>Save local WAV audio</span>
+          </label>
+          <button id="copyConsentScriptBtn" class="btn btn-sm" type="button">
+            Copy Verbal Consent Prompt
+          </button>
+        </div>
+      </section>
+
+      <!-- Role Context & Live Audio Meters -->
+      <section class="context-bar">
+        <div class="context-inputs">
+          <input
+            id="roleInput"
+            class="input-compact input-role"
+            type="text"
+            value="Senior Software Engineer"
+            placeholder="Target Role & Level"
+          />
+          <select id="typeSelect" class="select-compact" title="Behavioral uses Question Cards (Q1..Qn); System Design & Coding use Phase Cards (P1..Pn)">
+            <option value="behavioral">Behavioral (Q&amp;A Cards)</option>
+            <option value="system_design">System Design (Phase Cards)</option>
+            <option value="coding">Coding (Phase Cards)</option>
+            <option value="general">General / Mixed</option>
+          </select>
+          <input
+            id="rubricInput"
+            class="input-compact input-rubric"
+            type="text"
+            placeholder="Optional rubric focus (e.g. ownership, scale, tradeoffs)"
+          />
+        </div>
+
+        <div class="meters-group">
+          <div class="meter-item" title="Your Microphone level">
+            <span>You</span>
+            <div class="meter-track"><div id="meterYou" class="meter-fill you"></div></div>
+          </div>
+          <div id="candMeterWrap" class="meter-item" title="Google Meet Tab Audio level">
+            <span>Candidate</span>
+            <div class="meter-track"><div id="meterCand" class="meter-fill cand"></div></div>
+          </div>
+          <span id="ratioPill" class="ratio-pill">Talk Ratio: —</span>
+        </div>
+      </section>
+
+      <!-- Main Split Workspace -->
+      <main class="workspace">
+        <!-- Left Column: Derived Topic/Q&A Cards over Canonical Utterance Log -->
+        <section class="transcript-pane">
+          <div class="pane-header">
+            <span id="leftPaneTitle" class="pane-title">Live Q&amp;A Cards</span>
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+              <button id="newCardBtn" class="btn btn-sm" title="Start a new Question / Phase Card (Hotkey: N)">
+                + New Card <kbd>N</kbd>
+              </button>
+              <button id="regroupBtn" class="btn btn-sm" title="Clean up card boundaries across full utterance log without altering words">
+                Regroup
+              </button>
+              <button id="exportInterviewerMdBtn" class="btn btn-sm" title="Download full Interviewer Debrief (.md)">
+                Interviewer .md
+              </button>
+              <button id="exportCandidateMdBtn" class="btn btn-sm" title="Download clean transcript copy to share with the Candidate (.md)">
+                Candidate .md
+              </button>
+            </div>
+          </div>
+
+          <div id="qaList" class="qa-list"></div>
+
+          <form id="manualForm" class="manual-composer">
+            <select id="manualRoleSelect" class="select-compact">
+              <option value="interviewer">You (Interviewer)</option>
+              <option value="candidate">Candidate</option>
+            </select>
+            <input
+              id="manualTextInput"
+              type="text"
+              placeholder="Type a simulated turn to test grouping, speculative caching &amp; Dive Deeper..."
+            />
+            <button type="submit" class="btn btn-sm">Add Turn</button>
+          </form>
+        </section>
+
+        <!-- Right Column: Dive Deeper Copilot & Blind Self-Calibration -->
+        <aside class="copilot-pane">
+          <div class="tab-strip">
+            <button id="tabProbes" class="tab-btn active">Dive Deeper Copilot</button>
+            <button id="tabCalibration" class="tab-btn">Final Calibration</button>
+          </div>
+
+          <!-- Tab 1: Live Dive Deeper -->
+          <div id="probesView" class="copilot-body">
+            <div class="selected-target-box">
+              <div>
+                <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase; font-weight:600;">
+                  Selected Thread
+                </div>
+                <div id="selectedQaLabel" style="font-weight:600; margin-top:2px;">
+                  Select or start a card
+                </div>
+              </div>
+              <div style="display:flex; gap:6px; align-items:center;">
+                <button id="diveDeeperBtn" class="btn btn-dive" disabled>
+                  Dive Deeper <kbd>D</kbd>
+                </button>
+                <button id="refreshProbesBtn" class="btn btn-sm hidden" title="Bypass cache and generate fresh follow-up angles">
+                  ↻
+                </button>
+              </div>
+            </div>
+
+            <div id="probesContent" style="display:flex; flex-direction:column; gap:10px;">
+              <div style="color:var(--text-muted); font-size:13px; padding:8px 4px;">
+                Substantive candidate turns automatically pre-warm follow-up probes in the background. Press <kbd>D</kbd> anytime—even mid-answer—for <strong>3 targeted follow-up questions</strong>.
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: Blind Self-Calibration -> AI Evidence Diff -->
+          <div id="calibrationView" class="copilot-body hidden">
+            <div class="stats-grid">
+              <div class="stat-tile">
+                <div id="statQaCount" class="stat-val">0</div>
+                <div class="stat-lbl">Cards</div>
+              </div>
+              <div class="stat-tile">
+                <div id="statTalkRatio" class="stat-val">—</div>
+                <div class="stat-lbl">Time: You / Cand</div>
+              </div>
+              <div class="stat-tile">
+                <div id="statAvgDepth" class="stat-val">0w</div>
+                <div class="stat-lbl">Avg Cand Words</div>
+              </div>
+            </div>
+
+            <!-- Per-card deterministic timing breakdown -->
+            <div id="perCardStatsBox" class="per-card-stats hidden"></div>
+
+            <!-- Blind Self-Rating Step (Trains YOUR calibration muscle first!) -->
+            <div class="self-rating-card">
+              <div style="font-weight:600; font-size:13px; margin-bottom:6px;">
+                Step 1: Lock In Your Own Calibration First (Before AI Reveal)
+              </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px;">
+                <select id="selfHireSignal" class="select-compact">
+                  <option value="lean_hire">Lean Hire</option>
+                  <option value="strong_hire">Strong Hire</option>
+                  <option value="lean_no_hire">Lean No Hire</option>
+                  <option value="strong_no_hire">Strong No Hire</option>
+                </select>
+                <input
+                  id="selfLevelInput"
+                  class="input-compact"
+                  type="text"
+                  placeholder="Perceived level (e.g. L5 / Senior)"
+                />
+              </div>
+              <input
+                id="selfRationaleInput"
+                class="input-compact"
+                style="width:100%; margin-bottom:6px;"
+                type="text"
+                placeholder="1-sentence gut read: strongest positive signal..."
+              />
+              <input
+                id="selfConcernInput"
+                class="input-compact"
+                style="width:100%; margin-bottom:8px;"
+                type="text"
+                placeholder="Biggest gap / unverified claim you noticed..."
+              />
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                <span style="font-size:11.5px; color:var(--text-muted);">
+                  Compares your call against <code>[MM:SS, utt_id]</code> evidence
+                </span>
+                <button id="runCalibrationBtn" class="btn btn-primary btn-sm" type="button">
+                  Submit My Call &amp; Reveal AI Audit
+                </button>
+              </div>
+            </div>
+
+            <div id="calibrationOutput" class="calibration-report">Lock in your gut rating above and click "Submit My Call &amp; Reveal AI Audit" to see how your read compares against timestamped transcript evidence.</div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h3>ASR &amp; LLM Settings</h3>
+          <button id="closeSettingsBtn" class="btn btn-sm">Close</button>
+        </div>
+
+        <div class="form-field">
+          <label for="parakeetModelSelect">Local Apple Silicon ASR Checkpoint (A/B Test)</label>
+          <select id="parakeetModelSelect"></select>
+        </div>
+
+        <div style="border-top:1px solid var(--border); padding-top:8px; font-size:12.5px; color:var(--text-muted);">
+          OpenAI-compatible LLM settings (saved locally to gitignored <code>.env.local</code>).
+        </div>
+
+        <div class="form-field">
+          <label for="llmPresetSelect">Provider Preset</label>
+          <select id="llmPresetSelect"></select>
+        </div>
+        <div class="form-field">
+          <label for="llmBaseUrlInput">Base URL</label>
+          <input id="llmBaseUrlInput" type="text" />
+        </div>
+        <div class="form-field">
+          <label for="llmApiKeyInput">API Key <span id="maskedKeyHint" style="font-weight:400;"></span></label>
+          <input id="llmApiKeyInput" type="password" placeholder="Paste API key (blank keeps existing key)" />
+        </div>
+        <div class="form-field">
+          <label for="llmFastModelInput">Fast Model (Speculative Dive Deeper — non-thinking)</label>
+          <input id="llmFastModelInput" type="text" />
+        </div>
+        <div class="form-field">
+          <label for="llmCalibModelInput">Calibration Model (Post-session deep audit)</label>
+          <input id="llmCalibModelInput" type="text" />
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:4px;">
+          <button id="saveSettingsBtn" class="btn btn-primary">Save Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session History Modal -->
+    <div id="historyModal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h3>Saved Interview Sessions</h3>
+          <button id="closeHistoryBtn" class="btn btn-sm">Close</button>
+        </div>
+        <div id="historyList" style="display:flex; flex-direction:column; gap:8px;"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
