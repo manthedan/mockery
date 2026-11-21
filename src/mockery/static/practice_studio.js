@@ -151,6 +151,7 @@ export function createPracticeStudioController({
     voiceEnabled: true,
     selectedVoice: savedVoice,
     isSpeaking: false,
+    speakingState: "idle", // "idle" | "preparing" | "speaking"
     speakingPreviewEngine: null, // null | "picker" | "phonon" | "kokoro"
     speakGen: 0,
     ttsAbort: null,
@@ -159,6 +160,9 @@ export function createPracticeStudioController({
     streamDoneTimer: null,
     activeAudio: null,
     activeAudioUrl: null,
+    pendingOpTimer: null,
+    pendingOpNodes: [],
+    debriefStartedAt: 0,
 
     // Local mic recording state
     recordingTarget: null, // null | "answer" | "retry"
@@ -569,24 +573,39 @@ export function createPracticeStudioController({
 
   /* ---------------- Local Voice Playback & Instant Barge-In ---------------- */
 
-  function setSpeakingUI(speaking, previewTag = null) {
-    local.isSpeaking = speaking;
-    local.speakingPreviewEngine = speaking ? previewTag : null;
-    el("practiceBargeInBtn")?.classList.toggle("hidden", !speaking);
-    const prevBtn = el("practicePreviewVoiceBtn");
-    if (prevBtn) {
-      prevBtn.textContent =
-        speaking && local.speakingPreviewEngine === "picker" ? "Stop preview" : "Preview voice";
+  function setSpeakingUI(mode, previewTag = null) {
+    const stateMode =
+      mode === "preparing" ? "preparing" : mode === true || mode === "speaking" ? "speaking" : "idle";
+    const active = stateMode !== "idle";
+    local.speakingState = stateMode;
+    local.isSpeaking = active;
+    local.speakingPreviewEngine = active ? previewTag : null;
+
+    const bargeBtn = el("practiceBargeInBtn");
+    if (bargeBtn) {
+      bargeBtn.classList.toggle("hidden", !active);
+      bargeBtn.classList.toggle("is-preparing", stateMode === "preparing");
     }
-    const obPhononBtn = el("onboardPhononPreviewBtn");
-    if (obPhononBtn) {
-      obPhononBtn.textContent =
-        speaking && local.speakingPreviewEngine === "phonon" ? "Stop preview" : "Preview Phonon";
+    const bargeLbl = el("practiceBargeInLabel");
+    if (bargeLbl) {
+      bargeLbl.textContent = stateMode === "preparing" ? "Preparing voice…" : "Stop speaking";
     }
-    const obKokoroBtn = el("onboardKokoroPreviewBtn");
-    if (obKokoroBtn) {
-      obKokoroBtn.textContent =
-        speaking && local.speakingPreviewEngine === "kokoro" ? "Stop preview" : "Preview Kokoro";
+
+    const previewMap = [
+      ["practicePreviewVoiceBtn", "picker", "Preview voice"],
+      ["onboardPhononPreviewBtn", "phonon", "Preview Phonon"],
+      ["onboardKokoroPreviewBtn", "kokoro", "Preview Kokoro"],
+    ];
+    for (const [id, tag, idleLabel] of previewMap) {
+      const btn = el(id);
+      if (!btn) continue;
+      const isThis = active && local.speakingPreviewEngine === tag;
+      btn.classList.toggle("is-loading", isThis && stateMode === "preparing");
+      btn.textContent = isThis
+        ? stateMode === "preparing"
+          ? "Loading voice…"
+          : "Stop preview"
+        : idleLabel;
     }
   }
 
@@ -762,6 +781,9 @@ export function createPracticeStudioController({
         };
         src.start(startAt);
         scheduledCount += 1;
+        if (scheduledCount === 1 && myGen === local.speakGen) {
+          setSpeakingUI("speaking", local.speakingPreviewEngine);
+        }
       }
     } finally {
       if (local.ttsAbort === ctrl) local.ttsAbort = null;
@@ -786,7 +808,7 @@ export function createPracticeStudioController({
     const myGen = local.speakGen;
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     local.ttsAbort = ctrl;
-    setSpeakingUI(true, previewTag);
+    setSpeakingUI("preparing", previewTag);
 
     const payload = { text: clean, rate: 1.0 };
     if (engine) {
@@ -833,6 +855,7 @@ export function createPracticeStudioController({
         audio.onerror = () => {
           if (local.activeAudio === audio) stopSpeaking();
         };
+        setSpeakingUI("speaking", local.speakingPreviewEngine);
         await audio.play();
         return;
       }
@@ -864,6 +887,7 @@ export function createPracticeStudioController({
         utt.onerror = () => {
           if (myGen === local.speakGen) setSpeakingUI(false);
         };
+        setSpeakingUI("speaking", local.speakingPreviewEngine);
         window.speechSynthesis.speak(utt);
         return;
       } catch {
@@ -880,7 +904,10 @@ export function createPracticeStudioController({
     const btn = el(isRetry ? "practiceRetryMicBtn" : "practiceMicBtn");
     const lbl = el(isRetry ? "practiceRetryMicLabel" : "practiceMicLabel");
     const status = el(isRetry ? "practiceRetryMicStatus" : "practiceMicStatus");
-    if (btn) btn.classList.toggle("is-recording", phase === "recording");
+    if (btn) {
+      btn.classList.toggle("is-recording", phase === "recording");
+      btn.classList.toggle("is-transcribing", phase === "transcribing" || phase === "requesting_mic");
+    }
     if (lbl) {
       if (phase === "requesting_mic") lbl.textContent = "Requesting mic…";
       else if (phase === "recording") lbl.textContent = "Stop & transcribe";
@@ -1485,7 +1512,9 @@ export function createPracticeStudioController({
 
     // Invalidate all in-flight session requests BEFORE unmounting so nothing can remount after exit
     local.sessionGen += 1;
+    local.debriefStartedAt = 0;
     clearExitForceArm();
+    clearPendingOpUI({ force: true });
     unmountStudioPlugin({ flush: false });
     abortMicRecording();
     resetWorkspaceSaveState();
@@ -1496,6 +1525,184 @@ export function createPracticeStudioController({
     setPracticeVisible(false);
     refreshPracticeHistory();
     return true;
+  }
+
+  const DEFAULT_PRACTICE_START_HINT =
+    "Answer by voice (local Parakeet mic) or typing. Supportive CARL debrief at the end.";
+
+  function setButtonLoading(btnId, loading, loadingLabel = null, idleLabel = null) {
+    const btn = el(btnId);
+    if (!btn) return;
+    btn.classList.toggle("is-loading", Boolean(loading));
+    btn.setAttribute("aria-busy", loading ? "true" : "false");
+    if (loading && loadingLabel !== null) {
+      btn.textContent = loadingLabel;
+    } else if (!loading && idleLabel !== null) {
+      btn.textContent = idleLabel;
+    }
+  }
+
+  function setCoachRailThinking(active, toneText = "Analyzing", messageText = "") {
+    const toneEl = el("practiceCoachTone");
+    const msgEl = el("practiceCoachMessage");
+    const card = toneEl?.closest(".practice-coach-card") || msgEl?.closest(".practice-coach-card");
+    if (card) card.classList.toggle("is-thinking", Boolean(active));
+    if (active) {
+      if (toneEl) toneEl.textContent = toneText;
+      if (msgEl && messageText) msgEl.textContent = messageText;
+    }
+  }
+
+  function clearPendingOpUI({ force = false } = {}) {
+    if (local.pendingOpTimer) {
+      clearInterval(local.pendingOpTimer);
+      local.pendingOpTimer = null;
+    }
+    if (local.pendingOpNodes.length > 0) {
+      for (const node of local.pendingOpNodes.splice(0, local.pendingOpNodes.length)) {
+        try {
+          node.remove();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    setButtonLoading("practiceSendBtn", false, null, "Send");
+    setButtonLoading("practiceHintBtn", false, null, "Hint");
+    setButtonLoading("practiceNextQBtn", false, null, "Next Q");
+    const keepDebriefing = !force && local.session?.phase === "debriefing";
+    if (!keepDebriefing) {
+      setButtonLoading("practiceDebriefBtn", false, null, "End & CARL Debrief");
+      setCoachRailThinking(false);
+    }
+    setButtonLoading("practiceRetrySubmitBtn", false, null, "Evaluate Retry");
+  }
+
+  function startPendingTimer(onTick, startedAtMs = Date.now()) {
+    if (local.pendingOpTimer) {
+      clearInterval(local.pendingOpTimer);
+      local.pendingOpTimer = null;
+    }
+    const startedAt = Number.isFinite(startedAtMs) && startedAtMs > 0 ? startedAtMs : Date.now();
+    onTick(Math.max(0, (Date.now() - startedAt) / 1000));
+    local.pendingOpTimer = window.setInterval(() => {
+      onTick(Math.max(0, (Date.now() - startedAt) / 1000));
+    }, 250);
+  }
+
+  function showPendingTurnCard({ container, roleClass = "pturn-interviewer", title = "AI Interviewer", stages = [], coachRailMsg = "" }) {
+    if (!container) return null;
+    const card = document.createElement("div");
+    card.className = `pturn ${roleClass} is-thinking`;
+    card.setAttribute("role", "status");
+    card.setAttribute("aria-live", "polite");
+    const initialText = stages[0]?.text || "Thinking…";
+    card.innerHTML = `
+      <div class="pturn-head">
+        <span>${escapeHtml(title)}</span>
+        <span class="thinking-elapsed" aria-hidden="true"></span>
+      </div>
+      <div class="pturn-body">
+        <span class="typing-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="thinking-stage-text">${escapeHtml(initialText)}</span>
+      </div>
+    `;
+    container.appendChild(card);
+    local.pendingOpNodes.push(card);
+    container.scrollTop = container.scrollHeight;
+
+    if (coachRailMsg) {
+      setCoachRailThinking(true, "Analyzing", coachRailMsg);
+    }
+
+    const stageEl = card.querySelector(".thinking-stage-text");
+    const elapsedEl = card.querySelector(".thinking-elapsed");
+    startPendingTimer((sec) => {
+      if (!card.isConnected) {
+        if (local.pendingOpTimer) {
+          clearInterval(local.pendingOpTimer);
+          local.pendingOpTimer = null;
+        }
+        return;
+      }
+      if (elapsedEl) {
+        if (sec >= 1.0) {
+          elapsedEl.textContent = `${sec.toFixed(1)}s`;
+          elapsedEl.classList.add("is-visible");
+        }
+      }
+      if (stageEl && stages.length > 0) {
+        let activeText = stages[0].text;
+        for (const st of stages) {
+          if (sec >= st.at) activeText = st.text;
+        }
+        if (stageEl.textContent !== activeText) {
+          stageEl.textContent = activeText;
+        }
+      }
+    });
+    return card;
+  }
+
+  function showPendingDebriefCard(container, startedAtMs = Date.now()) {
+    if (!container) return null;
+    for (const stale of container.querySelectorAll(".debrief-pending-card")) {
+      stale.remove();
+    }
+    const card = document.createElement("div");
+    card.className = "debrief-pending-card";
+    card.setAttribute("role", "status");
+    card.setAttribute("aria-live", "polite");
+    card.innerHTML = `
+      <div class="debrief-pending-head">
+        <span class="debrief-pending-title">
+          <span class="inline-spinner" aria-hidden="true"></span>
+          <span>Crafting your supportive CARL coaching report…</span>
+        </span>
+        <span class="thinking-elapsed" aria-hidden="true"></span>
+      </div>
+      <ul class="debrief-pending-steps">
+        <li data-step="0" class="is-active"><span class="debrief-step-dot"></span><span>Reviewing your transcript &amp; workspace</span></li>
+        <li data-step="1"><span class="debrief-step-dot"></span><span>Scoring Context · Action · Result · Learning signals</span></li>
+        <li data-step="2"><span class="debrief-step-dot"></span><span>Building your 45-second Retry Weak Part drill</span></li>
+      </ul>
+      <div class="debrief-skeleton-lines" aria-hidden="true">
+        <div class="debrief-skeleton-line" style="width: 88%"></div>
+        <div class="debrief-skeleton-line" style="width: 72%"></div>
+        <div class="debrief-skeleton-line" style="width: 54%"></div>
+      </div>
+    `;
+    container.appendChild(card);
+    local.pendingOpNodes.push(card);
+    container.scrollTop = container.scrollHeight;
+
+    setCoachRailThinking(
+      true,
+      "Debriefing",
+      "Synthesizing your strengths, CARL breakdown, and 45-second retry drill…"
+    );
+
+    const elapsedEl = card.querySelector(".thinking-elapsed");
+    const stepEls = Array.from(card.querySelectorAll(".debrief-pending-steps li"));
+    startPendingTimer((sec) => {
+      if (!card.isConnected) {
+        if (local.pendingOpTimer) {
+          clearInterval(local.pendingOpTimer);
+          local.pendingOpTimer = null;
+        }
+        return;
+      }
+      if (elapsedEl && sec >= 1.0) {
+        elapsedEl.textContent = `${sec.toFixed(1)}s`;
+        elapsedEl.classList.add("is-visible");
+      }
+      const curStep = sec >= 5.5 ? 2 : sec >= 2.2 ? 1 : 0;
+      stepEls.forEach((li, idx) => {
+        li.classList.toggle("is-done", idx < curStep);
+        li.classList.toggle("is-active", idx === curStep);
+      });
+    }, startedAtMs);
+    return card;
   }
 
   function setBusy(busy) {
@@ -1522,18 +1729,26 @@ export function createPracticeStudioController({
     if (!opMachine.transition("starting", { event: "start_practice" })) return;
 
     local.sessionGen += 1;
+    local.debriefStartedAt = 0;
     const mySessionGen = local.sessionGen;
     stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
+    clearPendingOpUI({ force: true });
     resetWorkspaceSaveState();
     clearDraftInputs();
 
     const btn = el("practiceStartBtn");
     const lbl = el("practiceStartBtnLabel");
-    if (btn) btn.disabled = true;
+    const hintEl = el("practiceStartHint");
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add("is-loading");
+      btn.setAttribute("aria-busy", "true");
+    }
     if (lbl) lbl.textContent = "Preparing your interview…";
+    if (hintEl) hintEl.classList.add("is-loading");
 
     const roleTitle = (el("setupRoleInput")?.value || "").trim();
     const fmt = getSelectedFormat();
@@ -1541,6 +1756,19 @@ export function createPracticeStudioController({
     const liveNudges = Boolean(el("practiceNudgesCheckbox")?.checked ?? true);
     const voiceOn = Boolean(el("practiceVoiceCheckbox")?.checked ?? true);
     local.voiceEnabled = voiceOn;
+
+    const isTailored = local.questionSource !== "bank_only";
+    startPendingTimer((sec) => {
+      if (!hintEl) return;
+      const suffix = sec >= 1.5 ? ` (${sec.toFixed(1)}s)` : "";
+      if (sec >= 6.0) {
+        hintEl.textContent = `Still working — waiting on model response to open your session…${suffix}`;
+      } else if (sec >= 2.2 && isTailored) {
+        hintEl.textContent = `Tailoring interview questions to your redacted resume & JD…${suffix}`;
+      } else {
+        hintEl.textContent = `Selecting prompts and warming up your AI interviewer…${suffix}`;
+      }
+    });
 
     try {
       const res = await fetch("/api/practice/start", {
@@ -1576,8 +1804,17 @@ export function createPracticeStudioController({
         showToast(String(err.message || err), 3500);
       }
     } finally {
-      if (btn) btn.disabled = false;
+      clearPendingOpUI();
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove("is-loading");
+        btn.setAttribute("aria-busy", "false");
+      }
       if (lbl) lbl.textContent = "Start AI mock interview";
+      if (hintEl) {
+        hintEl.classList.remove("is-loading");
+        hintEl.textContent = DEFAULT_PRACTICE_START_HINT;
+      }
       if (opMachine.state === "starting") {
         opMachine.transition("idle", { event: "start_practice_done" });
       }
@@ -1596,11 +1833,13 @@ export function createPracticeStudioController({
     if (!opMachine.transition("opening", { event: "open_practice" })) return;
 
     local.sessionGen += 1;
+    local.debriefStartedAt = 0;
     const mySessionGen = local.sessionGen;
     stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
+    clearPendingOpUI({ force: true });
     resetWorkspaceSaveState();
     clearDraftInputs();
     try {
@@ -1653,18 +1892,26 @@ export function createPracticeStudioController({
 
       if (explicitText === null && inputEl) inputEl.value = "";
 
-      // Optimistic render of candidate's message while AI thinks
+      setButtonLoading("practiceSendBtn", true, "Thinking…");
+
+      // Optimistic render of candidate's message + staged AI Interviewer thinking card
       const feed = el("practiceFeed");
       if (feed) {
         const pendingEl = document.createElement("div");
         pendingEl.className = "pturn pturn-candidate";
         pendingEl.innerHTML = `<div class="pturn-head">You</div><div class="pturn-body">${formatWithNewlines(text)}</div>`;
         feed.appendChild(pendingEl);
-        const thinkingEl = document.createElement("div");
-        thinkingEl.className = "pturn pturn-interviewer is-thinking";
-        thinkingEl.innerHTML = `<div class="pturn-head">AI Interviewer</div><div class="pturn-body">Thinking…</div>`;
-        feed.appendChild(thinkingEl);
-        feed.scrollTop = feed.scrollHeight;
+        showPendingTurnCard({
+          container: feed,
+          roleClass: "pturn-interviewer",
+          title: "AI Interviewer",
+          stages: [
+            { at: 0, text: "Reviewing your answer…" },
+            { at: 2.2, text: "Checking CARL signals & crafting a follow-up…" },
+            { at: 6.5, text: "Still thinking — waiting on model response…" },
+          ],
+          coachRailMsg: "Evaluating your answer's CARL signals and crafting a live nudge…",
+        });
       }
 
       const wsCtx = getActiveWorkspaceContext();
@@ -1691,6 +1938,7 @@ export function createPracticeStudioController({
         renderPracticeSession();
       }
     } finally {
+      clearPendingOpUI();
       if (opMachine.state === "submitting_turn") {
         opMachine.transition("idle", { event: "submit_turn_done" });
       }
@@ -1707,6 +1955,18 @@ export function createPracticeStudioController({
     if (!opMachine.transition("requesting_hint", { event: "request_hint" })) return;
     stopSpeaking();
     setBusy(true);
+    setButtonLoading("practiceHintBtn", true, "Hint…");
+    showPendingTurnCard({
+      container: el("practiceFeed"),
+      roleClass: "pturn-coach",
+      title: "Supportive Coach",
+      stages: [
+        { at: 0, text: "Crafting a gentle hint without giving it away…" },
+        { at: 2.5, text: "Checking your progress & workspace context…" },
+        { at: 6.5, text: "Still thinking — waiting on model response…" },
+      ],
+      coachRailMsg: "Finding the most helpful nudge for where you are…",
+    });
     try {
       const wsCtx = getActiveWorkspaceContext();
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/hint`, {
@@ -1722,8 +1982,10 @@ export function createPracticeStudioController({
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         showToast(String(err.message || err), 3000);
+        renderPracticeSession();
       }
     } finally {
+      clearPendingOpUI();
       if (opMachine.state === "requesting_hint") {
         opMachine.transition("idle", { event: "request_hint_done" });
       }
@@ -1742,6 +2004,17 @@ export function createPracticeStudioController({
     stopSpeaking();
     abortMicRecording();
     setBusy(true);
+    setButtonLoading("practiceNextQBtn", true, "Loading…");
+    showPendingTurnCard({
+      container: el("practiceFeed"),
+      roleClass: "pturn-interviewer",
+      title: "AI Interviewer",
+      stages: [
+        { at: 0, text: "Preparing the next question…" },
+        { at: 2.5, text: "Tailoring the transition from your last answer…" },
+        { at: 6.5, text: "Still thinking — waiting on model response…" },
+      ],
+    });
     try {
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/next`, {
         method: "POST",
@@ -1763,8 +2036,10 @@ export function createPracticeStudioController({
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         showToast(String(err.message || err), 3000);
+        renderPracticeSession();
       }
     } finally {
+      clearPendingOpUI();
       if (opMachine.state === "advancing") {
         opMachine.transition("idle", { event: "advance_question_done" });
       }
@@ -1783,8 +2058,9 @@ export function createPracticeStudioController({
     if (!opMachine.transition("debriefing", { event: "run_debrief" })) return;
     setBusy(true);
     stopSpeaking();
-    const btn = el("practiceDebriefBtn");
-    if (btn) btn.textContent = "Generating CARL coaching…";
+    setButtonLoading("practiceDebriefBtn", true, "Generating CARL coaching…");
+    local.debriefStartedAt = Date.now();
+    showPendingDebriefCard(el("practiceFeed"), local.debriefStartedAt);
     try {
       if (micMachine.state === "recording" && local.recordingTarget) {
         await stopMicAndTranscribe();
@@ -1813,10 +2089,11 @@ export function createPracticeStudioController({
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         showToast(String(err.message || err), 3400);
+        renderPracticeSession();
       }
     } finally {
-      if (btn && local.session?.phase !== "debriefing") {
-        btn.textContent = "End & CARL Debrief";
+      if (local.session?.phase !== "debriefing") {
+        clearPendingOpUI();
       }
       if (opMachine.state === "debriefing") {
         opMachine.transition("idle", { event: "run_debrief_done" });
@@ -1899,7 +2176,6 @@ export function createPracticeStudioController({
     const mySessionGen = local.sessionGen;
     if (!opMachine.transition("submitting_retry", { event: "submit_retry" })) return;
     setBusy(true);
-    const btn = el("practiceRetrySubmitBtn");
     try {
       if (micMachine.state === "recording" && local.recordingTarget === "retry") {
         await stopMicAndTranscribe();
@@ -1912,7 +2188,17 @@ export function createPracticeStudioController({
         showToast("Record or type your 45-second retry answer first.", 2600);
         return;
       }
-      if (btn) btn.textContent = "Evaluating retry…";
+      setButtonLoading("practiceRetrySubmitBtn", true, "Evaluating retry…");
+      showPendingTurnCard({
+        container: el("practiceRetryHistory"),
+        roleClass: "pturn-coach",
+        title: "CARL Retry Coach",
+        stages: [
+          { at: 0, text: "Comparing your retry against your original answer…" },
+          { at: 2.5, text: "Writing before → after coaching feedback…" },
+          { at: 6.5, text: "Still working — waiting on model response…" },
+        ],
+      });
       const drill = local.session.debrief?.retry_drill || {};
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/retry`, {
         method: "POST",
@@ -1936,7 +2222,7 @@ export function createPracticeStudioController({
         showToast(String(err.message || err), 3200);
       }
     } finally {
-      if (btn) btn.textContent = "Evaluate Retry";
+      clearPendingOpUI();
       if (opMachine.state === "submitting_retry") {
         opMachine.transition("idle", { event: "submit_retry_done" });
       }
@@ -2181,10 +2467,10 @@ export function createPracticeStudioController({
       debriefBtn.classList.toggle("hidden", isCompleted);
       if (isDebriefing) {
         debriefBtn.disabled = true;
-        debriefBtn.textContent = "Generating debrief…";
+        setButtonLoading("practiceDebriefBtn", true, "Generating debrief…");
       } else if (opMachine.state === "idle") {
         debriefBtn.disabled = false;
-        debriefBtn.textContent = "End & CARL Debrief";
+        setButtonLoading("practiceDebriefBtn", false, null, "End & CARL Debrief");
       }
     }
 
@@ -2216,6 +2502,10 @@ export function createPracticeStudioController({
     const feed = el("practiceFeed");
     if (feed && !isCompleted) {
       feed.innerHTML = (sess.turns || []).map(renderTurnCard).join("");
+      if (isDebriefing) {
+        if (!local.debriefStartedAt) local.debriefStartedAt = Date.now();
+        showPendingDebriefCard(feed, local.debriefStartedAt);
+      }
       feed.scrollTop = feed.scrollHeight;
     }
 
@@ -2261,7 +2551,11 @@ export function createPracticeStudioController({
     if (isDebriefing) {
       ensureDebriefPoll();
     } else {
+      local.debriefStartedAt = 0;
       stopDebriefPoll();
+      if (opMachine.state === "idle") {
+        clearPendingOpUI();
+      }
     }
 
     // Question Roadmap
@@ -2305,6 +2599,7 @@ export function createPracticeStudioController({
       micTarget: local.micTarget,
       voiceEnabled: local.voiceEnabled,
       isSpeaking: local.isSpeaking,
+      speakingState: local.speakingState,
       retryTimerState: retryTimerMachine.state,
       retrySecondsLeft: local.retrySecondsLeft,
       workspaceSaveState: workspaceSaveMachine.state,
