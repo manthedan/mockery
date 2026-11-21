@@ -20,7 +20,7 @@ from parakeet_mlx.audio import get_logmel
 from parakeet_mlx.cache import RotatingConformerCache
 from parakeet_mlx.conformer import DwStridingSubsampling
 
-from .models import PARAKEET_CHECKPOINTS
+from .models import DEFAULT_PARAKEET_MODEL, PARAKEET_CHECKPOINTS
 from .state_machines import ASR_MODEL_TRANSITIONS, ASRModelState
 
 logger = logging.getLogger(__name__)
@@ -528,7 +528,7 @@ class ParakeetEngine:
     """
 
     def __init__(self, model_id: str | None = None) -> None:
-        self.model_id = model_id or os.getenv("PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
+        self.model_id = model_id or os.getenv("PARAKEET_MODEL", DEFAULT_PARAKEET_MODEL)
         self._model: BaseParakeet | None = None
         self._fast_decoder: FastTDTGreedyDecoder | None = None
         self._optimization_mode: str = "unloaded"

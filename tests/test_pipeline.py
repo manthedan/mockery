@@ -329,20 +329,23 @@ def test_codex_review_regressions(tmp_path: Path, monkeypatch) -> None:
     from mock_helper.models import DiveDeeperResponse, ProbeSuggestion
     from mock_helper.storage import SessionAudioArchive
 
-    # 1. Provider-scoped API key fallback + persisted PARAKEET_MODEL on startup
+    # 1. Default English Parakeet v2 + provider-scoped API key fallback + persisted PARAKEET_MODEL override
+    monkeypatch.delenv("PARAKEET_MODEL", raising=False)
+    assert LLMRuntimeConfig(tmp_path).parakeet_model == "mlx-community/parakeet-tdt-0.6b-v2"
+
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-secret")
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     (tmp_path / ".env.local").write_text(
-        "LLM_PROVIDER=openai\nPARAKEET_MODEL=mlx-community/parakeet-tdt-0.6b-v2\n",
+        "LLM_PROVIDER=openai\nPARAKEET_MODEL=mlx-community/parakeet-tdt-0.6b-v3\n",
         encoding="utf-8",
     )
     cfg = LLMRuntimeConfig(tmp_path)
     assert cfg.api_key == "sk-openai-secret"
-    assert cfg.parakeet_model == "mlx-community/parakeet-tdt-0.6b-v2"
+    assert cfg.parakeet_model == "mlx-community/parakeet-tdt-0.6b-v3"
 
     app = create_app(project_root=tmp_path, preload_asr=False)
-    assert app.state.runtime.asr.model_id == "mlx-community/parakeet-tdt-0.6b-v2"
+    assert app.state.runtime.asr.model_id == "mlx-community/parakeet-tdt-0.6b-v3"
     client = TestClient(app)
 
     # 2. Reject untrusted cross-site WebSocket & HTTP POST Origins
