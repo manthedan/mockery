@@ -39,6 +39,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "omlx": "OMLX_API_KEY",
 }
 
 CLI_BACKEND_MAP: dict[str, str] = {
@@ -49,11 +50,11 @@ CLI_BACKEND_MAP: dict[str, str] = {
     "pi": "pi",
 }
 
-LOCAL_HTTP_PROVIDERS = {"ollama", "lmstudio"}
+LOCAL_HTTP_PROVIDERS = {"omlx", "ollama", "lmstudio"}
 
 
 class LLMRuntimeConfig:
-    """Manages OpenAI-compatible, native Anthropic, local Ollama/LM Studio, & local CLI LLM + ASR config with `.env.local` persistence."""
+    """Manages OpenAI-compatible, native Anthropic, local oMLX/Ollama/LM Studio, & local CLI LLM + ASR config with `.env.local` persistence."""
 
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
@@ -1540,12 +1541,16 @@ def _friendly_connection_hint(cfg: LLMRuntimeConfig, err_msg: str) -> str:
     if cfg.cli_backend:
         return f"Make sure `{cfg.cli_backend}` is signed in on your Mac (try running it once in Terminal)."
     if "401" in low or "unauthorized" in low or "invalid api key" in low or "authentication" in low:
+        if cfg.provider == "omlx":
+            return "oMLX requires an API key — paste your oMLX API key (or set OMLX_API_KEY) in Settings."
         return "Double-check that your API key is copied completely and has not expired."
-    if "404" in low or "model" in low and "not found" in low:
+    if "404" in low or ("model" in low and "not found" in low):
         return f"Model `{cfg.fast_model}` was not found by this provider — check the model name in Advanced settings."
     if "429" in low or "quota" in low or "rate limit" in low:
         return "Provider returned a rate limit or quota error — verify billing/free-tier quota."
     if cfg.provider in LOCAL_HTTP_PROVIDERS or "connection" in low or "refused" in low:
+        if cfg.provider == "omlx":
+            return "oMLX does not appear to be running. Open the oMLX menu-bar app (or run `omlx serve`) and load a model first."
         if cfg.provider == "ollama":
             return "Ollama does not appear to be running. Open Ollama (or run `ollama serve`) and pull a model first."
         if cfg.provider == "lmstudio":
@@ -1563,6 +1568,79 @@ def get_system_memory_gb() -> int | None:
     except (ValueError, OSError, AttributeError):
         pass
     return None
+
+
+def _resolve_omlx_probe_target() -> tuple[int, str]:
+    """Read oMLX's port (OMLX_PORT -> ~/.omlx/settings.json -> 8000) and optional API key for local probing."""
+    port = 8000
+    api_key = os.getenv("OMLX_API_KEY", "").strip()
+    settings_path = Path.home() / ".omlx" / "settings.json"
+    if settings_path.is_file():
+        try:
+            raw = json.loads(settings_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                cand_port = raw.get("port")
+                if cand_port is None and isinstance(raw.get("server"), dict):
+                    cand_port = raw["server"].get("port")
+                if isinstance(cand_port, int) and 1 <= cand_port <= 65535:
+                    port = cand_port
+                elif isinstance(cand_port, str) and cand_port.isdigit():
+                    p = int(cand_port)
+                    if 1 <= p <= 65535:
+                        port = p
+                if not api_key:
+                    cand_key = raw.get("api_key")
+                    if cand_key is None and isinstance(raw.get("auth"), dict):
+                        cand_key = raw["auth"].get("api_key")
+                    if isinstance(cand_key, str) and cand_key.strip():
+                        api_key = cand_key.strip()
+        except Exception:
+            pass
+    env_port = os.getenv("OMLX_PORT", "").strip()
+    if env_port.isdigit():
+        p = int(env_port)
+        if 1 <= p <= 65535:
+            port = p
+    return port, api_key
+
+
+async def _probe_omlx(timeout: float = 0.6) -> dict[str, Any]:
+    port, api_key = _resolve_omlx_probe_target()
+    base_url = f"http://localhost:{port}/v1"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            resp = await http.get(f"http://127.0.0.1:{port}/v1/models", headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and isinstance(data.get("data"), list):
+                    models = [
+                        str(m.get("id", "")).strip()
+                        for m in data["data"]
+                        if isinstance(m, dict) and m.get("id")
+                    ]
+                    return {
+                        "running": True,
+                        "models": models,
+                        "base_url": base_url,
+                        "auth_required": False,
+                    }
+            elif resp.status_code in (401, 403):
+                omlx_present = (
+                    (Path.home() / ".omlx").exists()
+                    or shutil.which("omlx") is not None
+                    or Path("/Applications/oMLX.app").exists()
+                )
+                if omlx_present:
+                    return {
+                        "running": True,
+                        "models": [],
+                        "base_url": base_url,
+                        "auth_required": True,
+                    }
+    except Exception:
+        pass
+    return {"running": False, "models": [], "base_url": base_url, "auth_required": False}
 
 
 async def _probe_ollama(timeout: float = 0.6) -> dict[str, Any]:
@@ -1603,7 +1681,7 @@ async def discover_available_providers() -> dict[str, Any]:
     """
     Fast (<600ms) local discovery of:
       - Installed subscription CLIs (`claude`, `codex`, `gemini`, `agy`, `pi`)
-      - Running local OpenAI-compatible runtimes (Ollama, LM Studio) and their installed models
+      - Running local OpenAI-compatible runtimes (oMLX, Ollama, LM Studio) and their installed models
       - Host unified memory in GB (to guide local-LLM expectations)
     """
     detected_clis: list[dict[str, Any]] = []
@@ -1625,7 +1703,9 @@ async def discover_available_providers() -> dict[str, Any]:
                 }
             )
 
-    ollama_info, lmstudio_info = await asyncio.gather(_probe_ollama(), _probe_lmstudio())
+    omlx_info, ollama_info, lmstudio_info = await asyncio.gather(
+        _probe_omlx(), _probe_ollama(), _probe_lmstudio()
+    )
 
     env_keys_present = [
         prov
@@ -1636,6 +1716,7 @@ async def discover_available_providers() -> dict[str, Any]:
     return {
         "detected_clis": detected_clis,
         "local_servers": {
+            "omlx": omlx_info,
             "ollama": ollama_info,
             "lmstudio": lmstudio_info,
         },

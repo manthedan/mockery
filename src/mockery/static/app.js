@@ -2721,7 +2721,12 @@ async function openSettingsModal() {
     .filter(([, val]) => val.category === "local")
     .map(([key, val]) => {
       const srv = localServers[key];
-      const badge = srv?.running ? ` · Running (${(srv.models || []).length} models)` : " · Offline";
+      let badge = " · Offline";
+      if (srv?.running) {
+        badge = srv.auth_required
+          ? " · Running (API key required)"
+          : ` · Running (${(srv.models || []).length} models)`;
+      }
       return `<option value="${escapeHtml(key)}">${escapeHtml(val.label || key)}${badge}</option>`;
     });
 
@@ -2743,12 +2748,15 @@ async function openSettingsModal() {
   el("llmCalibModelInput").value = data.llm.calibration_model || "";
   el("llmApiKeyInput").value = "";
 
+  const localRuntimeName = (providerKey) =>
+    providerKey === "omlx" ? "oMLX" : providerKey === "ollama" ? "Ollama" : "LM Studio";
+
   const populateLocalModelPicker = (providerKey) => {
     const localRow = el("localModelRow");
     const localSelect = el("localModelSelect");
     const ramNote = el("localRamNote");
     const srv = localServers[providerKey];
-    const isLocal = providerKey === "ollama" || providerKey === "lmstudio";
+    const isLocal = presets[providerKey]?.category === "local";
     localRow.classList.toggle("hidden", !isLocal);
     if (!isLocal) return;
 
@@ -2772,26 +2780,35 @@ async function openSettingsModal() {
       };
     } else {
       localSelect.disabled = true;
-      localSelect.innerHTML = `<option value="">${
-        srv?.running ? "No models pulled yet" : `${providerKey === "ollama" ? "Ollama" : "LM Studio"} is not running`
-      }</option>`;
+      let emptyLabel = `${localRuntimeName(providerKey)} is not running`;
+      if (srv?.running && srv.auth_required) {
+        emptyLabel = `${localRuntimeName(providerKey)} requires an API key — enter it above`;
+      } else if (srv?.running) {
+        emptyLabel = "No models loaded yet";
+      }
+      localSelect.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>`;
     }
     const memGb = disc.system_memory_gb;
     if (ramNote) {
       ramNote.textContent = memGb
-        ? `Your Mac has ${memGb} GB unified memory${memGb >= 16 ? " (handles 7B–14B local models smoothly)." : " (8B or smaller models recommended, or use a Cloud API)."}`
+        ? `Your Mac has ${memGb} GB unified memory${memGb >= 16 ? " (handles 7B–14B+ local models smoothly)." : " (8B or smaller models recommended, or use a Cloud API)."}`
         : "16 GB+ unified memory recommended for local LLMs.";
     }
   };
 
   const updateProviderFields = (providerKey) => {
     const preset = presets[providerKey] || {};
+    const srv = localServers[providerKey];
     const isNone = providerKey === "none";
     const isCli = preset.category === "cli";
     const isLocal = preset.category === "local";
     const needsKey = Boolean(preset.requires_key);
+    const showOptionalKey =
+      Boolean(preset.optional_key) &&
+      (Boolean(srv?.auth_required) || (providerKey === data.llm.provider && Boolean(data.llm.has_api_key)));
+    const showKeyRow = needsKey || showOptionalKey;
 
-    el("apiKeyRow").classList.toggle("hidden", !needsKey);
+    el("apiKeyRow").classList.toggle("hidden", !showKeyRow);
     el("advancedLlmDetails").classList.toggle("hidden", isNone);
     el("baseUrlRow").classList.toggle("hidden", isCli);
     el("testLlmBtn").classList.toggle("hidden", isNone);
@@ -2812,23 +2829,36 @@ async function openSettingsModal() {
       hintEl.textContent = preset.hint || "";
       if (preset.signup_url) {
         signupEl.href = preset.signup_url;
-        signupEl.textContent = isLocal ? `Download ${preset.label.split(" ")[0]} ↗` : "Get API key ↗";
+        signupEl.textContent = isLocal ? `Get ${localRuntimeName(providerKey)} ↗` : "Get API key ↗";
         signupEl.classList.remove("hidden");
       } else {
         signupEl.classList.add("hidden");
       }
     }
 
-    if (needsKey) {
+    if (showKeyRow) {
       const sameProvider = providerKey === data.llm.provider;
-      el("maskedKeyHint").textContent =
-        sameProvider && data.llm.has_api_key
-          ? `Saved key: ${data.llm.masked_api_key}`
-          : "No key saved yet.";
-      el("llmApiKeyInput").placeholder =
-        sameProvider && data.llm.has_api_key
-          ? "Leave blank to keep saved key"
-          : `Paste your ${preset.label || providerKey} API key`;
+      if (showOptionalKey && !needsKey) {
+        el("maskedKeyHint").textContent =
+          sameProvider && data.llm.has_api_key
+            ? `Saved key: ${data.llm.masked_api_key}`
+            : srv?.auth_required
+              ? `${localRuntimeName(providerKey)} has API key auth enabled.`
+              : "Optional — leave blank if local auth is disabled.";
+        el("llmApiKeyInput").placeholder =
+          sameProvider && data.llm.has_api_key
+            ? "Leave blank to keep saved key"
+            : `Paste your ${localRuntimeName(providerKey)} API key`;
+      } else {
+        el("maskedKeyHint").textContent =
+          sameProvider && data.llm.has_api_key
+            ? `Saved key: ${data.llm.masked_api_key}`
+            : "No key saved yet.";
+        el("llmApiKeyInput").placeholder =
+          sameProvider && data.llm.has_api_key
+            ? "Leave blank to keep saved key"
+            : `Paste your ${preset.label || providerKey} API key`;
+      }
     }
 
     populateLocalModelPicker(providerKey);
@@ -2838,12 +2868,14 @@ async function openSettingsModal() {
   syncModelChoosers({ redetect: true });
 
   presetSelect.onchange = () => {
-    const p = presets[presetSelect.value];
+    const provKey = presetSelect.value;
+    const p = presets[provKey];
+    const srv = localServers[provKey];
     if (p) {
-      el("llmBaseUrlInput").value = p.base_url || "";
+      el("llmBaseUrlInput").value = (srv?.base_url || p.base_url || "");
       el("llmFastModelInput").value = p.fast_model || "";
       el("llmCalibModelInput").value = p.calibration_model || "";
-    } else if (presetSelect.value === "none") {
+    } else if (provKey === "none") {
       el("llmBaseUrlInput").value = "";
       el("llmFastModelInput").value = "";
       el("llmCalibModelInput").value = "";
@@ -2851,7 +2883,7 @@ async function openSettingsModal() {
     if (testResultEl) {
       testResultEl.classList.add("hidden");
     }
-    updateProviderFields(presetSelect.value);
+    updateProviderFields(provKey);
     syncModelChoosers({ redetect: true });
   };
 
@@ -2962,9 +2994,9 @@ async function openOnboardingModal(statusData = null) {
     });
   }
   const localSrv = disc.local_servers || {};
-  for (const localKey of ["ollama", "lmstudio"]) {
+  for (const localKey of ["omlx", "ollama", "lmstudio"]) {
     const srv = localSrv[localKey];
-    if (srv?.running && (srv.models || []).length > 0) {
+    if (srv?.running && !srv.auth_required && (srv.models || []).length > 0) {
       const m = srv.models[0];
       const p = presets[localKey] || {};
       detectedItems.push({
@@ -2972,7 +3004,7 @@ async function openOnboardingModal(statusData = null) {
         label: `${p.label || localKey} (${m})`,
         sub: `${srv.models.length} local model${srv.models.length === 1 ? "" : "s"} ready offline on your Mac`,
         badge: "Use offline →",
-        base_url: p.base_url || "",
+        base_url: srv.base_url || p.base_url || "",
         fast_model: m,
         calibration_model: m,
       });
