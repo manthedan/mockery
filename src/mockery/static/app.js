@@ -1,3 +1,5 @@
+import { createProfileAddonsController } from "./profile_addons.js";
+
 const CHANNEL_INTERVIEWER = 0x01;
 const CHANNEL_CANDIDATE = 0x02;
 const CHANNEL_ROOM_MIC = 0x03;
@@ -102,7 +104,11 @@ const state = {
   discovery: null,
   onboardingChecked: false,
   onboardProvider: "gemini",
+  addons: null,
+  profileSummary: null,
 };
+
+let profileAddons = null;
 
 const _mockeryStateDescriptor = {
   get() {
@@ -117,6 +123,8 @@ const _mockeryStateDescriptor = {
       theme: document.documentElement.getAttribute("data-theme"),
       asr: state.asr,
       diarizer: state.diarizer,
+      addons: state.addons,
+      profileSummary: state.profileSummary,
       serverMachines: state.session?.state_machines || null,
     };
   },
@@ -199,6 +207,7 @@ function setModalState(next) {
   el("settingsModal").classList.toggle("hidden", next !== "settings");
   el("historyModal").classList.toggle("hidden", next !== "history");
   el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
+  el("profileModal")?.classList.toggle("hidden", next !== "profile");
 }
 
 function closeAllPopovers() {
@@ -2676,6 +2685,8 @@ async function openSettingsModal() {
   const data = await statusRes.json();
   state.llm = data.llm;
   syncHomeAiPrompt(data.llm);
+  profileAddons?.applyStatusSnapshot(data);
+  profileAddons?.renderAddonsSection();
 
   const testResultEl = el("testLlmResult");
   if (testResultEl) {
@@ -3182,6 +3193,7 @@ async function checkInitialOnboarding() {
     const data = await res.json();
     state.llm = data.llm;
     syncHomeAiPrompt(data.llm);
+    profileAddons?.applyStatusSnapshot(data);
     if (data.llm?.needs_onboarding && state.modalState === "none") {
       await openOnboardingModal(data);
     }
@@ -3939,6 +3951,23 @@ function initEvents() {
 
 initTheme();
 initEvents();
+profileAddons = createProfileAddonsController({
+  state,
+  el,
+  escapeHtml,
+  showToast,
+  setModalState,
+  onRoleApply: (jd) => {
+    if (!jd?.title) return;
+    const roleLabel = jd.company ? `${jd.title} (${jd.company})` : jd.title;
+    el("setupRoleInput").value = roleLabel;
+    el("roleInput").value = roleLabel;
+    if (el("contextRoleSummary")) {
+      el("contextRoleSummary").textContent = roleLabel;
+    }
+    pushSessionConfig();
+  },
+});
 renderSpeakerToggle();
 renderCaptureControls();
 connectWS();

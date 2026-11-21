@@ -17,7 +17,7 @@
         document.documentElement.setAttribute("data-theme", resolved);
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=mockery1" />
+    <link rel="stylesheet" href="/static/styles.css?v=mockery3" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -128,6 +128,10 @@
           <div class="topbar-utils" role="group" aria-label="App">
             <button id="newSessionBtn" class="btn btn-ghost session-only" type="button" title="Start a new interview">New</button>
             <button id="historyBtn" class="btn btn-ghost session-only" type="button" title="Past interviews">History</button>
+            <button id="profileBtn" class="btn btn-ghost" type="button" title="Resume redaction, target job listing, and question banks">
+              <span>Profile</span>
+              <span id="profileReadyDot" class="tab-dot hidden" aria-hidden="true"></span>
+            </button>
             <button id="settingsBtn" class="btn btn-ghost btn-icon" type="button" title="Settings" aria-label="Settings">
               <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M2.5 4.75h5.25M11 4.75h2.5M2.5 11.25h2.5M8.25 11.25h5.25" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
@@ -208,6 +212,19 @@
                   <span>Keep the audio file on this Mac</span>
                 </span>
               </label>
+
+              <div class="prop">
+                <span class="prop-label">Context</span>
+                <div class="prop-value home-profile-row">
+                  <span id="homeProfileSummary" class="home-profile-summary">
+                    Optional — upload resume (redacted locally) &amp; target job listing
+                  </span>
+                  <div class="home-profile-actions">
+                    <button id="homeApplyJdRoleBtn" class="link-quiet hidden" type="button">Use JD role</button>
+                    <button id="homeEditProfileBtn" class="btn btn-outline btn-sm" type="button">Profile &amp; JD…</button>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div class="home-cta">
@@ -532,6 +549,19 @@
             </div>
           </div>
 
+          <div id="settingsAddonsSection" class="set-section">
+            <div class="set-section-head">
+              <div>
+                <div class="set-section-title">Add-Ons &amp; Optional Modules</div>
+                <p class="set-section-note">Keep the core app lean, or toggle practice studios and download local on-device models on demand.</p>
+              </div>
+            </div>
+            <div class="addons-subhead">Modules (instant toggle)</div>
+            <div id="addonsModulesList" class="addons-list"></div>
+            <div class="addons-subhead">Downloadable local packs</div>
+            <div id="addonsPacksList" class="addons-list"></div>
+          </div>
+
           <div class="set-section">
             <div class="set-section-head">
               <div>
@@ -618,6 +648,163 @@
       </div>
     </div>
 
-    <script type="module" src="/static/app.js?v=mockery2"></script>
+    <!-- Candidate Profile, Local PII Redaction, Target Job Listing & Question Banks -->
+    <div id="profileModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
+      <div class="modal-card modal-card-xl">
+        <div class="modal-header">
+          <div class="profile-modal-head-left">
+            <h3 id="profileModalTitle">Candidate Profile</h3>
+            <div class="tabs profile-tabs" role="tablist" aria-label="Profile sections">
+              <button type="button" class="tab active" role="tab" aria-selected="true" data-profile-tab="resume">Resume &amp; Privacy</button>
+              <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="jd">Target Job</button>
+              <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="banks">Question Banks</button>
+            </div>
+          </div>
+          <button id="closeProfileBtn" class="btn btn-ghost btn-icon" type="button" aria-label="Close profile">
+            <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body profile-modal-body">
+          <!-- Tab 1: Resume & Rampart Local PII Redaction -->
+          <section id="profileTabResume" class="profile-tab-panel">
+            <div class="rampart-banner">
+              <div class="rampart-banner-info">
+                <span id="rampartEngineBadge" class="rampart-badge">Checking local redactor…</span>
+                <span class="set-note">Your raw resume stays on this Mac. Only the scrubbed preview below is ever sent to cloud LLMs.</span>
+              </div>
+              <button id="installRampartQuickBtn" class="btn btn-outline btn-sm hidden" type="button">Install Rampart (14.7 MB)</button>
+            </div>
+
+            <input id="resumeFileInput" type="file" accept=".pdf,.docx,.txt,.md,.rtf" class="hidden" />
+
+            <div id="resumeEmptyState" class="resume-dropzone" tabindex="0">
+              <div id="resumeDropzone" class="resume-dropzone-inner">
+                <div class="quiet-title">Upload your resume</div>
+                <p class="set-note">PDF, DOCX, or TXT — parsed and scrubbed locally with America.gov's Rampart ONNX classifier.</p>
+                <div class="resume-empty-actions">
+                  <button id="resumeChooseFileBtn" class="btn btn-primary" type="button">Choose file…</button>
+                  <button id="resumeTogglePasteBtn" class="btn btn-ghost" type="button">Paste text instead</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="resumePasteWrap" class="resume-paste-wrap hidden">
+              <textarea id="resumePasteTextarea" class="profile-textarea" rows="6" placeholder="Paste your resume text here…"></textarea>
+              <div class="profile-inline-actions">
+                <button id="resumeSubmitPasteBtn" class="btn btn-primary btn-sm" type="button">Scrub &amp; Save</button>
+              </div>
+            </div>
+
+            <div id="resumeLoadedState" class="hidden">
+              <div class="resume-header-bar">
+                <div>
+                  <div id="resumeFileTitle" class="resume-file-title">resume.pdf</div>
+                  <div id="resumeFileMeta" class="set-note"></div>
+                </div>
+                <div class="resume-header-actions">
+                  <button id="resumeReplaceBtn" class="btn btn-outline btn-sm" type="button">Replace file…</button>
+                  <button id="resumeDeleteBtn" class="btn btn-ghost btn-sm is-danger-text" type="button">Remove</button>
+                </div>
+              </div>
+
+              <div class="redaction-controls">
+                <label class="check-line">
+                  <input id="prefKeepLocation" class="studio-check" type="checkbox" checked />
+                  <span>Keep City / State</span>
+                </label>
+                <label class="check-line">
+                  <input id="prefHideOrgs" class="studio-check" type="checkbox" />
+                  <span>Hide Employers &amp; Schools</span>
+                </label>
+                <div class="redaction-custom-wrap">
+                  <input id="prefCustomTerms" class="field-input field-input-sm" type="text" placeholder="Extra words to scrub (comma-separated)" />
+                  <button id="prefApplyCustomBtn" class="btn btn-outline btn-sm" type="button">Apply</button>
+                </div>
+              </div>
+
+              <div class="redaction-section-label">
+                <span>Detected items — click any item to toggle redaction</span>
+              </div>
+              <div id="resumePiiChips" class="pii-chips-wrap"></div>
+
+              <div class="redaction-section-label">
+                <span>What leaves your Mac (exact text sent to AI)</span>
+              </div>
+              <pre id="resumeRedactedPreview" class="redacted-preview"></pre>
+            </div>
+          </section>
+
+          <!-- Tab 2: Target Job Listing -->
+          <section id="profileTabJd" class="profile-tab-panel hidden">
+            <div class="jd-import-box">
+              <div class="jd-import-row">
+                <input id="jdUrlInput" class="field-input" type="url" placeholder="Paste a Greenhouse, Lever, Ashby, or careers job URL…" />
+                <select id="jdLevelSelect" class="field-select jd-level-select" aria-label="Target level">
+                  <option value="L4">L4</option>
+                  <option value="L5" selected>L5 / Senior</option>
+                  <option value="L6">L6 / Staff</option>
+                  <option value="L7">L7 / Principal</option>
+                  <option value="EM">Engineering Manager</option>
+                </select>
+                <button id="jdImportBtn" class="btn btn-primary" type="button">Import</button>
+              </div>
+              <div class="jd-import-sub">
+                <span class="set-note">Automatically strips EEO / legal footers and ranks question banks for the role.</span>
+                <button id="jdTogglePasteBtn" class="link-quiet" type="button">Paste text instead (for LinkedIn / auth-walled jobs)</button>
+              </div>
+              <div id="jdImportStatus" class="test-result hidden" role="status" aria-live="polite"></div>
+
+              <div id="jdPasteWrap" class="jd-paste-wrap hidden">
+                <div class="jd-paste-meta">
+                  <input id="jdPasteTitleInput" class="field-input" type="text" placeholder="Role title (e.g. Senior Software Engineer)" />
+                  <input id="jdPasteCompanyInput" class="field-input" type="text" placeholder="Company (optional)" />
+                </div>
+                <textarea id="jdPasteTextarea" class="profile-textarea" rows="5" placeholder="Paste the job description here…"></textarea>
+              </div>
+            </div>
+
+            <div id="jdListContainer" class="jd-list"></div>
+          </section>
+
+          <!-- Tab 3: Curated Question Banks -->
+          <section id="profileTabBanks" class="profile-tab-panel hidden">
+            <div class="banks-filter-bar">
+              <select id="bankCategorySelect" class="field-select field-select-sm" aria-label="Category">
+                <option value="">All categories</option>
+                <option value="behavioral">Behavioral &amp; Leadership</option>
+                <option value="system_design">System Design</option>
+                <option value="coding">Coding</option>
+              </select>
+              <select id="bankLevelSelect" class="field-select field-select-sm" aria-label="Level">
+                <option value="">All levels</option>
+                <option value="L4">L4</option>
+                <option value="L5">L5</option>
+                <option value="L6">L6</option>
+                <option value="L7">L7</option>
+                <option value="EM">EM</option>
+              </select>
+              <label class="check-line">
+                <input id="bankMatchJdCheckbox" class="studio-check" type="checkbox" checked />
+                <span>Rank for active JD</span>
+              </label>
+              <span id="banksCountLabel" class="set-note banks-count-label"></span>
+            </div>
+            <div id="banksListContainer" class="banks-list"></div>
+          </section>
+        </div>
+
+        <div class="modal-footer">
+          <span class="modal-kbd-hints">Stored locally on this Mac with 0600 permissions</span>
+          <div class="modal-footer-btns">
+            <button id="doneProfileBtn" class="btn btn-primary" type="button">Done</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/static/app.js?v=mockery3"></script>
   </body>
 </html>

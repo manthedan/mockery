@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
+from .addons import AddonManager
 from .asr import ParakeetEngine
+from .banks import QuestionBankStore
 from .diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
 from .grouper import QAGrouper
 from .llm import (
@@ -37,6 +39,14 @@ from .models import (
     short_id,
 )
 from .paths import resolve_data_root
+from .profiles import CandidateProfileStore, ResumeRedactionPrefs
+from .redactor import (
+    RampartRedactor,
+    clean_job_listing_text,
+    extract_document_text,
+    fetch_job_listing,
+    parse_job_title_and_company,
+)
 from .sources import SegmentedSpeech, SessionAudioRouter
 from .state_machines import (
     ASRModelState,
@@ -57,6 +67,7 @@ logger = logging.getLogger("mockery")
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
 ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver"}
+MAX_RESUME_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 def resolve_project_root() -> Path:
@@ -120,6 +131,23 @@ class LLMConnectionTestRequest(BaseModel):
     api_key: str | None = None
 
 
+class ResumeTextUploadRequest(BaseModel):
+    filename: str = "resume.txt"
+    text: str
+
+
+class JobListingImportRequest(BaseModel):
+    url: str = ""
+    text: str = ""
+    title: str = ""
+    company: str = ""
+    target_level: str = "L5"
+
+
+class AddonModulesUpdateRequest(BaseModel):
+    modules: dict[str, bool]
+
+
 class AppRuntime:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
@@ -131,6 +159,10 @@ class AppRuntime:
         self.llm = InterviewCopilotLLM(self.llm_config)
         self.store = SessionStore(project_root / "sessions")
         self.grouper = QAGrouper()
+        self.redactor = RampartRedactor()
+        self.profiles = CandidateProfileStore(project_root / "profiles", self.redactor)
+        self.banks = QuestionBankStore(project_root / "banks")
+        self.addons = AddonManager(project_root, self.redactor)
 
         self.active_session = InterviewSession()
         self.audio_router = SessionAudioRouter(
@@ -317,6 +349,15 @@ def create_app(
 
     @app.middleware("http")
     async def verify_http_origin_and_token(request: Request, call_next: Any):
+        host = request.headers.get("host") or ""
+        if not auth_token:
+            # Defend loopback-only server against browser DNS rebinding attacks
+            parsed_host = (urlparse(f"http://{host}").hostname or "").lower()
+            if parsed_host not in ("localhost", "127.0.0.1", "::1", "testserver"):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Untrusted Host header rejected in local loopback mode."},
+                )
         if auth_token:
             query_token = request.query_params.get("token")
             cookie_token = request.cookies.get("mockery_token")
@@ -333,12 +374,18 @@ def create_app(
                 )
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             origin = request.headers.get("origin")
-            host = request.headers.get("host")
             if not is_trusted_origin(origin, host, allow_same_host_lan=bool(auth_token)):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "Untrusted Origin rejected."},
                 )
+            if request.url.path.startswith("/api/profile/resume"):
+                cl = request.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > MAX_RESUME_UPLOAD_BYTES + 262_144:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "Resume upload exceeds 10 MB limit."},
+                    )
         response = await call_next(request)
         if auth_token and request.query_params.get("token"):
             response.set_cookie(
@@ -355,14 +402,209 @@ def create_app(
 
     @app.get("/api/status")
     async def get_status() -> dict[str, Any]:
+        active_jd = runtime.profiles.active_jd()
+        resume = runtime.profiles.state.resume
         return {
             "asr": runtime.asr.status_dict(),
             "diarizer": runtime.diarizer.status_dict(),
             "llm": runtime.llm_config.public_dict(),
+            "addons": runtime.addons.status_dict(),
+            "profile_summary": {
+                "has_resume": bool(resume and resume.raw_text.strip()),
+                "resume_filename": resume.filename if resume else "",
+                "resume_redacted_count": resume.redacted_count if resume else 0,
+                "resume_engine": resume.engine if resume else "rules_only",
+                "active_jd": (
+                    {
+                        "id": active_jd.id,
+                        "title": active_jd.title,
+                        "company": active_jd.company,
+                        "target_level": active_jd.target_level,
+                    }
+                    if active_jd
+                    else None
+                ),
+                "jd_count": len(runtime.profiles.state.job_listings),
+            },
             "data_dir": str(runtime.project_root),
             "sessions_dir": str(runtime.store.sessions_dir),
             "session": _serialize_session(runtime),
         }
+
+    @app.get("/api/profile")
+    async def get_candidate_profile() -> dict[str, Any]:
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/file")
+    async def upload_resume_file(file: UploadFile = File(...)) -> dict[str, Any]:
+        raw_bytes = await file.read(MAX_RESUME_UPLOAD_BYTES + 1)
+        if len(raw_bytes) > MAX_RESUME_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Resume file exceeds 10 MB limit.")
+        filename = Path(file.filename or "resume.txt").name
+        try:
+            extracted = await asyncio.to_thread(extract_document_text, filename, raw_bytes)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not read resume file: {exc}")
+        if not extracted.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No selectable text found in that file (if it is a scanned image PDF, paste the text directly).",
+            )
+        await asyncio.to_thread(
+            runtime.profiles.set_resume,
+            filename=filename,
+            raw_text=extracted,
+        )
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/text")
+    async def upload_resume_text(body: ResumeTextUploadRequest) -> dict[str, Any]:
+        if not body.text.strip():
+            raise HTTPException(status_code=400, detail="Resume text cannot be empty.")
+        if len(body.text.encode("utf-8")) > MAX_RESUME_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Resume text exceeds 10 MB limit.")
+        await asyncio.to_thread(
+            runtime.profiles.set_resume,
+            filename=Path(body.filename or "resume.txt").name,
+            raw_text=body.text.strip(),
+        )
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/redact")
+    async def update_resume_redaction(body: ResumeRedactionPrefs) -> dict[str, Any]:
+        updated = await asyncio.to_thread(runtime.profiles.update_redaction_prefs, body)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Upload a resume first before configuring redaction.")
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/toggle/{span_id}")
+    async def toggle_resume_span_redaction(span_id: str) -> dict[str, Any]:
+        updated = await asyncio.to_thread(runtime.profiles.toggle_span_redaction, span_id)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Resume or span not found.")
+        return runtime.profiles.public_dict()
+
+    @app.delete("/api/profile/resume")
+    async def delete_resume() -> dict[str, Any]:
+        runtime.profiles.clear_resume()
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/jd")
+    async def import_job_listing(body: JobListingImportRequest) -> dict[str, Any]:
+        url = body.url.strip()
+        text = body.text.strip()
+        title = body.title.strip()
+        company = body.company.strip()
+
+        if url and not text:
+            try:
+                fetched = await fetch_job_listing(url)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Could not fetch job listing URL: {exc}")
+            text = fetched["text"]
+            title = title or fetched["title"]
+            company = company or fetched["company"]
+            url = fetched["url"]
+        elif text:
+            text = clean_job_listing_text(text)
+            if not title or not company:
+                inferred_title, inferred_company = parse_job_title_and_company(title, url=url, text=text)
+                title = title or inferred_title
+                company = company or inferred_company
+        else:
+            raise HTTPException(status_code=400, detail="Provide either a job listing URL or paste the job description text.")
+
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Job listing text is empty after parsing.")
+
+        jd = runtime.profiles.add_job_listing(
+            title=title or "Target Role",
+            company=company,
+            url=url,
+            text=text,
+            target_level=body.target_level or "L5",
+        )
+        out = runtime.profiles.public_dict()
+        out["imported_jd"] = jd.model_dump()
+        return out
+
+    @app.post("/api/profile/jd/{jd_id}/select")
+    async def select_job_listing(jd_id: str) -> dict[str, Any]:
+        jd = runtime.profiles.select_job_listing(jd_id)
+        if jd is None:
+            raise HTTPException(status_code=404, detail="Job listing not found")
+        return runtime.profiles.public_dict()
+
+    @app.delete("/api/profile/jd/{jd_id}")
+    async def delete_job_listing(jd_id: str) -> dict[str, Any]:
+        if not runtime.profiles.delete_job_listing(jd_id):
+            raise HTTPException(status_code=404, detail="Job listing not found")
+        return runtime.profiles.public_dict()
+
+    @app.get("/api/banks")
+    async def list_question_banks(
+        category: str | None = Query(None),
+        level: str | None = Query(None),
+        competency: str | None = Query(None),
+        match_active_jd: bool = Query(True),
+    ) -> dict[str, Any]:
+        active_jd = runtime.profiles.active_jd() if match_active_jd else None
+        jd_text = f"{active_jd.title} {active_jd.company} {active_jd.text}" if active_jd else None
+        questions = runtime.banks.list_questions(
+            category=category,
+            level=level,
+            competency=competency,
+            jd_text=jd_text,
+        )
+        packs = [
+            {k: v for k, v in p.items() if k != "questions"}
+            for p in runtime.banks.list_packs()
+        ]
+        return {
+            "packs": packs,
+            "questions": questions,
+            "matched_jd_id": active_jd.id if active_jd else None,
+        }
+
+    @app.get("/api/addons")
+    async def get_addons_status() -> dict[str, Any]:
+        return runtime.addons.status_dict()
+
+    @app.post("/api/addons/modules")
+    async def update_addon_modules(body: AddonModulesUpdateRequest) -> dict[str, Any]:
+        runtime.addons.update_modules(body.modules)
+        return runtime.addons.status_dict()
+
+    @app.post("/api/addons/{pack_id}/install")
+    async def install_addon_pack(pack_id: str) -> dict[str, Any]:
+        try:
+            status = await runtime.addons.install_pack(pack_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to install {pack_id}: {exc}")
+        # If Rampart was just installed and a resume already exists, automatically re-redact with Rampart!
+        if pack_id == "rampart_pii" and runtime.profiles.state.resume is not None:
+            await asyncio.to_thread(
+                runtime.profiles.update_redaction_prefs,
+                runtime.profiles.state.resume.prefs,
+            )
+        return {"addons": status, "profile": runtime.profiles.public_dict()}
+
+    @app.delete("/api/addons/{pack_id}")
+    async def uninstall_addon_pack(pack_id: str) -> dict[str, Any]:
+        try:
+            status = await runtime.addons.uninstall_pack(pack_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if pack_id == "rampart_pii" and runtime.profiles.state.resume is not None:
+            await asyncio.to_thread(
+                runtime.profiles.update_redaction_prefs,
+                runtime.profiles.state.resume.prefs,
+            )
+        return {"addons": status, "profile": runtime.profiles.public_dict()}
 
     @app.get("/api/providers/discover")
     async def discover_providers() -> dict[str, Any]:
