@@ -536,3 +536,70 @@ def test_codex_m2_regressions_state_machine_privacy_and_audio(tmp_path: Path, mo
     md = loaded.to_markdown()
     assert "Nice job!" in md
 
+
+def test_onboarding_voice_wizard_contracts_and_addon_tts_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    app = create_app(project_root=tmp_path)
+    runtime = app.state.runtime
+
+    installed_flag = {"on": False}
+
+    def _fake_is_installed() -> bool:
+        return installed_flag["on"]
+
+    def _fake_install() -> bool:
+        installed_flag["on"] = True
+        return True
+
+    def _fake_uninstall() -> bool:
+        installed_flag["on"] = False
+        return True
+
+    monkeypatch.setattr(runtime.tts, "is_kokoro_installed", _fake_is_installed)
+    monkeypatch.setattr(runtime.tts, "install_kokoro", _fake_install)
+    monkeypatch.setattr(runtime.tts, "uninstall_kokoro", _fake_uninstall)
+    runtime.addons.register_pack_handler(
+        "kokoro_tts",
+        is_installed=_fake_is_installed,
+        install=_fake_install,
+        uninstall=_fake_uninstall,
+        available=True,
+    )
+
+    with TestClient(app) as client:
+        r_inst = client.post("/api/addons/kokoro_tts/install")
+        assert r_inst.status_code == 200
+        body = r_inst.json()
+        assert body["tts"]["engine"] == "kokoro"
+        assert body["tts"]["kokoro_installed"] is True
+        assert "af_heart" in body["tts"]["voices"]
+
+        r_del = client.delete("/api/addons/kokoro_tts")
+        assert r_del.status_code == 200
+        del_body = r_del.json()
+        assert del_body["tts"]["kokoro_installed"] is False
+        assert del_body["tts"]["engine"] != "kokoro"
+
+    static_dir = Path(__file__).resolve().parents[1] / "src" / "mockery" / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    practice_js = (static_dir / "practice_studio.js").read_text(encoding="utf-8")
+
+    for required_id in (
+        "onboardStepAi",
+        "onboardStepPacks",
+        "onboardKokoroInstallBtn",
+        "onboardKokoroPreviewBtn",
+        "onboardOptionalPacksList",
+        "practiceKokoroUpgradeRow",
+        "practiceInstallKokoroBtn",
+        "practiceVoicePickerRow",
+        "practiceVoiceSelect",
+        "practicePreviewVoiceBtn",
+    ):
+        assert f'id="{required_id}"' in html, f"Missing DOM element #{required_id} in index.html"
+
+    assert "setOnboardStep" in app_js and "renderOnboardingPacksStep" in app_js
+    assert "mockery_onboard_packs_seen" in app_js
+    assert "renderVoiceControls" in practice_js and "previewVoice" in practice_js
+    assert "mockery_tts_voice" in practice_js
+

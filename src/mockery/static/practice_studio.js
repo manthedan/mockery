@@ -92,6 +92,19 @@ function fmtShortClock(sec) {
   return `${m}:${String(rem).padStart(2, "0")}`;
 }
 
+const KOKORO_VOICE_LABELS = {
+  af_heart: "Heart (US · Warm)",
+  af_bella: "Bella (US · Natural)",
+  af_sarah: "Sarah (US · Clear)",
+  am_michael: "Michael (US · Calm)",
+  am_fenrir: "Fenrir (US · Deep)",
+  bf_emma: "Emma (UK · Crisp)",
+  bm_george: "George (UK · Warm)",
+};
+
+const VOICE_PREVIEW_TEXT =
+  "Hi! I'm your local Kokoro interview coach. Ready to walk through your next mock interview?";
+
 export function createPracticeStudioController({
   state,
   el,
@@ -99,7 +112,16 @@ export function createPracticeStudioController({
   showToast,
   onPracticeActiveChange,
   clientMachines = null,
+  packOps = null,
+  onInstallPack = null,
 }) {
+  let savedVoice = "";
+  try {
+    savedVoice = window.localStorage?.getItem("mockery_tts_voice") || "";
+  } catch {
+    savedVoice = "";
+  }
+
   const local = {
     homeMode: "copilot", // "copilot" | "practice"
     questionSource: "mixed",
@@ -111,6 +133,7 @@ export function createPracticeStudioController({
 
     // Voice playback state (with generation token + AbortController)
     voiceEnabled: true,
+    selectedVoice: savedVoice,
     isSpeaking: false,
     speakGen: 0,
     ttsAbort: null,
@@ -267,21 +290,76 @@ export function createPracticeStudioController({
     }
   }
 
+  function resolveEffectiveVoice() {
+    const tts = local.ttsStatus;
+    if (!tts || !Array.isArray(tts.voices) || tts.voices.length === 0) return "";
+    if (local.selectedVoice && tts.voices.includes(local.selectedVoice)) {
+      return local.selectedVoice;
+    }
+    return tts.default_voice || tts.voices[0] || "";
+  }
+
+  function renderVoiceControls() {
+    const tts = local.ttsStatus;
+    const voiceLbl = el("practiceVoiceLabel");
+    if (voiceLbl && tts) {
+      if (tts.engine === "kokoro") {
+        voiceLbl.textContent = "AI speaks questions aloud (Kokoro-82M neural voice, instant barge-in)";
+      } else if (tts.engine === "macos_say") {
+        voiceLbl.textContent = "AI speaks questions aloud (macOS fallback voice, instant barge-in)";
+      } else {
+        voiceLbl.textContent = "AI speaks questions aloud (browser voice, instant barge-in)";
+      }
+    }
+
+    const upgradeRow = el("practiceKokoroUpgradeRow");
+    const installBtn = el("practiceInstallKokoroBtn");
+    const pickerRow = el("practiceVoicePickerRow");
+    const voiceSel = el("practiceVoiceSelect");
+    const previewBtn = el("practicePreviewVoiceBtn");
+    const op = packOps?.get?.("kokoro_tts") || null;
+
+    if (upgradeRow && tts) {
+      const showUpgrade = Boolean(tts.kokoro_available && !tts.kokoro_installed);
+      upgradeRow.classList.toggle("hidden", !showUpgrade);
+      if (installBtn) {
+        const busy = op === "installing" || op === "uninstalling";
+        installBtn.disabled = busy;
+        installBtn.textContent =
+          op === "installing"
+            ? "Downloading Kokoro-82M (183 MB)…"
+            : op === "uninstalling"
+              ? "Removing…"
+              : "Install Kokoro-82M voice (183 MB)";
+      }
+    }
+
+    if (pickerRow && tts) {
+      const isKokoroReady = tts.engine === "kokoro" && Array.isArray(tts.voices) && tts.voices.length > 0;
+      pickerRow.classList.toggle("hidden", !isKokoroReady);
+      if (isKokoroReady && voiceSel) {
+        const eff = resolveEffectiveVoice();
+        const sig = tts.voices.join("|");
+        if (voiceSel.dataset.voicesSig !== sig) {
+          voiceSel.innerHTML = tts.voices
+            .map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(KOKORO_VOICE_LABELS[v] || v)}</option>`)
+            .join("");
+          voiceSel.dataset.voicesSig = sig;
+        }
+        if (eff && voiceSel.value !== eff) {
+          voiceSel.value = eff;
+        }
+      }
+    }
+
+    if (previewBtn) {
+      previewBtn.textContent = local.isSpeaking ? "Stop preview" : "Preview voice";
+    }
+  }
+
   function applyStatusSnapshot(data) {
     if (data?.tts) {
       local.ttsStatus = data.tts;
-      const voiceLbl = el("practiceVoiceLabel");
-      if (voiceLbl) {
-        if (data.tts.engine === "kokoro") {
-          voiceLbl.textContent = "AI speaks questions aloud (Kokoro-82M neural voice, instant barge-in)";
-        } else if (data.tts.engine === "macos_say") {
-          voiceLbl.textContent = data.tts.kokoro_available
-            ? "AI speaks questions aloud (macOS fallback — install Kokoro-82M in Settings → Add-Ons for natural voice)"
-            : "AI speaks questions aloud (macOS local voice, instant barge-in)";
-        } else {
-          voiceLbl.textContent = "AI speaks questions aloud (browser voice, instant barge-in)";
-        }
-      }
     }
     if (data?.addons?.modules_map) {
       const practiceOn = data.addons.modules_map.practice_mode !== false;
@@ -298,6 +376,7 @@ export function createPracticeStudioController({
     } else if (data?.addons && local.mountedPlugin?.updateAddons) {
       local.mountedPlugin.updateAddons(data.addons);
     }
+    renderVoiceControls();
   }
 
   async function refreshQuestionPicker() {
@@ -379,6 +458,10 @@ export function createPracticeStudioController({
   function setSpeakingUI(speaking) {
     local.isSpeaking = speaking;
     el("practiceBargeInBtn")?.classList.toggle("hidden", !speaking);
+    const prevBtn = el("practicePreviewVoiceBtn");
+    if (prevBtn) prevBtn.textContent = speaking ? "Stop preview" : "Preview voice";
+    const obPrevBtn = el("onboardKokoroPreviewBtn");
+    if (obPrevBtn) obPrevBtn.textContent = speaking ? "Stop preview" : "Preview voice";
   }
 
   function stopSpeaking() {
@@ -418,7 +501,7 @@ export function createPracticeStudioController({
     setSpeakingUI(false);
   }
 
-  async function speakText(text, { force = false } = {}) {
+  async function speakText(text, { force = false, voice = null } = {}) {
     const clean = String(text || "").trim();
     if (!clean) return;
     if (!local.voiceEnabled && !force) return;
@@ -429,11 +512,15 @@ export function createPracticeStudioController({
     local.ttsAbort = ctrl;
     setSpeakingUI(true);
 
+    const chosenVoice = voice || resolveEffectiveVoice();
+    const payload = { text: clean, rate: 1.0 };
+    if (chosenVoice) payload.voice = chosenVoice;
+
     try {
       const res = await fetch("/api/tts/speak", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: clean, rate: 1.0 }),
+        body: JSON.stringify(payload),
         signal: ctrl?.signal,
       });
       if (myGen !== local.speakGen) return;
@@ -2037,6 +2124,41 @@ export function createPracticeStudioController({
       const turn = (local.session.turns || []).find((t) => t.id === tid);
       if (turn?.text) speakText(turn.text, { force: true });
     });
+
+    el("practiceInstallKokoroBtn")?.addEventListener("click", () => {
+      if (typeof onInstallPack === "function") {
+        onInstallPack("kokoro_tts");
+      }
+    });
+
+    el("practiceVoiceSelect")?.addEventListener("change", (ev) => {
+      const val = String(ev.target?.value || "").trim();
+      if (!val) return;
+      local.selectedVoice = val;
+      try {
+        window.localStorage?.setItem("mockery_tts_voice", val);
+      } catch {
+        /* ignore */
+      }
+    });
+
+    el("practicePreviewVoiceBtn")?.addEventListener("click", () => {
+      previewVoice();
+    });
+  }
+
+  function previewVoice() {
+    if (local.isSpeaking) {
+      stopSpeaking();
+      return;
+    }
+    speakText(VOICE_PREVIEW_TEXT, { force: true });
+  }
+
+  if (packOps && typeof packOps.subscribe === "function") {
+    packOps.subscribe(() => {
+      renderVoiceControls();
+    });
   }
 
   bindEvents();
@@ -2050,6 +2172,8 @@ export function createPracticeStudioController({
     setHomeMode,
     registerStudioPlugin,
     pushWorkspaceSnapshot,
+    previewVoice,
+    stopSpeaking,
     getStateSnapshot,
     isPracticeActive: () => Boolean(local.session),
     isPracticeStartingOrActive: () =>
