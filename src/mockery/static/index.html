@@ -272,10 +272,15 @@
                       <span id="practiceVoiceLabel">AI speaks questions aloud (local voice, instant barge-in)</span>
                     </label>
                     <div id="practiceKokoroUpgradeRow" class="practice-voice-row hidden">
-                      <span class="practice-voice-note">Using robotic macOS system voice.</span>
-                      <button id="practiceInstallKokoroBtn" class="btn btn-outline btn-sm" type="button">
-                        Install Kokoro-82M voice (183 MB)
-                      </button>
+                      <span class="practice-voice-note">Using robotic macOS voice — install a local neural voice:</span>
+                      <div class="practice-voice-btns">
+                        <button id="practiceInstallPhononBtn" class="btn btn-primary btn-sm" type="button">
+                          Install Phonon-31M (62 MB · Fast)
+                        </button>
+                        <button id="practiceInstallKokoroBtn" class="btn btn-outline btn-sm" type="button">
+                          Install Kokoro-82M (183 MB · Studio)
+                        </button>
+                      </div>
                     </div>
                     <div id="practiceVoicePickerRow" class="practice-voice-row hidden">
                       <select id="practiceVoiceSelect" class="field-select practice-voice-select" aria-label="Interviewer voice">
@@ -877,28 +882,52 @@
           <!-- Step 2: Local Voice & Packs -->
           <div id="onboardStepPacks" class="hidden">
             <p class="onboarding-intro">
-              Install the <strong>Kokoro-82M neural voice</strong> so your Practice Mode interviewer sounds genuinely human — completely offline on Apple Silicon, with zero API fees.
+              Pick a <strong>local neural voice</strong> so your Practice Mode interviewer sounds genuinely human — 100% offline on your Mac with zero API fees. You can install one or both and switch voices anytime.
             </p>
 
-            <div id="onboardKokoroCard" class="onboard-hero-pack">
-              <div class="onboard-hero-pack-main">
-                <div class="onboard-hero-pack-title">
-                  <span>Kokoro-82M Neural Voice</span>
-                  <span class="addon-size-pill">183 MB · Recommended</span>
+            <div class="onboard-voice-grid">
+              <div id="onboardPhononCard" class="onboard-hero-pack is-recommended">
+                <div class="onboard-hero-pack-main">
+                  <div class="onboard-hero-pack-title">
+                    <span>Phonon-31M Fast</span>
+                    <span class="addon-size-pill is-rec">62 MB · Fastest</span>
+                  </div>
+                  <p class="onboard-hero-pack-desc">
+                    Ultra-light Apache 2.0 neural voice (~30× real-time on CPU). Tiny download, instant responses.
+                  </p>
+                  <div id="onboardPhononError" class="addon-row-err hidden"></div>
                 </div>
-                <p class="onboard-hero-pack-desc">
-                  Replaces robotic macOS system speech with warm, natural offline voice synthesis (~4× real-time on Apple Silicon, instant barge-in).
-                </p>
-                <div id="onboardKokoroError" class="addon-row-err hidden"></div>
+                <div class="onboard-hero-pack-actions">
+                  <span id="onboardPhononBadge" class="addon-state-badge is-ok hidden">Installed</span>
+                  <button id="onboardPhononPreviewBtn" class="btn btn-outline btn-sm hidden" type="button">
+                    Preview Phonon
+                  </button>
+                  <button id="onboardPhononInstallBtn" class="btn btn-primary btn-sm" type="button">
+                    Install Phonon (62 MB)
+                  </button>
+                </div>
               </div>
-              <div class="onboard-hero-pack-actions">
-                <span id="onboardKokoroBadge" class="addon-state-badge is-ok hidden">Installed</span>
-                <button id="onboardKokoroPreviewBtn" class="btn btn-outline btn-sm hidden" type="button">
-                  Preview voice
-                </button>
-                <button id="onboardKokoroInstallBtn" class="btn btn-primary btn-sm" type="button">
-                  Install voice (183 MB)
-                </button>
+
+              <div id="onboardKokoroCard" class="onboard-hero-pack">
+                <div class="onboard-hero-pack-main">
+                  <div class="onboard-hero-pack-title">
+                    <span>Kokoro-82M Studio</span>
+                    <span class="addon-size-pill">183 MB · Studio</span>
+                  </div>
+                  <p class="onboard-hero-pack-desc">
+                    Richer FP16 local neural synthesis with warm US &amp; UK interviewer voices (~4× real-time).
+                  </p>
+                  <div id="onboardKokoroError" class="addon-row-err hidden"></div>
+                </div>
+                <div class="onboard-hero-pack-actions">
+                  <span id="onboardKokoroBadge" class="addon-state-badge is-ok hidden">Installed</span>
+                  <button id="onboardKokoroPreviewBtn" class="btn btn-outline btn-sm hidden" type="button">
+                    Preview Kokoro
+                  </button>
+                  <button id="onboardKokoroInstallBtn" class="btn btn-outline btn-sm" type="button">
+                    Install Kokoro (183 MB)
+                  </button>
+                </div>
               </div>
             </div>
 

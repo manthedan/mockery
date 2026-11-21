@@ -2650,15 +2650,38 @@ kbd {
   color: #fff;
 }
 
+.onboard-voice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 580px) {
+  .onboard-voice-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .onboard-hero-pack {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: space-between;
-  gap: 14px;
-  padding: 14px 16px;
-  border: 1px solid var(--accent);
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
+  background: var(--bg);
+  transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+.onboard-hero-pack.is-recommended {
+  border-color: var(--accent);
   background: var(--accent-soft, rgba(99, 102, 241, 0.08));
+}
+
+.onboard-hero-pack.is-installed {
+  border-color: var(--good);
+  background: color-mix(in srgb, var(--good) 7%, var(--bg));
 }
 
 .onboard-hero-pack-main {
@@ -2670,8 +2693,8 @@ kbd {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  font-size: 14px;
+  gap: 6px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--ink);
 }
@@ -2679,15 +2702,15 @@ kbd {
 .onboard-hero-pack-desc {
   margin: 5px 0 0;
   color: var(--ink-2);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
 .onboard-hero-pack-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  flex-shrink: 0;
 }
 
 .onboard-packs-list {
@@ -2744,6 +2767,13 @@ kbd {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.practice-voice-btns {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .practice-voice-row {
