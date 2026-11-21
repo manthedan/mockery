@@ -119,6 +119,32 @@ function truncateText(text, maxCodePoints) {
   return `${chars.slice(0, Math.max(1, maxCodePoints - 1)).join("")}…`;
 }
 
+// Models and older saves describe components loosely ("db", "kafka", "lb").
+// Map the common spellings to a known type so a Postgres box never renders
+// with a generic service badge. Anything unrecognised still falls back to
+// "service".
+const NODE_TYPE_ALIASES = new Map(
+  Object.entries({
+    database: ["db", "sql", "nosql", "postgres", "postgresql", "mysql", "datastore", "data_store", "store", "table", "rdbms", "dynamodb", "mongodb", "cassandra"],
+    cache: ["redis", "memcached", "memcache", "kv", "kv_store"],
+    queue: ["mq", "kafka", "stream", "streams", "pubsub", "pub_sub", "bus", "event_bus", "message_queue", "sqs", "topic"],
+    gateway: ["lb", "load_balancer", "loadbalancer", "api_gateway", "apigateway", "proxy", "edge", "router", "ingress"],
+    storage: ["cdn", "s3", "blob", "blob_store", "object_store", "object_storage", "bucket", "files"],
+    worker: ["ai", "llm", "model", "ml", "job", "jobs", "cron", "consumer", "inference"],
+    client: ["cli", "user", "users", "browser", "web", "mobile", "app", "frontend"],
+    service: ["svc", "api", "server", "backend", "microservice"],
+    note: ["comment", "annotation", "text", "label"],
+  }).flatMap(([type, aliases]) => aliases.map((a) => [a, type]))
+);
+
+export function resolveNodeType(rawType) {
+  const raw = typeof rawType === "string" ? rawType : "";
+  if (NODE_TYPE_MAP.has(raw)) return raw;
+  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (NODE_TYPE_MAP.has(key)) return key;
+  return NODE_TYPE_ALIASES.get(key) || "service";
+}
+
 export function normalizeDiagramGraph(raw) {
   const safe = { version: 1, nodes: [], edges: [] };
   if (!raw || typeof raw !== "object") return safe;
@@ -132,7 +158,7 @@ export function normalizeDiagramGraph(raw) {
       if (!id || seenNodeIds.has(id)) continue;
       seenNodeIds.add(id);
       const rawType = safeStr(n.type);
-      const type = NODE_TYPE_MAP.has(rawType) ? rawType : "service";
+      const type = resolveNodeType(rawType);
       const meta = NODE_TYPE_MAP.get(type);
       const x = clamp(Math.round(safeNum(n.x, 60)), 12, CANVAS_W - NODE_W - 12);
       const y = clamp(Math.round(safeNum(n.y, 60)), 12, CANVAS_H - NODE_H - 12);
@@ -521,9 +547,9 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
     function buildShell() {
       const paletteButtons = NODE_TYPES.map(
         (t) =>
-          `<button type="button" class="sd-palette-btn" data-sd-add="${escapeHtml(t.type)}" title="Add ${escapeHtml(t.label)}">
+          `<button type="button" class="sd-palette-btn" data-sd-add="${escapeHtml(t.type)}" data-sd-kind="${escapeHtml(t.type)}" title="Add ${escapeHtml(t.label)}" aria-label="Add ${escapeHtml(t.label)}">
              <span class="sd-palette-tag">${escapeHtml(t.badge)}</span>
-             <span>${escapeHtml(t.label)}</span>
+             <span class="sd-palette-name">${escapeHtml(t.label)}</span>
            </button>`
       ).join("");
 
@@ -531,17 +557,15 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
         <div class="sd-studio" data-sd-root>
           <div class="sd-header">
             <div class="sd-header-left">
-              <span class="practice-kicker">System Design Whiteboard</span>
+              <span class="practice-kicker">Whiteboard</span>
               <span class="sd-count-pill" data-sd-count>0 components · 0 flows</span>
             </div>
             <div class="sd-header-actions">
-              <button type="button" class="btn btn-quiet btn-xs" data-sd-playbook-toggle>Requirements</button>
-              <button type="button" class="btn btn-quiet btn-xs" data-sd-template title="Load a starter architecture blueprint">Starter Template</button>
-              <button type="button" class="btn btn-quiet btn-xs" data-sd-undo title="Undo (⌘/Ctrl+Z)" disabled>Undo</button>
-              <button type="button" class="btn btn-quiet btn-xs" data-sd-redo title="Redo" disabled>Redo</button>
-              <button type="button" class="btn btn-quiet btn-xs" data-sd-export title="Export whiteboard as PNG">Export PNG</button>
-              <button type="button" class="btn btn-quiet btn-xs" data-sd-clear title="Clear whiteboard">Clear</button>
-              <button type="button" class="btn btn-ink btn-xs" data-sd-review>Ask AI to review diagram</button>
+              <button type="button" class="sd-chip-btn" data-sd-playbook-toggle>Requirements</button>
+              <button type="button" class="btn btn-ink btn-xs sd-review-btn" data-sd-review title="Send this diagram to your interviewer for feedback">
+                <svg class="sd-review-glyph" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 1.6l1.5 4.1 4.1 1.5-4.1 1.5L8 12.8 6.5 8.7 2.4 7.2l4.1-1.5z" fill="currentColor"/></svg>
+                <span>Ask AI to review</span>
+              </button>
             </div>
           </div>
 
@@ -549,12 +573,39 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
 
           <div class="sd-toolbar">
             <div class="sd-mode-group" role="group" aria-label="Whiteboard tool">
-              <button type="button" class="sd-tool-btn active" data-sd-tool="select">Move / Select</button>
-              <button type="button" class="sd-tool-btn" data-sd-tool="connect">Connect Arrow</button>
+              <button type="button" class="sd-tool-btn active" data-sd-tool="select" title="Move and select (V)" aria-label="Move and select">
+                <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3.2 2.2l9.4 4.6-4 1.3-1.4 4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+                <span>Select</span>
+              </button>
+              <button type="button" class="sd-tool-btn" data-sd-tool="connect" title="Draw a flow between two components" aria-label="Connect components">
+                <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2.5 12.5l9-9M7 3.2h4.8V8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>Connect</span>
+              </button>
             </div>
-            <div class="sd-palette" aria-label="Add architecture component">
+            <span class="sd-toolbar-rule" aria-hidden="true"></span>
+            <div class="sd-palette" role="group" aria-label="Add architecture component">
               ${paletteButtons}
             </div>
+            <span class="sd-toolbar-spacer" aria-hidden="true"></span>
+            <div class="sd-history-group" role="group" aria-label="History">
+              <button type="button" class="sd-icon-btn" data-sd-undo title="Undo (⌘/Ctrl+Z)" aria-label="Undo" disabled>
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.6 3.4L2.6 6.4l3 3M2.9 6.4h6.2a3.6 3.6 0 010 7.2H6.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+              <button type="button" class="sd-icon-btn" data-sd-redo title="Redo (⇧⌘Z)" aria-label="Redo" disabled>
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M10.4 3.4l3 3-3 3M13.1 6.4H6.9a3.6 3.6 0 000 7.2h2.7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <details class="sd-more" data-sd-pop>
+              <summary class="sd-icon-btn" title="More whiteboard actions" aria-label="More whiteboard actions">
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="3.5" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="12.5" cy="8" r="1.2" fill="currentColor"/></svg>
+              </summary>
+              <div class="sd-more-menu" role="menu">
+                <button type="button" class="sd-menu-item" role="menuitem" data-sd-template title="Load a starter architecture blueprint">Start from a template</button>
+                <button type="button" class="sd-menu-item" role="menuitem" data-sd-export title="Export whiteboard as PNG">Export as PNG</button>
+                <span class="sd-menu-rule" aria-hidden="true"></span>
+                <button type="button" class="sd-menu-item is-danger" role="menuitem" data-sd-clear title="Clear whiteboard">Clear whiteboard</button>
+              </div>
+            </details>
           </div>
 
           <div class="sd-canvas-wrap">
@@ -575,7 +626,9 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
               <g data-sd-nodes></g>
             </svg>
             <div class="sd-empty-hint hidden" data-sd-empty>
-              Click any component above or load a <strong>Starter Template</strong> to sketch your architecture.
+              <span class="sd-empty-title">Sketch your architecture</span>
+              <span class="sd-empty-sub">Add a component from the toolbar, or</span>
+              <button type="button" class="chip-action" data-sd-template>start from a template</button>
             </div>
           </div>
 
@@ -599,8 +652,11 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       if (toggleBtn) {
         const covered = reqs.filter((r) => state.checkedReqs.has(r)).length;
         toggleBtn.textContent = reqs.length
-          ? `Requirements (${covered}/${reqs.length})`
+          ? `Requirements ${covered}/${reqs.length}`
           : "Requirements";
+        toggleBtn.classList.toggle("is-open", !!state.playbookOpen);
+        toggleBtn.classList.toggle("is-complete", reqs.length > 0 && covered === reqs.length);
+        toggleBtn.setAttribute("aria-expanded", state.playbookOpen ? "true" : "false");
       }
 
       box.classList.toggle("hidden", !state.playbookOpen);
@@ -616,12 +672,12 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
           ${
             reqs.length
               ? `<div class="sd-playbook-col">
-                  <div class="practice-kicker">Core Requirements Checklist</div>
+                  <div class="practice-kicker">Core requirements</div>
                   <div class="sd-req-list">
                     ${reqs
                       .map((r, idx) => {
                         const checked = state.checkedReqs.has(r) ? "checked" : "";
-                        return `<label class="sd-req-item"><input type="checkbox" data-sd-req-idx="${idx}" ${checked} /><span>${escapeHtml(r)}</span></label>`;
+                        return `<label class="sd-req-item"><input type="checkbox" class="studio-check" data-sd-req-idx="${idx}" ${checked} /><span>${escapeHtml(r)}</span></label>`;
                       })
                       .join("")}
                   </div>
@@ -631,7 +687,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
           ${
             dives.length
               ? `<div class="sd-playbook-col">
-                  <div class="practice-kicker">Deep-Dive Angles to Anticipate</div>
+                  <div class="practice-kicker">Deep dives to expect</div>
                   <ul class="sd-dive-list">
                     ${dives.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
                   </ul>
@@ -768,10 +824,10 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
           <div class="sd-inspector-status">
             <span>${
               srcNode
-                ? `Connect from <strong>${escapeHtml(srcNode.label)}</strong> → click any target component (Esc to cancel)`
-                : "Connect Mode: click a source component, then click a target component to draw a directed flow."
+                ? `From <strong>${escapeHtml(srcNode.label)}</strong> — now click the component it flows to`
+                : "Click a component to start a flow, then click where it goes"
             }</span>
-            <button type="button" class="btn btn-quiet btn-xs" data-sd-cancel-connect>Done connecting</button>
+            <button type="button" class="btn btn-quiet btn-xs" data-sd-cancel-connect>Done <kbd>esc</kbd></button>
           </div>
         `;
         return;
@@ -828,7 +884,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
 
       box.innerHTML = `
         <div class="sd-inspector-hint">
-          Drag components to arrange (Esc cancels drag) · Double-click to rename · Use <strong>Connect Arrow</strong> to draw data flows · Press <strong>Delete</strong> to remove selected item
+          <span>Drag to arrange</span><span class="sd-hint-dot" aria-hidden="true">·</span><span>Double-click to rename</span><span class="sd-hint-dot" aria-hidden="true">·</span><span><kbd>⌫</kbd> removes the selection</span>
         </div>
       `;
     }
@@ -1051,7 +1107,15 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       return true;
     }
 
+    function closePopovers(exceptTarget = null) {
+      containerEl.querySelectorAll("details[data-sd-pop][open]").forEach((d) => {
+        if (exceptTarget && d.contains(exceptTarget) && exceptTarget.closest("summary")) return;
+        d.open = false;
+      });
+    }
+
     function onClick(ev) {
+      closePopovers(ev.target);
       if (state.interaction.mode === "dragging") return;
 
       const addBtn = ev.target.closest("[data-sd-add]");
@@ -1106,7 +1170,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       }
       if (ev.target.closest("[data-sd-review]")) {
         if (state.graph.nodes.length === 0) {
-          showToast("Add a few components (or load Starter Template) before asking for a review.", 2600);
+          showToast("Add a few components (or start from a template) before asking for a review.", 2600);
           return;
         }
         notifyChanged();

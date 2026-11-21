@@ -1135,7 +1135,7 @@ def create_app(
         if not runtime.addons._modules.get("practice_mode", True):
             raise HTTPException(
                 status_code=403,
-                detail="AI Practice Interviewer module is disabled in Settings → Add-Ons.",
+                detail="AI Mock Practice is switched off in Settings → Add-Ons.",
             )
         active_jd = runtime.profiles.active_jd()
         role_title = body.role_title.strip() or (active_jd.title if active_jd else "Senior Software Engineer")

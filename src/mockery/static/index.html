@@ -17,7 +17,7 @@
         document.documentElement.setAttribute("data-theme", resolved);
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=mockery4" />
+    <link rel="stylesheet" href="/static/styles.css?v=mockery5" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -79,7 +79,7 @@
                 <label class="set-row" for="saveAudioCheckbox">
                   <span class="set-label">Recording</span>
                   <span class="check-line">
-                    <input id="saveAudioCheckbox" class="studio-check" type="checkbox" />
+                    <input id="saveAudioCheckbox" class="switch" type="checkbox" role="switch" />
                     <span>Keep the audio file on this Mac</span>
                   </span>
                 </label>
@@ -149,17 +149,22 @@
       <main id="setupLaunchpad" class="home hidden">
         <aside class="home-sidebar" aria-label="Past interviews">
           <div class="home-sidebar-head">Mockery</div>
-          <div id="homeSessionList" class="home-list"></div>
-          <div id="homePracticeHistorySection" class="home-practice-history hidden">
-            <div class="home-sidebar-subhead">AI Mock Practice</div>
-            <div id="homePracticeList" class="home-list"></div>
+          <div class="home-rail">
+            <div id="homePracticeHistorySection" class="home-practice-history hidden">
+              <div class="home-sidebar-subhead">Practice sessions</div>
+              <div id="homePracticeList" class="home-list"></div>
+            </div>
+            <div class="home-rail-group home-rail-interviews">
+              <div class="home-sidebar-subhead">Interviews</div>
+              <div id="homeSessionList" class="home-list"></div>
+            </div>
           </div>
         </aside>
 
         <section class="home-main">
           <div class="home-form">
             <div id="homeModeSwitchRow" class="home-mode-switch-row">
-              <div id="homeModeSwitch" class="seg" role="tablist" aria-label="Workspace mode">
+              <div id="homeModeSwitch" class="seg seg-track" role="tablist" aria-label="Workspace mode">
                 <button type="button" class="seg-opt active" data-home-mode="copilot" role="tab" aria-selected="true">Interviewer Copilot</button>
                 <button type="button" class="seg-opt" data-home-mode="practice" role="tab" aria-selected="false">AI Mock Practice</button>
               </div>
@@ -181,6 +186,13 @@
               <svg class="home-role-cue" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M10.6 3.2l2.2 2.2M3.25 12.75l.5-2.6 7.1-7.1a1.1 1.1 0 011.55 0l.55.55a1.1 1.1 0 010 1.55l-7.1 7.1-2.6.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
+            </div>
+            <div id="homeJdTargetLine" class="home-jd-line hidden">
+              <svg class="home-jd-glyph" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M4 2.5v6.25a2 2 0 002 2h6.5M10 8l2.75 2.75L10 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              <span id="homeJdTargetText" class="home-jd-text">Target job listing</span>
+              <button id="homeApplyJdRoleBtn" class="chip-action hidden" type="button" title="Fill the role above from your active target job listing">Use JD role</button>
             </div>
 
             <div class="props">
@@ -221,7 +233,7 @@
                 <label class="prop" for="setupSaveAudioProxy">
                   <span class="prop-label">Recording</span>
                   <span class="check-line">
-                    <input id="setupSaveAudioProxy" class="studio-check" type="checkbox" />
+                    <input id="setupSaveAudioProxy" class="switch" type="checkbox" role="switch" />
                     <span>Keep the audio file on this Mac</span>
                   </span>
                 </label>
@@ -254,7 +266,7 @@
                 </div>
 
                 <label class="prop">
-                  <span class="prop-label">Starting Q</span>
+                  <span class="prop-label">Opening question</span>
                   <select id="practiceQuestionPicker" class="field-select">
                     <option value="">Auto-select best match for your target JD</option>
                   </select>
@@ -264,25 +276,24 @@
                   <span class="prop-label">Coaching</span>
                   <div class="prop-value practice-checks">
                     <label class="check-line" for="practiceNudgesCheckbox">
-                      <input id="practiceNudgesCheckbox" class="studio-check" type="checkbox" checked />
-                      <span>Supportive live CARL coach tips (leads with strengths)</span>
+                      <input id="practiceNudgesCheckbox" class="switch" type="checkbox" role="switch" checked />
+                      <span>Live coach tips that lead with your strengths</span>
                     </label>
-                    <label class="check-line" for="practiceVoiceCheckbox">
-                      <input id="practiceVoiceCheckbox" class="studio-check" type="checkbox" checked />
-                      <span id="practiceVoiceLabel">AI speaks questions aloud (local voice, instant barge-in)</span>
+                    <label class="check-line" for="practiceVoiceCheckbox" title="Speak or click Stop speaking at any time to interrupt the interviewer instantly">
+                      <input id="practiceVoiceCheckbox" class="switch" type="checkbox" role="switch" checked />
+                      <span id="practiceVoiceLabel">Interviewer reads questions aloud</span>
                     </label>
-                    <div id="practiceKokoroUpgradeRow" class="practice-voice-row hidden">
-                      <span class="practice-voice-note">Using robotic macOS voice — install a local neural voice:</span>
-                      <div class="practice-voice-btns">
-                        <button id="practiceInstallPhononBtn" class="btn btn-primary btn-sm" type="button">
-                          Install Phonon-31M (62 MB · Fast)
-                        </button>
-                        <button id="practiceInstallKokoroBtn" class="btn btn-outline btn-sm" type="button">
-                          Install Kokoro-82M (183 MB · Studio)
-                        </button>
-                      </div>
+                    <div id="practiceKokoroUpgradeRow" class="practice-voice-row voice-status-line hidden">
+                      <span class="voice-status-dot" aria-hidden="true"></span>
+                      <span class="practice-voice-note">Using macOS voice</span>
+                      <span class="voice-status-sep" aria-hidden="true">·</span>
+                      <span class="voice-status-lead">Install local neural voice →</span>
+                      <span class="practice-voice-btns">
+                        <button id="practiceInstallPhononBtn" class="chip-action" type="button" title="Phonon — instant response, lightweight 62 MB download">Fast · 62 MB</button>
+                        <button id="practiceInstallKokoroBtn" class="chip-action" type="button" title="Kokoro — warm studio cadence, 183 MB download">Studio · 183 MB</button>
+                      </span>
                     </div>
-                    <div id="practiceVoicePickerRow" class="practice-voice-row hidden">
+                    <div id="practiceVoicePickerRow" class="practice-voice-row voice-picker-line hidden">
                       <select id="practiceVoiceSelect" class="field-select practice-voice-select" aria-label="Interviewer voice">
                         <option value="af_heart">Heart (US · Warm)</option>
                       </select>
@@ -301,7 +312,6 @@
                     Optional — upload resume (redacted locally) &amp; target job listing
                   </span>
                   <div class="home-profile-actions">
-                    <button id="homeApplyJdRoleBtn" class="link-quiet hidden" type="button">Use JD role</button>
                     <button id="homeEditProfileBtn" class="btn btn-outline btn-sm" type="button">Profile &amp; JD…</button>
                   </div>
                 </div>
@@ -320,7 +330,7 @@
               <button id="practiceStartBtn" class="btn btn-primary btn-lg" type="button">
                 <span id="practiceStartBtnLabel">Start AI mock interview</span>
               </button>
-              <span id="practiceStartHint" class="home-cta-hint">Answer by voice (local Parakeet mic) or typing. Supportive CARL debrief at the end.</span>
+              <span id="practiceStartHint" class="home-cta-hint">Answer out loud or by typing. A supportive debrief follows.</span>
             </div>
           </div>
 
@@ -534,7 +544,8 @@
       <main id="practiceWorkspace" class="practice-workspace hidden" aria-label="AI Mock Practice">
         <div class="practice-bar">
           <div class="practice-bar-left">
-            <button id="practiceHomeBtn" class="btn btn-ghost btn-sm" type="button">← Home</button>
+            <button id="practiceHomeBtn" class="btn btn-ghost btn-sm studio-back" type="button" title="Save and return home"><svg class="icon-xs" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M9.75 3.5L5.25 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg><span>Home</span></button>
+            <span class="studio-bar-rule" aria-hidden="true"></span>
             <div class="practice-title-block">
               <span id="practiceRoleTitle" class="practice-role-title">Senior Software Engineer</span>
               <span id="practiceMetaPill" class="practice-meta-pill">Behavioral · L5</span>
@@ -556,17 +567,36 @@
               <span class="speaking-bars" aria-hidden="true"><span></span><span></span><span></span></span>
               <span id="practiceBargeInLabel">Stop speaking</span>
             </button>
-            <button id="practiceVoiceToggleBtn" class="btn btn-ghost btn-sm" type="button" title="Toggle AI voice playback">
-              <span id="practiceVoiceToggleLabel">Voice: On</span>
+            <button id="practiceVoiceToggleBtn" class="studio-pill" type="button" aria-pressed="true" title="Turn the interviewer's voice on or off">
+              <svg class="icon-sm studio-pill-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M2.5 6.25h2.1L8 3.5v9L4.6 9.75H2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+                <path class="voice-waves" d="M10.4 5.9a3 3 0 010 4.2M12.2 4.2a5.4 5.4 0 010 7.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+                <path class="voice-mute" d="M10.75 6.25l3 3.5M13.75 6.25l-3 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              </svg>
+              <span id="practiceVoiceToggleLabel">Voice on</span>
             </button>
-            <button id="practiceHintBtn" class="btn btn-outline btn-sm" type="button" title="Ask the supportive coach for a gentle hint">
+            <button id="practiceHintBtn" class="btn btn-ghost btn-sm studio-action" type="button" title="Ask the supportive coach for a gentle hint">
               Hint
             </button>
-            <button id="practiceNextQBtn" class="btn btn-outline btn-sm" type="button" title="Move to the next question">
+            <button id="practiceNextQBtn" class="btn btn-ghost btn-sm studio-action" type="button" title="Move to the next question">
               Next Q
             </button>
-            <button id="practiceDebriefBtn" class="btn btn-primary btn-sm" type="button">
-              End &amp; CARL Debrief
+            <button id="practiceDebriefBtn" class="btn btn-outline btn-sm practice-end-btn" type="button" title="Finish the session and get your coaching debrief">
+              End &amp; Debrief
+            </button>
+            <span class="studio-bar-rule" aria-hidden="true"></span>
+            <button id="practiceProfileBtn" class="btn btn-ghost btn-icon btn-sm" type="button" title="Profile, target job listing &amp; question banks" aria-label="Profile">
+              <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="8" cy="5.5" r="2.6" stroke="currentColor" stroke-width="1.4" />
+                <path d="M2.9 13.4c.7-2.2 2.7-3.5 5.1-3.5s4.4 1.3 5.1 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+            </button>
+            <button id="practiceSettingsBtn" class="btn btn-ghost btn-icon btn-sm" type="button" title="Settings" aria-label="Settings">
+              <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M2.5 4.75h5.25M11 4.75h2.5M2.5 11.25h2.5M8.25 11.25h5.25" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                <circle cx="9.4" cy="4.75" r="1.6" stroke="currentColor" stroke-width="1.4" />
+                <circle cx="6.6" cy="11.25" r="1.6" stroke="currentColor" stroke-width="1.4" />
+              </svg>
             </button>
           </div>
         </div>
@@ -581,23 +611,30 @@
               <div id="practiceFeed" class="practice-feed" aria-live="polite"></div>
 
               <div id="practiceComposerWrap" class="practice-composer">
-                <div class="practice-composer-tools">
-                  <button id="practiceMicBtn" class="btn btn-outline btn-sm practice-mic-btn" type="button" title="Record voice answer locally with Parakeet (stops AI voice immediately)">
-                    <span class="mic-dot" aria-hidden="true"></span>
+                <div class="practice-composer-input-row composer-dock">
+                  <button id="practiceMicBtn" class="practice-mic-btn mic-hero" type="button" title="Answer out loud — transcribed on this Mac. Starting to speak silences the interviewer instantly.">
+                    <span class="mic-orb" aria-hidden="true">
+                      <svg class="mic-glyph" viewBox="0 0 16 16" fill="none">
+                        <rect x="5.75" y="1.75" width="4.5" height="8" rx="2.25" stroke="currentColor" stroke-width="1.4" />
+                        <path d="M3.25 7.75a4.75 4.75 0 009.5 0M8 12.5v2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                      </svg>
+                      <span class="mic-dot"></span>
+                    </span>
                     <span id="practiceMicLabel">Speak answer</span>
                   </button>
-                  <span id="practiceMicStatus" class="practice-mic-status">100% local Parakeet speech-to-text · or type below</span>
-                </div>
-                <div class="practice-composer-input-row">
                   <textarea
                     id="practiceAnswerInput"
                     class="practice-textarea"
-                    rows="3"
-                    placeholder="Share your answer here (or press Speak answer)…  ⌘↵ to send"
+                    rows="2"
+                    placeholder="Speak, or type your answer here…"
                   ></textarea>
                   <button id="practiceSendBtn" class="btn btn-primary practice-send-btn" type="button">
                     Send
                   </button>
+                </div>
+                <div class="practice-composer-tools">
+                  <span id="practiceMicStatus" class="practice-mic-status">Transcribed privately on this Mac</span>
+                  <span class="composer-kbd"><kbd>⌘↵</kbd> to send</span>
                 </div>
               </div>
             </div>
@@ -608,48 +645,59 @@
 
               <section id="practiceRetryCard" class="practice-retry-card hidden">
                 <div class="practice-retry-head">
-                  <div>
-                    <div class="practice-kicker">45-Second Retry Weak Part Drill</div>
-                    <h3 id="practiceRetryFocus" class="practice-retry-focus">Sharpen your CARL finish</h3>
+                  <div class="practice-retry-headline">
+                    <div class="practice-kicker">45-second retry drill</div>
+                    <h3 id="practiceRetryFocus" class="practice-retry-focus">Sharpen your finish</h3>
                   </div>
                   <div class="practice-retry-timer-wrap">
-                    <span id="practiceRetryClock" class="practice-retry-clock">0:45</span>
-                    <button id="practiceRetryTimerBtn" class="btn btn-outline btn-sm" type="button">Start 45s timer</button>
+                    <span id="practiceRetryRing" class="retry-ring" aria-hidden="true"></span>
+                    <span id="practiceRetryClock" class="practice-retry-clock" role="timer" aria-live="off">0:45</span>
+                    <button id="practiceRetryTimerBtn" class="chip-action" type="button">Start timer</button>
                   </div>
                 </div>
                 <p id="practiceRetryPrompt" class="practice-retry-prompt"></p>
-                <div class="practice-composer-tools">
-                  <button id="practiceRetryMicBtn" class="btn btn-outline btn-sm practice-mic-btn" type="button">
-                    <span class="mic-dot" aria-hidden="true"></span>
+                <div class="practice-composer-input-row composer-dock retry-dock">
+                  <button id="practiceRetryMicBtn" class="practice-mic-btn mic-hero" type="button" title="Speak your retry — the countdown starts when you do">
+                    <span class="mic-orb" aria-hidden="true">
+                      <svg class="mic-glyph" viewBox="0 0 16 16" fill="none">
+                        <rect x="5.75" y="1.75" width="4.5" height="8" rx="2.25" stroke="currentColor" stroke-width="1.4" />
+                        <path d="M3.25 7.75a4.75 4.75 0 009.5 0M8 12.5v2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                      </svg>
+                      <span class="mic-dot"></span>
+                    </span>
                     <span id="practiceRetryMicLabel">Speak retry</span>
                   </button>
-                  <span id="practiceRetryMicStatus" class="practice-mic-status">Quick 45-second rep — voice or text</span>
+                  <textarea
+                    id="practiceRetryInput"
+                    class="practice-textarea"
+                    rows="2"
+                    placeholder="Say the stronger version, or type it here…"
+                  ></textarea>
+                  <button id="practiceRetrySubmitBtn" class="btn btn-primary practice-send-btn retry-submit-btn" type="button">Evaluate Retry</button>
                 </div>
-                <textarea
-                  id="practiceRetryInput"
-                  class="practice-textarea"
-                  rows="3"
-                  placeholder="Deliver your crisp 45-second improved version…"
-                ></textarea>
-                <div class="practice-retry-actions">
-                  <button id="practiceRetrySubmitBtn" class="btn btn-primary" type="button">Evaluate Retry</button>
+                <div class="practice-composer-tools">
+                  <span id="practiceRetryMicStatus" class="practice-mic-status">One focused rep — the clock starts when you speak</span>
                 </div>
                 <div id="practiceRetryHistory" class="practice-retry-history"></div>
               </section>
 
               <div class="practice-debrief-footer">
-                <button id="practiceExportMdBtn" class="btn btn-outline" type="button">Export Coaching Report (.md)</button>
-                <button id="practiceToggleTranscriptBtn" class="btn btn-ghost" type="button">Show full transcript</button>
+                <button id="practiceToggleTranscriptBtn" class="btn btn-ghost transcript-toggle" type="button" aria-expanded="false">Show full transcript</button>
+                <span class="debrief-footer-spacer" aria-hidden="true"></span>
+                <button id="practiceExportMdBtn" class="btn btn-outline" type="button" title="Download this coaching report as Markdown">Export Report</button>
                 <button id="practiceNewFromDebriefBtn" class="btn btn-primary" type="button">Start another practice</button>
               </div>
               <div id="practiceDebriefTranscript" class="practice-debrief-transcript hidden"></div>
             </div>
           </section>
 
-          <aside class="practice-side" aria-label="Supportive CARL Coach">
-            <section class="practice-side-card">
+          <aside class="practice-side" aria-label="Supportive Coach">
+            <section id="practiceMeterCard" class="practice-side-card practice-meter-card">
               <div class="practice-side-head">
-                <span class="practice-kicker">Live CARL Meter</span>
+                <span class="practice-kicker">
+                  <span id="practiceMeterKicker">Live CARL Meter</span>
+                  <button id="practiceMeterHelp" class="meter-help" type="button" aria-label="What these signals mean" title="Context → Action (what you drove) → Result (metric or outcome) → Learning.">?</button>
+                </span>
                 <span id="practiceCarlScore" class="practice-carl-score">0 / 4</span>
               </div>
               <div id="practiceCarlPills" class="carl-meter-grid">
@@ -658,9 +706,6 @@
                 <div class="carl-pill" data-carl-dim="result"><span class="carl-letter">R</span><span class="carl-name">Result</span><span class="carl-state">Pending</span></div>
                 <div class="carl-pill" data-carl-dim="learning"><span class="carl-letter">L</span><span class="carl-name">Learning</span><span class="carl-state">Pending</span></div>
               </div>
-              <p class="practice-carl-legend">
-                <strong>C</strong>ontext → <strong>A</strong>ction (what YOU drove) → <strong>R</strong>esult (metric/outcome) → <strong>L</strong>earning.
-              </p>
             </section>
 
             <section id="practiceCoachCard" class="practice-side-card practice-coach-card">
@@ -673,9 +718,9 @@
               </p>
             </section>
 
-            <section class="practice-side-card">
+            <section id="practiceRoadmapCard" class="practice-side-card practice-roadmap-card">
               <div class="practice-side-head">
-                <span class="practice-kicker">Question Roadmap</span>
+                <span id="practiceRoadmapKicker" class="practice-kicker">Question Roadmap</span>
               </div>
               <div id="practiceRoadmap" class="practice-roadmap"></div>
             </section>
@@ -793,13 +838,19 @@
           <div id="settingsAddonsSection" class="set-section">
             <div class="set-section-head">
               <div>
-                <div class="set-section-title">Add-Ons &amp; Optional Modules</div>
-                <p class="set-section-note">Keep the core app lean, or toggle practice studios and download local on-device models on demand.</p>
+                <div class="set-section-title">Add-Ons</div>
+                <p class="set-section-note">Keep Mockery lean. Switch studios on when you want them, and add on-device voices or tools only if you need them.</p>
               </div>
             </div>
-            <div class="addons-subhead">Modules (instant toggle)</div>
+            <div class="addons-subhead">
+              <span>Studio Modules</span>
+              <span class="addons-subhead-note">Switch on or off instantly</span>
+            </div>
             <div id="addonsModulesList" class="addons-list"></div>
-            <div class="addons-subhead">Downloadable local packs</div>
+            <div class="addons-subhead">
+              <span>Downloadable Local Packs</span>
+              <span class="addons-subhead-note">Downloaded once · kept on this Mac</span>
+            </div>
             <div id="addonsPacksList" class="addons-list"></div>
           </div>
 
@@ -827,23 +878,24 @@
     <!-- First-run welcome / 2-step setup wizard -->
     <div id="onboardingModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="onboardingModalTitle">
       <div class="modal-card onboarding-card">
-        <div class="modal-header">
+        <div class="modal-header onboard-header">
           <div class="onboard-head-wrap">
             <h3 id="onboardingModalTitle">Welcome to Mockery</h3>
-            <div class="onboard-steps" role="tablist" aria-label="Setup steps">
-              <button type="button" class="onboard-step-pill active" data-onboard-step="ai" role="tab" aria-selected="true">
-                <span class="onboard-step-num">1</span> Connect AI
-              </button>
-              <button type="button" class="onboard-step-pill" data-onboard-step="packs" role="tab" aria-selected="false">
-                <span class="onboard-step-num">2</span> Local Voice &amp; Packs
-              </button>
-            </div>
+            <button id="closeOnboardingBtn" class="btn btn-ghost btn-icon" type="button" aria-label="Close setup">
+              <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+            </button>
           </div>
-          <button id="closeOnboardingBtn" class="btn btn-ghost btn-icon" type="button" aria-label="Close setup">
-            <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-            </svg>
-          </button>
+          <div class="onboard-steps" role="tablist" aria-label="Setup progress">
+            <button type="button" class="onboard-step-pill active" data-onboard-step="ai" role="tab" aria-selected="true">
+              <span class="onboard-step-num">1</span><span class="onboard-step-label">Connect AI</span>
+            </button>
+            <span class="onboard-step-rail" aria-hidden="true"></span>
+            <button type="button" class="onboard-step-pill" data-onboard-step="packs" role="tab" aria-selected="false">
+              <span class="onboard-step-num">2</span><span class="onboard-step-label">Voice &amp; add-ons</span>
+            </button>
+          </div>
         </div>
 
         <div class="modal-body">
@@ -882,28 +934,26 @@
           <!-- Step 2: Local Voice & Packs -->
           <div id="onboardStepPacks" class="hidden">
             <p class="onboarding-intro">
-              Pick a <strong>local neural voice</strong> so your Practice Mode interviewer sounds genuinely human — 100% offline on your Mac with zero API fees. You can install one or both and switch voices anytime.
+              Give your interviewer a <strong>natural voice</strong>. It runs entirely on this Mac — no account, no fees — and you can switch or remove it anytime.
             </p>
 
             <div class="onboard-voice-grid">
               <div id="onboardPhononCard" class="onboard-hero-pack is-recommended">
                 <div class="onboard-hero-pack-main">
                   <div class="onboard-hero-pack-title">
-                    <span>Phonon-31M Fast</span>
-                    <span class="addon-size-pill is-rec">62 MB · Fastest</span>
+                    <span>Phonon</span>
+                    <span class="addon-size-pill is-rec">Recommended</span>
                   </div>
-                  <p class="onboard-hero-pack-desc">
-                    Ultra-light Apache 2.0 neural voice (~30× real-time on CPU). Tiny download, instant responses.
-                  </p>
+                  <p class="onboard-hero-pack-desc">Instant response · Lightweight (62 MB)</p>
                   <div id="onboardPhononError" class="addon-row-err hidden"></div>
                 </div>
                 <div class="onboard-hero-pack-actions">
                   <span id="onboardPhononBadge" class="addon-state-badge is-ok hidden">Installed</span>
-                  <button id="onboardPhononPreviewBtn" class="btn btn-outline btn-sm hidden" type="button">
+                  <button id="onboardPhononPreviewBtn" class="btn btn-outline btn-sm preview-btn hidden" type="button">
                     Preview Phonon
                   </button>
                   <button id="onboardPhononInstallBtn" class="btn btn-primary btn-sm" type="button">
-                    Install Phonon (62 MB)
+                    Install Phonon
                   </button>
                 </div>
               </div>
@@ -911,42 +961,41 @@
               <div id="onboardKokoroCard" class="onboard-hero-pack">
                 <div class="onboard-hero-pack-main">
                   <div class="onboard-hero-pack-title">
-                    <span>Kokoro-82M Studio</span>
-                    <span class="addon-size-pill">183 MB · Studio</span>
+                    <span>Kokoro</span>
+                    <span class="addon-size-pill">Studio quality</span>
                   </div>
-                  <p class="onboard-hero-pack-desc">
-                    Richer FP16 local neural synthesis with warm US &amp; UK interviewer voices (~4× real-time).
-                  </p>
+                  <p class="onboard-hero-pack-desc">Warm studio cadence · Natural pauses (183 MB)</p>
                   <div id="onboardKokoroError" class="addon-row-err hidden"></div>
                 </div>
                 <div class="onboard-hero-pack-actions">
                   <span id="onboardKokoroBadge" class="addon-state-badge is-ok hidden">Installed</span>
-                  <button id="onboardKokoroPreviewBtn" class="btn btn-outline btn-sm hidden" type="button">
+                  <button id="onboardKokoroPreviewBtn" class="btn btn-outline btn-sm preview-btn hidden" type="button">
                     Preview Kokoro
                   </button>
                   <button id="onboardKokoroInstallBtn" class="btn btn-outline btn-sm" type="button">
-                    Install Kokoro (183 MB)
+                    Install Kokoro
                   </button>
                 </div>
               </div>
             </div>
 
             <div class="onboard-group">
-              <div class="set-section-title">Optional local add-ons (you can also install anytime in Settings)</div>
+              <div class="set-section-title">Optional extras</div>
               <div id="onboardOptionalPacksList" class="onboard-packs-list"></div>
             </div>
           </div>
         </div>
 
-        <div class="modal-footer">
+        <div class="modal-footer onboard-footer">
           <div class="onboard-footer-left">
-            <button id="onboardSkipBtn" class="link-quiet" type="button">Skip — use Transcript-Only mode</button>
-            <button id="onboardBackBtn" class="btn btn-ghost btn-sm hidden" type="button">← Back</button>
+            <button id="onboardSkipBtn" class="link-quiet" type="button">Skip — transcripts only for now</button>
+            <button id="onboardBackBtn" class="btn btn-ghost hidden" type="button">Back</button>
           </div>
           <div class="onboard-footer-right">
-            <button id="onboardMoreBtn" class="btn btn-ghost btn-sm" type="button">All Settings…</button>
-            <button id="onboardNextStepBtn" class="btn btn-outline btn-sm" type="button">Next: Local Voice →</button>
-            <button id="onboardDoneBtn" class="btn btn-primary btn-sm hidden" type="button">Start using Mockery</button>
+            <!-- Kept for existing wiring; the Settings detour is intentionally not offered during onboarding. -->
+            <button id="onboardMoreBtn" class="hidden" type="button" tabindex="-1" aria-hidden="true">All Settings…</button>
+            <button id="onboardNextStepBtn" class="btn btn-outline" type="button">Continue</button>
+            <button id="onboardDoneBtn" class="btn btn-primary hidden" type="button">Start using Mockery</button>
           </div>
         </div>
       </div>
@@ -970,31 +1019,38 @@
     <!-- Candidate Profile, Local PII Redaction, Target Job Listing & Question Banks -->
     <div id="profileModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
       <div class="modal-card modal-card-xl">
-        <div class="modal-header">
+        <div class="modal-header profile-header">
           <div class="profile-modal-head-left">
             <h3 id="profileModalTitle">Candidate Profile</h3>
-            <div class="tabs profile-tabs" role="tablist" aria-label="Profile sections">
-              <button type="button" class="tab active" role="tab" aria-selected="true" data-profile-tab="resume">Resume &amp; Privacy</button>
-              <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="jd">Target Job</button>
-              <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="banks">Question Banks</button>
-            </div>
+            <button id="closeProfileBtn" class="btn btn-ghost btn-icon" type="button" aria-label="Close profile">
+              <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+            </button>
           </div>
-          <button id="closeProfileBtn" class="btn btn-ghost btn-icon" type="button" aria-label="Close profile">
-            <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-            </svg>
-          </button>
+          <div class="tabs profile-tabs" role="tablist" aria-label="Profile sections">
+            <button type="button" class="tab active" role="tab" aria-selected="true" data-profile-tab="resume">Resume &amp; Privacy</button>
+            <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="jd">Target Job</button>
+            <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="banks">Question Banks</button>
+          </div>
         </div>
 
         <div class="modal-body profile-modal-body">
           <!-- Tab 1: Resume & Rampart Local PII Redaction -->
           <section id="profileTabResume" class="profile-tab-panel">
             <div class="rampart-banner">
+              <svg class="rampart-banner-glyph" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M10 2.5l6 2.2v4.6c0 3.6-2.4 6.6-6 8.2-3.6-1.6-6-4.6-6-8.2V4.7z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+                <path d="M7.4 10.1l1.9 1.9 3.4-3.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
               <div class="rampart-banner-info">
-                <span id="rampartEngineBadge" class="rampart-badge">Checking local redactor…</span>
-                <span class="set-note">Your raw resume stays on this Mac. Only the scrubbed preview below is ever sent to cloud LLMs.</span>
+                <div class="rampart-banner-title">
+                  <span>Your resume stays on this Mac</span>
+                  <span id="rampartEngineBadge" class="rampart-badge">Checking…</span>
+                </div>
+                <span class="set-note">Personal details are hidden here first. Only the preview below is ever shared with a cloud AI.</span>
               </div>
-              <button id="installRampartQuickBtn" class="btn btn-outline btn-sm hidden" type="button">Install Rampart (14.7 MB)</button>
+              <button id="installRampartQuickBtn" class="btn btn-outline btn-sm hidden" type="button">Add smart detection</button>
             </div>
 
             <input id="resumeFileInput" type="file" accept=".pdf,.docx,.txt,.md,.rtf" class="hidden" />
@@ -1002,7 +1058,7 @@
             <div id="resumeEmptyState" class="resume-dropzone" tabindex="0">
               <div id="resumeDropzone" class="resume-dropzone-inner">
                 <div class="quiet-title">Upload your resume</div>
-                <p class="set-note">PDF, DOCX, or TXT — parsed and scrubbed locally with America.gov's Rampart ONNX classifier.</p>
+                <p class="set-note">PDF, DOCX, or TXT. It is read and scrubbed on this Mac before anything else happens.</p>
                 <div class="resume-empty-actions">
                   <button id="resumeChooseFileBtn" class="btn btn-primary" type="button">Choose file…</button>
                   <button id="resumeTogglePasteBtn" class="btn btn-ghost" type="button">Paste text instead</button>
@@ -1031,26 +1087,28 @@
 
               <div class="redaction-controls">
                 <label class="check-line">
-                  <input id="prefKeepLocation" class="studio-check" type="checkbox" checked />
-                  <span>Keep City / State</span>
+                  <input id="prefKeepLocation" class="switch" type="checkbox" role="switch" checked />
+                  <span>Keep city &amp; state</span>
                 </label>
                 <label class="check-line">
-                  <input id="prefHideOrgs" class="studio-check" type="checkbox" />
-                  <span>Hide Employers &amp; Schools</span>
+                  <input id="prefHideOrgs" class="switch" type="checkbox" role="switch" />
+                  <span>Hide employers &amp; schools</span>
                 </label>
                 <div class="redaction-custom-wrap">
-                  <input id="prefCustomTerms" class="field-input field-input-sm" type="text" placeholder="Extra words to scrub (comma-separated)" />
+                  <input id="prefCustomTerms" class="field-input field-input-sm" type="text" placeholder="Also hide these words (comma-separated)" />
                   <button id="prefApplyCustomBtn" class="btn btn-outline btn-sm" type="button">Apply</button>
                 </div>
               </div>
 
               <div class="redaction-section-label">
-                <span>Detected items — click any item to toggle redaction</span>
+                <span>Personal details found</span>
+                <span class="redaction-section-hint">Click one to switch between Hidden and Visible</span>
               </div>
               <div id="resumePiiChips" class="pii-chips-wrap"></div>
 
               <div class="redaction-section-label">
-                <span>What leaves your Mac (exact text sent to AI)</span>
+                <span>What leaves your Mac</span>
+                <span class="redaction-section-hint">Exactly what the AI reads — hidden details become neutral placeholders</span>
               </div>
               <pre id="resumeRedactedPreview" class="redacted-preview"></pre>
             </div>
@@ -1106,17 +1164,17 @@
                 <option value="EM">EM</option>
               </select>
               <label class="check-line">
-                <input id="bankMatchJdCheckbox" class="studio-check" type="checkbox" checked />
-                <span>Rank for active JD</span>
+                <input id="bankMatchJdCheckbox" class="switch" type="checkbox" role="switch" checked />
+                <span>Rank for my target job</span>
               </label>
-              <span id="banksCountLabel" class="set-note banks-count-label"></span>
             </div>
+            <div id="banksCountLabel" class="banks-count-label"></div>
             <div id="banksListContainer" class="banks-list"></div>
           </section>
         </div>
 
         <div class="modal-footer">
-          <span class="modal-kbd-hints">Stored locally on this Mac with 0600 permissions</span>
+          <span id="profileFooterHint" class="modal-kbd-hints profile-footer-hint">Saved privately on this Mac</span>
           <div class="modal-footer-btns">
             <button id="doneProfileBtn" class="btn btn-primary" type="button">Done</button>
           </div>
@@ -1124,6 +1182,6 @@
       </div>
     </div>
 
-    <script type="module" src="/static/app.js?v=mockery4"></script>
+    <script type="module" src="/static/app.js?v=mockery5"></script>
   </body>
 </html>
