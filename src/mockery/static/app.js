@@ -3188,10 +3188,17 @@ async function saveSettings() {
 
 function shouldPromptVoiceStep() {
   if (state.tts) {
-    return Boolean(state.tts.kokoro_available && !state.tts.kokoro_installed);
+    const anyInstalled = Boolean(
+      state.tts.neural_installed || state.tts.kokoro_installed || state.tts.phonon_installed
+    );
+    const anyAvailable = Boolean(state.tts.kokoro_available || state.tts.phonon_available);
+    return anyAvailable && !anyInstalled;
   }
-  const kokoro = (state.addons?.packs || []).find((p) => p.id === "kokoro_tts");
-  return Boolean(kokoro && kokoro.available && !kokoro.installed);
+  const packs = state.addons?.packs || [];
+  const voicePacks = packs.filter((p) => p.id === "phonon_tts" || p.id === "kokoro_tts");
+  const anyInstalled = voicePacks.some((p) => p.installed);
+  const anyAvailable = voicePacks.some((p) => p.available);
+  return anyAvailable && !anyInstalled;
 }
 
 function isCloudLlmActive() {
@@ -3201,48 +3208,96 @@ function isCloudLlmActive() {
 
 function renderOnboardingPacksStep() {
   const packs = state.addons?.packs || [];
-  const kokoroPack = packs.find((p) => p.id === "kokoro_tts") || null;
-  const kokoroOp = packOps.get("kokoro_tts");
-  const kokoroInstalled = Boolean(state.tts?.kokoro_installed || kokoroPack?.installed);
-  const kokoroAvailable =
-    state.tts?.kokoro_available !== undefined
-      ? Boolean(state.tts.kokoro_available)
-      : kokoroPack?.available !== false;
-  const kokoroSize = kokoroPack?.size_mb || 183;
+  const ttsEngines = state.tts?.engines || {};
 
-  const badgeEl = el("onboardKokoroBadge");
-  const previewBtn = el("onboardKokoroPreviewBtn");
-  const installBtn = el("onboardKokoroInstallBtn");
-  const errEl = el("onboardKokoroError");
+  const renderVoiceCard = ({
+    packId,
+    cardId,
+    badgeId,
+    previewBtnId,
+    installBtnId,
+    errId,
+    shortName,
+    defaultSize,
+    ttsInstalled,
+    ttsAvailable,
+    ttsError,
+  }) => {
+    const pack = packs.find((p) => p.id === packId) || null;
+    const op = packOps.get(packId);
+    const installed = Boolean(ttsInstalled || pack?.installed);
+    const available =
+      ttsAvailable !== undefined ? Boolean(ttsAvailable) : pack?.available !== false;
+    const size = pack?.size_mb || defaultSize;
 
-  if (badgeEl) badgeEl.classList.toggle("hidden", !kokoroInstalled);
-  if (previewBtn) {
-    previewBtn.classList.toggle("hidden", !kokoroInstalled);
-  }
-  if (installBtn) {
-    installBtn.classList.toggle("hidden", kokoroInstalled || !kokoroAvailable);
-    const busy = kokoroOp === "installing" || kokoroOp === "uninstalling";
-    installBtn.disabled = busy;
-    installBtn.textContent =
-      kokoroOp === "installing"
-        ? `Downloading ${kokoroSize} MB…`
-        : kokoroOp === "uninstalling"
-          ? "Removing…"
-          : kokoroPack?.state === "error"
-            ? `Retry voice (${kokoroSize} MB)`
-            : `Install voice (${kokoroSize} MB)`;
-  }
-  if (errEl) {
-    const errMsg = kokoroPack?.error || state.tts?.error || "";
-    errEl.textContent = errMsg;
-    errEl.classList.toggle("hidden", !errMsg);
-  }
+    const cardEl = el(cardId);
+    const badgeEl = el(badgeId);
+    const previewBtn = el(previewBtnId);
+    const installBtn = el(installBtnId);
+    const errEl = el(errId);
 
+    if (cardEl) {
+      cardEl.classList.toggle("is-installed", installed);
+    }
+    if (badgeEl) badgeEl.classList.toggle("hidden", !installed);
+    if (previewBtn) {
+      previewBtn.classList.toggle("hidden", !installed);
+    }
+    if (installBtn) {
+      installBtn.classList.toggle("hidden", installed || !available);
+      const busy = op === "installing" || op === "uninstalling";
+      installBtn.disabled = busy;
+      installBtn.textContent =
+        op === "installing"
+          ? `Downloading ${size} MB…`
+          : op === "uninstalling"
+            ? "Removing…"
+            : pack?.state === "error"
+              ? `Retry ${shortName} (${size} MB)`
+              : `Install ${shortName} (${size} MB)`;
+    }
+    if (errEl) {
+      const errMsg = pack?.error || ttsError || "";
+      errEl.textContent = errMsg;
+      errEl.classList.toggle("hidden", !errMsg);
+    }
+    return installed;
+  };
+
+  const phononInstalled = renderVoiceCard({
+    packId: "phonon_tts",
+    cardId: "onboardPhononCard",
+    badgeId: "onboardPhononBadge",
+    previewBtnId: "onboardPhononPreviewBtn",
+    installBtnId: "onboardPhononInstallBtn",
+    errId: "onboardPhononError",
+    shortName: "Phonon",
+    defaultSize: 62,
+    ttsInstalled: state.tts?.phonon_installed ?? ttsEngines.phonon?.installed,
+    ttsAvailable: state.tts?.phonon_available ?? ttsEngines.phonon?.available,
+    ttsError: ttsEngines.phonon?.error,
+  });
+
+  const kokoroInstalled = renderVoiceCard({
+    packId: "kokoro_tts",
+    cardId: "onboardKokoroCard",
+    badgeId: "onboardKokoroBadge",
+    previewBtnId: "onboardKokoroPreviewBtn",
+    installBtnId: "onboardKokoroInstallBtn",
+    errId: "onboardKokoroError",
+    shortName: "Kokoro",
+    defaultSize: 183,
+    ttsInstalled: state.tts?.kokoro_installed ?? ttsEngines.kokoro?.installed,
+    ttsAvailable: state.tts?.kokoro_available ?? ttsEngines.kokoro?.available,
+    ttsError: ttsEngines.kokoro?.error,
+  });
+
+  const anyVoiceInstalled = phononInstalled || kokoroInstalled;
   const doneBtn = el("onboardDoneBtn");
   if (doneBtn) {
-    doneBtn.textContent = kokoroInstalled ? "Start using Mockery" : "Skip voice for now";
-    doneBtn.classList.toggle("btn-primary", kokoroInstalled);
-    doneBtn.classList.toggle("btn-outline", !kokoroInstalled);
+    doneBtn.textContent = anyVoiceInstalled ? "Start using Mockery" : "Skip voice for now";
+    doneBtn.classList.toggle("btn-primary", anyVoiceInstalled);
+    doneBtn.classList.toggle("btn-outline", !anyVoiceInstalled);
   }
 
   const optList = el("onboardOptionalPacksList");
@@ -3564,8 +3619,8 @@ async function checkInitialOnboarding() {
     if (data.llm?.needs_onboarding && state.modalState === "none") {
       await openOnboardingModal(data, { initialStep: "ai" });
     } else if (
-      data.tts?.kokoro_available &&
-      !data.tts?.kokoro_installed &&
+      (data.tts?.kokoro_available || data.tts?.phonon_available) &&
+      !(data.tts?.neural_installed || data.tts?.kokoro_installed || data.tts?.phonon_installed) &&
       state.modalState === "none"
     ) {
       let seenPacks = false;
@@ -4180,11 +4235,17 @@ function initEvents() {
   el("onboardNextStepBtn")?.addEventListener("click", () => setOnboardStep("packs"));
   el("onboardBackBtn")?.addEventListener("click", () => setOnboardStep("ai"));
   el("onboardDoneBtn")?.addEventListener("click", () => setModalState("none"));
+  el("onboardPhononInstallBtn")?.addEventListener("click", () => {
+    profileAddons?.installPack("phonon_tts");
+  });
+  el("onboardPhononPreviewBtn")?.addEventListener("click", () => {
+    practiceStudio?.previewVoice?.({ engine: "phonon" });
+  });
   el("onboardKokoroInstallBtn")?.addEventListener("click", () => {
     profileAddons?.installPack("kokoro_tts");
   });
   el("onboardKokoroPreviewBtn")?.addEventListener("click", () => {
-    practiceStudio?.previewVoice?.();
+    practiceStudio?.previewVoice?.({ engine: "kokoro" });
   });
   el("onboardOptionalPacksList")?.addEventListener("click", (ev) => {
     const btn = ev.target.closest("[data-onboard-install]");

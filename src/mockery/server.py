@@ -178,6 +178,7 @@ class TTSSpeakRequest(BaseModel):
     text: str
     voice: str | None = None
     rate: float = 1.0
+    engine: str | None = Field(default=None, max_length=24)
 
 
 class PracticeStartRequest(BaseModel):
@@ -341,6 +342,13 @@ class AppRuntime:
         self._asr_http_sem = asyncio.Semaphore(1)
         self._tts_sem = asyncio.Semaphore(2)
 
+        self.addons.register_pack_handler(
+            "phonon_tts",
+            is_installed=self.tts.is_phonon_installed,
+            install=lambda: asyncio.to_thread(self.tts.install_phonon),
+            uninstall=lambda: asyncio.to_thread(self.tts.uninstall_phonon),
+            available=self.tts.is_phonon_available(),
+        )
         self.addons.register_pack_handler(
             "kokoro_tts",
             is_installed=self.tts.is_kokoro_installed,
@@ -946,6 +954,7 @@ def create_app(
                     body.text,
                     voice=body.voice,
                     rate=body.rate,
+                    engine=body.engine,
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))

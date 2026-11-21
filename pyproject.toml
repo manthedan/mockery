@@ -16,6 +16,7 @@ dependencies = [
     "onnxruntime>=1.32.0",
     "openai>=3.52.0",
     "parakeet-mlx>=0.7.0",
+    "ptts>=0.7.1",
     "pypdf>=5.0.0",
     "python-dotenv>=1.2.4",
     "python-multipart>=0.0.20",
