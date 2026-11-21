@@ -69,6 +69,18 @@ LLM_PRESETS: dict[str, dict[str, Any]] = {
         "fast_model": "google/gemini-2.5-flash",
         "calibration_model": "anthropic/claude-sonnet-4",
     },
+    "omlx": {
+        "label": "oMLX (Apple Silicon MLX)",
+        "category": "local",
+        "badge": "Offline · MLX",
+        "hint": "Apple Silicon MLX server with continuous batching & KV caching (default port 8000).",
+        "signup_url": "https://github.com/jundot/omlx",
+        "requires_key": False,
+        "optional_key": True,
+        "base_url": "http://localhost:8000/v1",
+        "fast_model": "local-model",
+        "calibration_model": "local-model",
+    },
     "ollama": {
         "label": "Ollama (100% Local)",
         "category": "local",
