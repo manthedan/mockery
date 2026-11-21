@@ -438,3 +438,102 @@ export function createPackOpTracker(registry = null) {
     },
   };
 }
+
+/* ---------------- Canonical Unified Allowed Actions Derivation (AX) ---------------- */
+
+export function deriveAppAllowedActions({
+  route = "launchpad",
+  modalState = "none",
+  captureState = "idle",
+  wsState = "disconnected",
+  serverAllowedEvents = [],
+  practice = null,
+} = {}) {
+  const actions = [];
+  const add = (a) => {
+    if (a && !actions.includes(a)) actions.push(a);
+  };
+
+  if (modalState && modalState !== "none") {
+    add("close_modal");
+    if (modalState === "settings") add("save_settings");
+    if (modalState === "profile") add("manage_profile");
+    return actions;
+  }
+
+  add("open_settings");
+  add("open_profile");
+
+  if (route === "launchpad") {
+    const practiceEnabled = practice?.practiceEnabled !== false;
+    const isPracticeHome = practiceEnabled && practice?.homeMode === "practice";
+    const practiceBusy = practice?.opState && practice.opState !== "idle";
+    if (captureState === "idle" && !practiceBusy) {
+      if (isPracticeHome) {
+        add("start_practice");
+      } else {
+        add("start_copilot_capture");
+      }
+    }
+    if (practiceEnabled) {
+      if (isPracticeHome) {
+        add("switch_home_copilot");
+      } else {
+        add("switch_home_practice");
+      }
+    }
+    return actions;
+  }
+
+  if (route === "copilot_workspace") {
+    add("switch_right_tab");
+    if (captureState === "idle") {
+      add("go_home");
+      if (wsState === "connected") add("start_copilot_capture");
+    } else if (captureState === "streaming") {
+      add("stop_copilot_capture");
+    }
+    if (Array.isArray(serverAllowedEvents)) {
+      for (const evt of serverAllowedEvents) {
+        if (typeof evt === "string" && evt.trim()) add(evt.trim());
+      }
+    }
+    return actions;
+  }
+
+  if (route === "practice") {
+    const opState = practice?.opState || "idle";
+    const phase = practice?.phase || null;
+    if (opState !== "exiting") {
+      add("exit_practice");
+    }
+    if (phase === "active" && opState === "idle") {
+      add("submit_practice_turn");
+      add("request_practice_hint");
+      add("advance_practice_question");
+      add("finish_practice_debrief");
+      if (practice?.micState === "idle") add("start_practice_mic");
+      if (practice?.micState === "recording") add("stop_practice_mic");
+    } else if (phase === "awaiting_debrief" && opState === "idle") {
+      add("finish_practice_debrief");
+    }
+    if (practice?.retryTimerState === "running" || practice?.retryTimerState === "warning") {
+      add("cancel_practice_retry");
+    }
+    if (practice?.workspaceSaveState === "error") {
+      add("retry_workspace_save");
+    }
+    if (phase === "completed" && opState === "idle") {
+      add("restart_practice");
+    }
+    const studioActions = practice?.mountedStudio?.allowedActions;
+    if (Array.isArray(studioActions)) {
+      for (const a of studioActions) {
+        if (typeof a === "string" && a.trim()) add(`studio:${a.trim()}`);
+      }
+    }
+    return actions;
+  }
+
+  return actions;
+}
