@@ -13,5 +13,9 @@ wheels/
 .env
 .env.local
 sessions/
+models/
+practice/
+profiles/
+addons.json
 evals/runs/
 .DS_Store

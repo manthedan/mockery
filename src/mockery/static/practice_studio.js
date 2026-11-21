@@ -272,13 +272,15 @@ export function createPracticeStudioController({
       local.ttsStatus = data.tts;
       const voiceLbl = el("practiceVoiceLabel");
       if (voiceLbl) {
-        const eng =
-          data.tts.engine === "kokoro"
-            ? "Kokoro-82M neural voice"
-            : data.tts.engine === "macos_say"
-            ? "macOS local voice"
-            : "browser voice";
-        voiceLbl.textContent = `AI speaks questions aloud (${eng}, instant barge-in)`;
+        if (data.tts.engine === "kokoro") {
+          voiceLbl.textContent = "AI speaks questions aloud (Kokoro-82M neural voice, instant barge-in)";
+        } else if (data.tts.engine === "macos_say") {
+          voiceLbl.textContent = data.tts.kokoro_available
+            ? "AI speaks questions aloud (macOS fallback — install Kokoro-82M in Settings → Add-Ons for natural voice)"
+            : "AI speaks questions aloud (macOS local voice, instant barge-in)";
+        } else {
+          voiceLbl.textContent = "AI speaks questions aloud (browser voice, instant barge-in)";
+        }
       }
     }
     if (data?.addons?.modules_map) {

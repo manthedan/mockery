@@ -65,6 +65,89 @@ def test_local_tts_macos_wav_and_flag_safety(tmp_path: Path):
         assert wf.getnframes() > 500
 
 
+def test_kokoro_verified_download_and_synthesis_routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import asyncio
+    import hashlib
+    import httpx
+    import mockery.tts as tts_mod
+
+    engine = LocalTTSEngine(tmp_path / "models")
+    assert engine.is_kokoro_available() is True
+    assert engine.is_kokoro_installed() is False
+
+    fake_model = b"fake-kokoro-fp16-onnx-bytes"
+    fake_voices = b"fake-voices-npz-bytes"
+    model_sha = hashlib.sha256(fake_model).hexdigest()
+    voices_sha = hashlib.sha256(fake_voices).hexdigest()
+
+    monkeypatch.setattr(
+        tts_mod,
+        "KOKORO_ASSETS",
+        (
+            ("kokoro-v1.0.fp16.onnx", "https://example.test/kokoro-v1.0.fp16.onnx", model_sha),
+            ("voices-v1.0.bin", "https://example.test/voices-v1.0.bin", voices_sha),
+        ),
+    )
+
+    # 1. Checksum mismatch must fail and leave no partial/corrupt files behind
+    bad_transport = httpx.MockTransport(lambda req: httpx.Response(200, content=b"tampered"))
+    with httpx.Client(transport=bad_transport) as bad_client:
+        with pytest.raises(RuntimeError, match="Checksum mismatch"):
+            engine.install_kokoro(client=bad_client)
+    assert engine.is_kokoro_installed() is False
+    assert not (engine.models_dir / "kokoro-v1.0.fp16.onnx").exists()
+    assert not (engine.models_dir / "kokoro-v1.0.fp16.onnx.tmp").exists()
+
+    # 2. Valid verified download + stubbed Kokoro runtime routes synthesis to `kokoro`
+    class _StubKokoro:
+        def __init__(self, model_path: str, voices_path: str) -> None:
+            self.model_path = model_path
+            self.voices_path = voices_path
+            self.calls: list[tuple[str, str, float, str]] = []
+
+        def create(self, text: str, *, voice: str, speed: float, lang: str):
+            self.calls.append((text, voice, speed, lang))
+            return np.zeros(2400, dtype=np.float32), 24000
+
+    stub_holder: dict[str, _StubKokoro] = {}
+
+    def _fake_ensure_loaded() -> bool:
+        mp = engine._resolve_model_path()
+        assert mp is not None and mp.name == "kokoro-v1.0.fp16.onnx"
+        stub = _StubKokoro(str(mp), str(engine.models_dir / "voices-v1.0.bin"))
+        engine._kokoro = stub
+        engine._kokoro_error = None
+        stub_holder["stub"] = stub
+        return True
+
+    monkeypatch.setattr(engine, "_ensure_kokoro_loaded", _fake_ensure_loaded)
+
+    def _ok_handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("kokoro-v1.0.fp16.onnx"):
+            return httpx.Response(200, content=fake_model)
+        if req.url.path.endswith("voices-v1.0.bin"):
+            return httpx.Response(200, content=fake_voices)
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(_ok_handler)) as ok_client:
+        assert engine.install_kokoro(client=ok_client) is True
+
+    assert engine.is_kokoro_installed() is True
+    st = engine.status_dict()
+    assert st["engine"] == "kokoro"
+    assert st["backend_state"] == "kokoro_ready"
+    assert st["default_voice"] == "af_heart"
+
+    wav_bytes, used = asyncio.run(engine.synthesize_wav("Tell me about scaling Redis.", voice="bf_emma", rate=1.05))
+    assert used == "kokoro"
+    assert wav_bytes[:4] == b"RIFF"
+    assert stub_holder["stub"].calls[-1] == ("Tell me about scaling Redis.", "bf_emma", 1.05, "en-gb")
+
+    # 3. Uninstall cleans up cleanly
+    assert engine.uninstall_kokoro() is True
+    assert engine.is_kokoro_installed() is False
+
+
 def test_carl_heuristic_monotonic_and_nudge():
     c1 = estimate_carl_heuristic("When I worked on our legacy payment project, we had an outage.")
     assert c1["context"] in ("partial", "strong")
