@@ -302,7 +302,8 @@ def build_heuristic_nudge(carl: dict[str, str], interview_type: str) -> dict[str
 class PracticeSessionStore:
     """
     Thread-safe JSON persistence for AI Practice sessions under `<data_root>/practice/<id>.json`
-    with exclusive 0600 atomic writes and snapshot-isolated bounded LRU caching.
+    with exclusive 0600 atomic writes, snapshot-isolated bounded LRU caching, and
+    `(mtime_ns, size)`-keyed summary caching for fast `list_recent()`.
     """
 
     def __init__(self, practice_dir: Path) -> None:
@@ -314,6 +315,38 @@ class PracticeSessionStore:
             pass
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, PracticeSession] = OrderedDict()
+        self._summary_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
+
+    @staticmethod
+    def _summary_from_raw(raw: dict[str, Any], stem: str) -> dict[str, Any]:
+        cfg = raw.get("config") or {}
+        return {
+            "id": raw.get("id", stem),
+            "created_at_iso": raw.get("created_at_iso", ""),
+            "role_title": raw.get("role_title", "Practice Interview"),
+            "company": raw.get("company", ""),
+            "interview_type": cfg.get("interview_type", "behavioral"),
+            "target_level": cfg.get("target_level", "L5"),
+            "phase": raw.get("phase", "active"),
+            "question_count": len(raw.get("questions") or []),
+            "turn_count": len(raw.get("turns") or []),
+            "has_debrief": bool(raw.get("debrief")),
+        }
+
+    @staticmethod
+    def _summary_from_session(session: PracticeSession) -> dict[str, Any]:
+        return {
+            "id": session.id,
+            "created_at_iso": session.created_at_iso,
+            "role_title": session.role_title,
+            "company": session.company,
+            "interview_type": session.config.interview_type,
+            "target_level": session.config.target_level,
+            "phase": session.phase,
+            "question_count": len(session.questions),
+            "turn_count": len(session.turns),
+            "has_debrief": bool(session.debrief),
+        }
 
     def _safe_path(self, session_id: str) -> Path:
         if not re.match(r"^[A-Za-z0-9_\-]{4,64}$", session_id or ""):
@@ -348,6 +381,15 @@ class PracticeSessionStore:
                     pass
                 raise
             self._put_cache_locked(snapshot)
+            try:
+                st = os.stat(path)
+                self._summary_cache[path.name] = (
+                    st.st_mtime_ns,
+                    st.st_size,
+                    self._summary_from_session(snapshot),
+                )
+            except OSError:
+                self._summary_cache.pop(path.name, None)
         session.updated_at_ms = snapshot.updated_at_ms
         return snapshot.model_copy(deep=True)
 
@@ -374,29 +416,44 @@ class PracticeSessionStore:
         items: list[dict[str, Any]] = []
         with self._lock:
             if not self.practice_dir.is_dir():
+                self._summary_cache.clear()
                 return []
-            files = sorted(
-                self.practice_dir.glob("*.json"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            for p in files[:limit]:
+            entries: list[tuple[int, int, str, str]] = []
+            live_names: set[str] = set()
+            try:
+                with os.scandir(self.practice_dir) as it:
+                    for entry in it:
+                        name = entry.name
+                        if not name.endswith(".json") or name.startswith("."):
+                            continue
+                        try:
+                            st = entry.stat()
+                        except OSError:
+                            continue
+                        if not entry.is_file():
+                            continue
+                        live_names.add(name)
+                        entries.append((st.st_mtime_ns, st.st_size, name, entry.path))
+            except OSError:
+                return []
+
+            if len(self._summary_cache) > len(live_names):
+                for stale in list(self._summary_cache.keys()):
+                    if stale not in live_names:
+                        self._summary_cache.pop(stale, None)
+
+            entries.sort(key=lambda row: row[0], reverse=True)
+            for mtime_ns, size, name, full_path in entries[:limit]:
+                cached = self._summary_cache.get(name)
+                if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+                    items.append(dict(cached[2]))
+                    continue
                 try:
-                    raw = json.loads(p.read_text(encoding="utf-8"))
-                    items.append(
-                        {
-                            "id": raw.get("id", p.stem),
-                            "created_at_iso": raw.get("created_at_iso", ""),
-                            "role_title": raw.get("role_title", "Practice Interview"),
-                            "company": raw.get("company", ""),
-                            "interview_type": (raw.get("config") or {}).get("interview_type", "behavioral"),
-                            "target_level": (raw.get("config") or {}).get("target_level", "L5"),
-                            "phase": raw.get("phase", "active"),
-                            "question_count": len(raw.get("questions") or []),
-                            "turn_count": len(raw.get("turns") or []),
-                            "has_debrief": bool(raw.get("debrief")),
-                        }
-                    )
+                    raw = json.loads(Path(full_path).read_text(encoding="utf-8"))
+                    summary = self._summary_from_raw(raw, name[:-5])
+                    self._summary_cache[name] = (mtime_ns, size, summary)
+                    items.append(dict(summary))
                 except Exception:
+                    self._summary_cache.pop(name, None)
                     continue
         return items

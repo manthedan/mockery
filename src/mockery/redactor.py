@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import io
 import ipaddress
@@ -13,6 +14,7 @@ import socket
 import threading
 import unicodedata
 import zipfile
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -23,6 +25,8 @@ from xml.etree import ElementTree as ET
 import httpx
 import numpy as np
 
+from .tts import optimal_ort_threads
+
 logger = logging.getLogger("mockery.redactor")
 
 RAMPART_REPO_ID = "nationaldesignstudio/rampart"
@@ -30,6 +34,7 @@ RAMPART_FILES = ("onnx/model_q4.onnx", "tokenizer.json", "config.json")
 RAMPART_APPROX_MB = 15
 MAX_DOCX_XML_BYTES = 10 * 1024 * 1024
 MAX_JD_FETCH_BYTES = 1_500_000
+MAX_SPAN_CACHE_ENTRIES = 8
 
 LOCATION_LABELS = {"CITY", "STATE", "ZIP_CODE"}
 ADDRESS_LABELS = {"BUILDING_NUMBER", "STREET_NAME", "SECONDARY_ADDRESS", "STREET_ADDRESS"}
@@ -108,6 +113,17 @@ _ROLE_WORDS_RE = re.compile(
     r"intern|scientist|researcher|analyst|designer|consultant|specialist|administrator|sre|devops)\b",
     re.IGNORECASE,
 )
+_CITY_STATE_RE = re.compile(
+    r"\b[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)?,[ \t]*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b"
+)
+_CITY_STATE_CAPTURE_RE = re.compile(r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)?),[ \t]*[A-Z]{2}\b")
+_CITY_STATE_EXACT_RE = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?,\s*[A-Z]{2}$")
+_HEADER_SPLIT_RE = re.compile(r"\s*[|•·—–]\s*")
+_NAME_TOKEN_RE = re.compile(r"^[A-Z][a-zA-Z'.\-]{1,24}$")
+_EMPTY_PARENS_RE = re.compile(r"\(\s*\)")
+_SEP_SPLIT_RE = re.compile(r"\s*(?:\||—|–|·|•|\t)\s*")
+_WS_RE = re.compile(r"\s+")
+_NON_DIGIT_RE = re.compile(r"\D")
 
 
 def _luhn_valid(digits: str) -> bool:
@@ -463,6 +479,14 @@ def _normalize_for_rampart(text: str) -> tuple[str, list[int]]:
     return "".join(norm_chars), idx_map
 
 
+def _hf_hub_cache_dir() -> Path:
+    hub_env = os.getenv("HUGGINGFACE_HUB_CACHE")
+    if hub_env:
+        return Path(hub_env)
+    hf_home = Path(os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    return hf_home / "hub"
+
+
 class RampartRedactor:
     """
     America.gov-style hybrid local PII redactor:
@@ -474,11 +498,73 @@ class RampartRedactor:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._session: Any | None = None
+        self._input_names: set[str] = set()
         self._tokenizer: Any | None = None
         self._id2label: dict[int, str] | None = None
         self._last_error: str | None = None
+        self._cached_paths_key: str | None = None
+        self._cached_paths: dict[str, Path] | None = None
+        self._span_cache: OrderedDict[str, tuple[tuple[int, int, str, str], ...]] = OrderedDict()
+
+    def _fast_snapshot_paths(self, hub_dir: Path) -> dict[str, Path] | None:
+        repo_dir = hub_dir / f"models--{RAMPART_REPO_ID.replace('/', '--')}"
+        snapshots_dir = repo_dir / "snapshots"
+        if not snapshots_dir.is_dir():
+            return None
+
+        candidate_dirs: list[Path] = []
+        ref_main = repo_dir / "refs" / "main"
+        if ref_main.is_file():
+            try:
+                rev = ref_main.read_text(encoding="utf-8").strip()
+                if rev:
+                    candidate_dirs.append(snapshots_dir / rev)
+            except OSError:
+                pass
+        try:
+            with os.scandir(snapshots_dir) as it:
+                for entry in it:
+                    if entry.is_dir():
+                        p = Path(entry.path)
+                        if p not in candidate_dirs:
+                            candidate_dirs.append(p)
+        except OSError:
+            pass
+
+        for snap in candidate_dirs:
+            resolved: dict[str, Path] = {}
+            ok = True
+            for rel in RAMPART_FILES:
+                fp = snap / rel
+                if fp.is_file():
+                    resolved[rel] = fp
+                else:
+                    ok = False
+                    break
+            if ok:
+                return resolved
+        return None
 
     def _local_files_paths(self) -> dict[str, Path] | None:
+        hub_dir = _hf_hub_cache_dir()
+        cache_key = str(hub_dir)
+        cached = self._cached_paths
+        if cached is not None and self._cached_paths_key == cache_key:
+            if all(p.is_file() for p in cached.values()):
+                return cached
+            self._cached_paths = None
+            self._cached_paths_key = None
+
+        fast = self._fast_snapshot_paths(hub_dir)
+        if fast is not None:
+            self._cached_paths = fast
+            self._cached_paths_key = cache_key
+            return fast
+
+        repo_dir = hub_dir / f"models--{RAMPART_REPO_ID.replace('/', '--')}"
+        if not repo_dir.is_dir():
+            return None
+
         try:
             from huggingface_hub import hf_hub_download
         except ImportError:
@@ -490,6 +576,8 @@ class RampartRedactor:
                 paths[rel] = Path(p)
             except Exception:
                 return None
+        self._cached_paths = paths
+        self._cached_paths_key = cache_key
         return paths
 
     def is_downloaded(self) -> bool:
@@ -511,6 +599,9 @@ class RampartRedactor:
 
         for rel in RAMPART_FILES:
             hf_hub_download(RAMPART_REPO_ID, rel)
+        with self._lock:
+            self._cached_paths = None
+            self._cached_paths_key = None
         if not self._ensure_loaded():
             raise RuntimeError(self._last_error or "Rampart ONNX model downloaded but failed to initialize.")
         return self.status_dict()
@@ -518,12 +609,17 @@ class RampartRedactor:
     def delete_cache(self) -> bool:
         with self._lock:
             self._session = None
+            self._input_names = set()
             self._tokenizer = None
             self._id2label = None
+            self._cached_paths = None
+            self._cached_paths_key = None
+            self._span_cache.clear()
+        hub_dir = _hf_hub_cache_dir()
         try:
             from huggingface_hub import scan_cache_dir
 
-            cache = scan_cache_dir()
+            cache = scan_cache_dir(cache_dir=hub_dir)
             revs = []
             for repo in cache.repos:
                 if repo.repo_id == RAMPART_REPO_ID:
@@ -534,12 +630,11 @@ class RampartRedactor:
                 return True
         except Exception as exc:
             logger.warning("Could not delete Rampart cache cleanly: %s", exc)
-            # Fallback: remove repo folder directly under HF hub cache if present
-            hf_home = Path(os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface"))
-            repo_dir = hf_home / "hub" / f"models--{RAMPART_REPO_ID.replace('/', '--')}"
-            if repo_dir.exists():
-                shutil.rmtree(repo_dir, ignore_errors=True)
-                return True
+        # Fallback: remove repo folder directly under HF hub cache if present
+        repo_dir = hub_dir / f"models--{RAMPART_REPO_ID.replace('/', '--')}"
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir, ignore_errors=True)
+            return True
         return False
 
     def _ensure_loaded(self) -> bool:
@@ -560,7 +655,9 @@ class RampartRedactor:
                 cfg = json.loads(paths["config.json"].read_text(encoding="utf-8"))
                 id2label = {int(k): str(v) for k, v in cfg["id2label"].items()}
                 opts = ort.SessionOptions()
-                opts.intra_op_num_threads = max(1, min(4, os.cpu_count() or 2))
+                opts.intra_op_num_threads = optimal_ort_threads()
+                opts.inter_op_num_threads = 1
+                opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 sess = ort.InferenceSession(
                     str(paths["onnx/model_q4.onnx"]),
                     sess_options=opts,
@@ -568,6 +665,7 @@ class RampartRedactor:
                 )
                 self._tokenizer = tok
                 self._id2label = id2label
+                self._input_names = {inp.name for inp in sess.get_inputs()}
                 self._session = sess
                 self._last_error = None
                 return True
@@ -581,11 +679,18 @@ class RampartRedactor:
             return []
         assert self._tokenizer is not None and self._session is not None and self._id2label is not None
 
+        cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with self._lock:
+            cached = self._span_cache.get(cache_key)
+            if cached is not None:
+                self._span_cache.move_to_end(cache_key)
+                return [DetectedSpan(s, e, lbl, src) for s, e, lbl, src in cached]
+
         norm_text, idx_map = _normalize_for_rampart(text)
         if not norm_text:
             return []
 
-        input_names = {inp.name for inp in self._session.get_inputs()}
+        input_names = self._input_names or {inp.name for inp in self._session.get_inputs()}
         enc = self._tokenizer.encode(norm_text)
         encodings = [enc] + list(getattr(enc, "overflowing", []) or [])
 
@@ -689,6 +794,13 @@ class RampartRedactor:
             if sp.label == "PERSON_NAME" and frag.lower() in _TECH_STOPWORDS:
                 continue
             cleaned.append(sp)
+
+        frozen = tuple((sp.start, sp.end, sp.label, sp.source) for sp in cleaned)
+        with self._lock:
+            self._span_cache[cache_key] = frozen
+            self._span_cache.move_to_end(cache_key)
+            while len(self._span_cache) > MAX_SPAN_CACHE_ENTRIES:
+                self._span_cache.popitem(last=False)
         return cleaned
 
     def _run_deterministic_rules(self, text: str) -> list[DetectedSpan]:
@@ -707,17 +819,14 @@ class RampartRedactor:
         for m in _IPV4_RE.finditer(text):
             spans.append(DetectedSpan(m.start(), m.end(), "IP_ADDRESS", "rules"))
         for m in _CC_CANDIDATE_RE.finditer(text):
-            digits = re.sub(r"\D", "", m.group(0))
+            digits = _NON_DIGIT_RE.sub("", m.group(0))
             if _luhn_valid(digits):
                 spans.append(DetectedSpan(m.start(), m.end(), "CREDIT_CARD", "rules"))
         for m in _STREET_RE.finditer(text):
             spans.append(DetectedSpan(m.start(), m.end(), "STREET_ADDRESS", "rules"))
         for m in _ZIP_RE.finditer(text):
             spans.append(DetectedSpan(m.start(1), m.end(1), "ZIP_CODE", "rules"))
-        for m in re.finditer(
-            r"\b[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)?,[ \t]*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b",
-            text,
-        ):
+        for m in _CITY_STATE_RE.finditer(text):
             spans.append(DetectedSpan(m.start(), m.end(), "CITY", "rules"))
         return spans
 
@@ -733,13 +842,13 @@ class RampartRedactor:
                 offset += len(line)
                 continue
             # Take prefix before '|' or '•' or '—' if contact info shares line 1
-            head = re.split(r"\s*[|•·—–]\s*", stripped)[0].strip()
+            head = _HEADER_SPLIT_RE.split(stripped)[0].strip()
             words = head.split()
             if (
                 2 <= len(words) <= 4
                 and not _ROLE_WORDS_RE.search(head)
                 and head.lower() not in _TECH_STOPWORDS
-                and all(re.match(r"^[A-Z][a-zA-Z'.\-]{1,24}$", w) for w in words)
+                and all(_NAME_TOKEN_RE.match(w) for w in words)
             ):
                 pos = line.find(head)
                 if pos >= 0:
@@ -768,7 +877,7 @@ class RampartRedactor:
             for sp in (location_spans or [])
             if sp.end > sp.start
         }
-        for cm in re.finditer(r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)?),[ \t]*[A-Z]{2}\b", text):
+        for cm in _CITY_STATE_CAPTURE_RE.finditer(text):
             loc_strings.add(cm.group(1).strip().lower())
 
         # 1. Universities / schools
@@ -787,8 +896,8 @@ class RampartRedactor:
             has_date = bool(_DATE_RANGE_RE.search(stripped))
             if has_date or (" | " in stripped) or (" — " in stripped) or (" – " in stripped):
                 # Strip date range and split into segments
-                without_dates = re.sub(r"\(\s*\)", "", _DATE_RANGE_RE.sub("", stripped))
-                parts = [p.strip(" ,|-–—•·()") for p in re.split(r"\s*(?:\||—|–|·|•|\t)\s*", without_dates)]
+                without_dates = _EMPTY_PARENS_RE.sub("", _DATE_RANGE_RE.sub("", stripped))
+                parts = [p.strip(" ,|-–—•·()") for p in _SEP_SPLIT_RE.split(without_dates)]
                 for part in parts:
                     if not part or len(part) < 2 or len(part) > 48:
                         continue
@@ -803,7 +912,7 @@ class RampartRedactor:
                         or _EMAIL_RE.search(part)
                         or _PHONE_RE.search(part)
                         or _URL_RE.search(part)
-                        or re.match(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?,\s*[A-Z]{2}$", part)  # City, ST
+                        or _CITY_STATE_EXACT_RE.match(part)  # City, ST
                     ):
                         continue
                     # Likely a company name if Title Case / brand token (1-4 words)
@@ -841,16 +950,17 @@ class RampartRedactor:
         unredacted_values: list[str] | None = None,
         use_rampart: bool = True,
     ) -> RedactionResult:
+        downloaded = self.is_downloaded()
         if not text:
             return RedactionResult(
                 redacted_text="",
-                engine="rampart+rules" if self.is_downloaded() else "rules_only",
-                rampart_installed=self.is_downloaded(),
+                engine="rampart+rules" if downloaded else "rules_only",
+                rampart_installed=downloaded,
             )
 
         rampart_spans: list[DetectedSpan] = []
         used_rampart = False
-        if use_rampart and self.is_downloaded():
+        if use_rampart and downloaded:
             rampart_spans = self._run_rampart_onnx(text)
             used_rampart = self._session is not None
 
@@ -899,7 +1009,7 @@ class RampartRedactor:
             merged.append(sp)
 
         unredacted_norm = {
-            re.sub(r"\s+", " ", v.strip()).lower()
+            _WS_RE.sub(" ", v.strip()).lower()
             for v in (unredacted_values or [])
             if v and v.strip()
         }
@@ -916,7 +1026,7 @@ class RampartRedactor:
 
         for idx, sp in enumerate(merged):
             orig = text[sp.start : sp.end]
-            norm_val = re.sub(r"\s+", " ", orig.strip()).lower()
+            norm_val = _WS_RE.sub(" ", orig.strip()).lower()
             is_active = norm_val not in unredacted_norm
 
             key = (sp.label, norm_val)
@@ -953,7 +1063,7 @@ class RampartRedactor:
             redacted_text="".join(out_parts),
             spans=serialized_spans,
             engine="rampart+rules" if used_rampart else "rules_only",
-            rampart_installed=self.is_downloaded(),
+            rampart_installed=downloaded,
             entity_counts=entity_counts,
             redacted_count=redacted_count,
             total_detected=len(serialized_spans),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import io
 import json
 import logging
@@ -218,21 +219,50 @@ class PracticeRetryRequest(BaseModel):
     focus: str = ""
 
 
-def _lowpass_antialias(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """Lightweight Hann-windowed sinc FIR low-pass filter before downsampling."""
-    if src_rate <= dst_rate or pcm.size < 16:
-        return pcm
+@functools.lru_cache(maxsize=16)
+def _lowpass_kernel(src_rate: int, dst_rate: int) -> np.ndarray:
+    """Cached Hann-windowed sinc FIR low-pass kernel before downsampling."""
     cutoff = 0.45 * (float(dst_rate) / float(src_rate))  # normalized to Nyquist=0.5
     taps = min(31, max(7, int(round(src_rate / dst_rate)) * 4 + 1))
     if taps % 2 == 0:
         taps += 1
     half = taps // 2
     n = np.arange(-half, half + 1, dtype=np.float32)
-    kernel = np.sinc(2.0 * cutoff * n) * np.hanning(taps).astype(np.float32)
+    kernel = (np.sinc(2.0 * cutoff * n) * np.hanning(taps)).astype(np.float32)
     k_sum = float(kernel.sum())
     if k_sum > 0:
         kernel /= k_sum
+    return kernel
+
+
+def _lowpass_antialias(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Lightweight Hann-windowed sinc FIR low-pass filter before downsampling."""
+    if src_rate <= dst_rate or pcm.size < 16:
+        return pcm
+    kernel = _lowpass_kernel(src_rate, dst_rate)
     return np.convolve(pcm, kernel, mode="same").astype(np.float32)
+
+
+def _decimate_integer_fir(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """
+    Evaluate the symmetric Hann-sinc low-pass FIR filter ONLY at kept decimated output samples
+    when `src_rate` is an exact integer multiple of `dst_rate` (e.g. 48kHz -> 16kHz, 32kHz -> 16kHz).
+    Mathematically equivalent to `_lowpass_antialias(pcm, src_rate, dst_rate)[::factor]`.
+    """
+    factor = src_rate // dst_rate
+    out_len = pcm.size // factor
+    if out_len <= 0:
+        return np.empty(0, dtype=np.float32)
+    if pcm.size < 16:
+        return np.ascontiguousarray(pcm[::factor], dtype=np.float32)
+    kernel = _lowpass_kernel(src_rate, dst_rate)
+    half = kernel.size // 2
+    padded = np.pad(pcm, (half, half), mode="constant")
+    out = np.zeros(out_len, dtype=np.float32)
+    span = out_len * factor
+    for k, w in enumerate(kernel):
+        out += w * padded[k : k + span : factor]
+    return out
 
 
 def _decode_audio_to_float32_16k(raw_bytes: bytes, content_type: str = "") -> np.ndarray:
@@ -267,16 +297,27 @@ def _decode_audio_to_float32_16k(raw_bytes: bytes, content_type: str = "") -> np
         expected_bytes = nframes * channels * sampwidth
         if len(frames) != expected_bytes:
             raise ValueError("Truncated or malformed WAV audio payload.")
-        pcm = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        raw_i16 = np.frombuffer(frames, dtype="<i2")
         if channels == 2:
-            pcm = pcm.reshape(-1, 2).mean(axis=1)
+            stereo = raw_i16.reshape(-1, 2)
+            pcm = np.add(stereo[:, 0], stereo[:, 1], dtype=np.float32)
+            pcm *= np.float32(0.5 / 32768.0)
+        else:
+            pcm = raw_i16.astype(np.float32)
+            pcm *= np.float32(1.0 / 32768.0)
         if rate != 16000 and pcm.size > 1:
-            if rate > 16000:
-                pcm = _lowpass_antialias(pcm, rate, 16000)
-            target_len = max(1, int(round(pcm.size * (16000.0 / float(rate)))))
-            x_old = np.linspace(0.0, 1.0, num=pcm.size, endpoint=False)
-            x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
-            pcm = np.interp(x_new, x_old, pcm).astype(np.float32)
+            if rate > 16000 and rate % 16000 == 0 and pcm.size % (rate // 16000) == 0:
+                pcm = _decimate_integer_fir(pcm, rate, 16000)
+            else:
+                if rate > 16000:
+                    pcm = _lowpass_antialias(pcm, rate, 16000)
+                target_len = max(1, int(round(pcm.size * (16000.0 / float(rate)))))
+                pos = np.arange(target_len, dtype=np.float64) * (float(pcm.size) / float(target_len))
+                np.minimum(pos, float(pcm.size - 1), out=pos)
+                i0 = pos.astype(np.intp)
+                i1 = np.minimum(i0 + 1, pcm.size - 1)
+                frac = (pos - i0).astype(np.float32)
+                pcm = pcm[i0] + frac * (pcm[i1] - pcm[i0])
         return np.ascontiguousarray(pcm, dtype=np.float32)
 
     # Raw 16kHz little-endian int16 mono PCM
@@ -284,7 +325,8 @@ def _decode_audio_to_float32_16k(raw_bytes: bytes, content_type: str = "") -> np
         raw_bytes = raw_bytes[:-1]
     if not raw_bytes:
         raise ValueError("Audio payload is too short.")
-    pcm = np.frombuffer(raw_bytes, dtype="<i2").astype(np.float32) / 32768.0
+    pcm = np.frombuffer(raw_bytes, dtype="<i2").astype(np.float32)
+    pcm *= np.float32(1.0 / 32768.0)
     if pcm.size > 16000 * MAX_ASR_DURATION_SECONDS:
         raise ValueError(f"Audio clip exceeds maximum {MAX_ASR_DURATION_SECONDS}-second limit.")
     return np.ascontiguousarray(pcm, dtype=np.float32)
@@ -550,10 +592,20 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        async def _warm_tts_quietly() -> None:
+            try:
+                await asyncio.to_thread(runtime.tts.warm_up_installed)
+            except Exception as exc:
+                logger.debug("Background local TTS warmup skipped: %s", exc)
+
+        tts_warmup_task: asyncio.Task[Any] | None = None
         if preload_asr:
             runtime.asr.start_background_load()
             runtime.voice_embedder.start_background_load()
+            tts_warmup_task = asyncio.create_task(_warm_tts_quietly())
         yield
+        if tts_warmup_task is not None and not tts_warmup_task.done():
+            tts_warmup_task.cancel()
         if runtime.asr_watcher_task is not None and not runtime.asr_watcher_task.done():
             runtime.asr_watcher_task.cancel()
         runtime.close_archive()
@@ -611,7 +663,7 @@ def create_app(
                         status_code=413,
                         content={"detail": "Audio upload exceeds 4 MB limit."},
                     )
-            elif request.url.path == "/api/tts/speak":
+            elif request.url.path in ("/api/tts/speak", "/api/tts/stream"):
                 if cl_int is not None and cl_int > MAX_TTS_REQUEST_BYTES:
                     return JSONResponse(
                         status_code=413,
@@ -967,6 +1019,60 @@ def create_app(
             media_type="audio/wav",
             headers={
                 "X-TTS-Engine": engine,
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.post("/api/tts/stream")
+    async def stream_tts(body: TTSSpeakRequest) -> StreamingResponse:
+        if not (body.text or "").strip():
+            raise HTTPException(status_code=400, detail="Text to speak cannot be empty.")
+        try:
+            await asyncio.wait_for(runtime._tts_sem.acquire(), timeout=0.05)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=429,
+                detail="Local voice synthesis is busy — try again in a moment.",
+            )
+        try:
+            engine, sample_rate, chunk_iter = await runtime.tts.open_pcm_stream(
+                body.text,
+                voice=body.voice,
+                rate=body.rate,
+                engine=body.engine,
+            )
+        except ValueError as exc:
+            runtime._tts_sem.release()
+            raise HTTPException(status_code=400, detail=str(exc))
+        except RuntimeError as exc:
+            runtime._tts_sem.release()
+            raise HTTPException(status_code=503, detail=str(exc))
+        except BaseException:
+            runtime._tts_sem.release()
+            raise
+
+        async def _guarded_stream():
+            try:
+                async for chunk in chunk_iter:
+                    if chunk:
+                        yield chunk
+            finally:
+                try:
+                    aclose = getattr(chunk_iter, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
+                except Exception:
+                    pass
+                runtime._tts_sem.release()
+
+        return StreamingResponse(
+            _guarded_stream(),
+            media_type="application/octet-stream",
+            headers={
+                "X-TTS-Engine": engine,
+                "X-TTS-Sample-Rate": str(sample_rate),
+                "X-TTS-Channels": "1",
+                "X-TTS-Sample-Format": "pcm_s16le",
                 "Cache-Control": "no-store",
             },
         )
