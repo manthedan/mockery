@@ -2705,6 +2705,563 @@ kbd {
 }
 
 /* ----------------------------------------------------------------------------
+   Candidate Profile, Rampart PII Redaction, Target JD, Question Banks & Add-Ons
+   ---------------------------------------------------------------------------- */
+
+.home-profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.home-profile-summary {
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.home-profile-summary.is-populated {
+  color: var(--ink-2);
+}
+
+.home-profile-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.modal-card-xl {
+  width: min(820px, calc(100vw - 36px));
+  max-height: min(86vh, 780px);
+}
+
+.profile-modal-head-left {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-width: 0;
+}
+
+.profile-tabs {
+  gap: 14px;
+}
+
+.profile-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.profile-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.rampart-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.rampart-banner-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rampart-badge {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--ink-2);
+}
+
+.rampart-badge.is-ok {
+  color: var(--good);
+}
+
+.resume-dropzone-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 34px 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  text-align: center;
+  transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+.resume-dropzone-inner.is-dragover {
+  border-color: var(--ink);
+  background: var(--hover);
+}
+
+.resume-empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.resume-paste-wrap,
+.jd-paste-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.profile-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.profile-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.resume-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.resume-file-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.resume-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.is-danger-text {
+  color: var(--bad);
+}
+
+.redaction-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 10px 0 4px;
+}
+
+.redaction-custom-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 240px;
+}
+
+.field-input-sm {
+  height: 29px;
+  font-size: 12.5px;
+}
+
+.redaction-section-label {
+  font-size: 11.5px;
+  font-weight: 550;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-top: 4px;
+}
+
+.pii-chips-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pii-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.pii-chip:hover {
+  background: var(--hover);
+  border-color: var(--ink-3);
+}
+
+.pii-chip.is-redacted .pii-chip-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  background: var(--mark);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.pii-chip.is-redacted .pii-chip-orig {
+  text-decoration: line-through;
+  color: var(--ink-3);
+}
+
+.pii-chip.is-kept {
+  border-style: dashed;
+}
+
+.pii-chip.is-kept .pii-chip-tag {
+  font-size: 11px;
+  color: var(--good);
+}
+
+.pii-chip.is-kept .pii-chip-orig {
+  color: var(--ink);
+}
+
+.redacted-preview {
+  margin: 0;
+  padding: 14px 16px;
+  max-height: 290px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.58;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pii-inline-tag {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--mark);
+  color: var(--ink);
+  font-weight: 550;
+}
+
+/* Target Job Listings */
+.jd-import-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.jd-import-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.jd-import-row .field-input {
+  flex: 1;
+}
+
+.jd-level-select {
+  width: 148px;
+  flex-shrink: 0;
+}
+
+.jd-import-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.jd-paste-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.jd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.jd-card {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.jd-card.is-active {
+  border-color: var(--line-strong);
+  background: var(--bg-sunken);
+}
+
+.jd-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.jd-card-info {
+  min-width: 0;
+}
+
+.jd-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 550;
+  color: var(--ink);
+}
+
+.jd-active-pill {
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: var(--ink);
+  color: var(--on-ink);
+  font-size: 10.5px;
+  font-weight: 550;
+}
+
+.jd-card-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.jd-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.jd-preview-text {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  color: var(--ink-2);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.profile-empty-note {
+  padding: 24px 12px;
+  color: var(--ink-3);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* Curated Question Banks */
+.banks-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.banks-count-label {
+  margin-left: auto;
+}
+
+.banks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 440px;
+  overflow-y: auto;
+}
+
+.bank-item {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.bank-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bank-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bank-cat-pill,
+.bank-level-pill,
+.bank-jd-match {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.bank-cat-pill {
+  background: var(--hover);
+  color: var(--ink-2);
+}
+
+.bank-level-pill {
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+}
+
+.bank-jd-match {
+  background: var(--mark);
+  color: var(--ink);
+  font-weight: 550;
+}
+
+.bank-item-title {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bank-item-prompt {
+  margin: 6px 0 0;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 14.5px;
+  line-height: 1.48;
+}
+
+.bank-item-foot {
+  margin-top: 6px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Settings Add-Ons & Modules (Xcode-style) */
+.addons-subhead {
+  margin: 12px 0 6px;
+  font-size: 11.5px;
+  font-weight: 550;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.addons-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.addon-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+}
+
+.addon-row + .addon-row {
+  border-top: 1px solid var(--line);
+}
+
+.addon-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.addon-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--ink);
+}
+
+.addon-size-pill {
+  font-size: 11px;
+  font-weight: 450;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.addon-row-desc {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+
+.addon-row-err {
+  font-size: 11.5px;
+  color: var(--bad);
+  margin-top: 2px;
+}
+
+.addon-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.addon-state-badge {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.addon-state-badge.is-ok {
+  color: var(--good);
+  font-weight: 550;
+}
+
+/* ----------------------------------------------------------------------------
    Narrow windows
    ---------------------------------------------------------------------------- */
 
