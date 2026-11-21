@@ -10,7 +10,7 @@ import numpy as np
 
 from .models import SpeakerRole
 
-logger = logging.getLogger("mock_helper.diarizer")
+logger = logging.getLogger("mockery.diarizer")
 
 SAMPLE_RATE = 16000
 DEFAULT_WESPEAKER_REPO = "Wespeaker/wespeaker-voxceleb-resnet34-LM"

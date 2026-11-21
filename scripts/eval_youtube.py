@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Reusable YouTube Mock-Interview Eval & Cached-Trace Replay Harness for mock_helper.
+Reusable YouTube Mock-Interview Eval & Cached-Trace Replay Harness for mockery.
 
 Inspired by `scratch/triage-lab`:
 1. Caches VAD + Parakeet-MLX ASR segments and YouTube captions per video.
@@ -32,10 +32,10 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from mock_helper.asr import ParakeetEngine
-from mock_helper.grouper import QAGrouper
-from mock_helper.llm import InterviewCopilotLLM, LLMRuntimeConfig
-from mock_helper.models import (
+from mockery.asr import ParakeetEngine
+from mockery.grouper import QAGrouper
+from mockery.llm import InterviewCopilotLLM, LLMRuntimeConfig
+from mockery.models import (
     LLM_PRESETS,
     InterviewSession,
     SessionConfig,
@@ -43,8 +43,8 @@ from mock_helper.models import (
     Utterance,
     fmt_ms,
 )
-from mock_helper.state_machines import validate_session_invariants
-from mock_helper.vad import ChannelVADSegmenter, SileroVADRuntime
+from mockery.state_machines import validate_session_invariants
+from mockery.vad import ChannelVADSegmenter, SileroVADRuntime
 
 KNOWN_VIDEO_CHAPTERS: dict[str, dict[str, Any]] = {
     "-Y6YmuqGLpY": {
@@ -596,7 +596,7 @@ async def run_eval(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="YouTube mock-interview eval & replay harness for mock_helper")
+    parser = argparse.ArgumentParser(description="YouTube mock-interview eval & replay harness for mockery")
     parser.add_argument("--video-id", default="-Y6YmuqGLpY", help="YouTube video ID")
     parser.add_argument("--max-seconds", type=int, default=1097, help="Clip audio at N seconds (0 = full video)")
     parser.add_argument("--cache-dir", default="", help="Directory holding cached audio/ASR/runs")
