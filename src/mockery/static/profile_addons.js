@@ -771,10 +771,13 @@ export function createProfileAddonsController({
     if (packList) {
       packList.innerHTML = (local.addons.packs || [])
         .map((pk) => {
-          const busy = local.installingPacks.has(pk.id) || pk.state === "installing";
+          const installing = local.installingPacks.has(pk.id) || pk.state === "installing";
+          const uninstalling = pk.state === "uninstalling";
           let actionHtml = "";
-          if (busy) {
+          if (installing) {
             actionHtml = `<button type="button" class="btn btn-outline btn-sm" disabled>Installing…</button>`;
+          } else if (uninstalling) {
+            actionHtml = `<button type="button" class="btn btn-outline btn-sm" disabled>Removing…</button>`;
           } else if (pk.state === "installed") {
             actionHtml = `
               <span class="addon-state-badge is-ok">Installed</span>
@@ -782,6 +785,19 @@ export function createProfileAddonsController({
                 pk.id
               )}">Remove</button>
             `;
+          } else if (pk.state === "error") {
+            const retryBtn =
+              pk.available !== false
+                ? `<button type="button" class="btn btn-outline btn-sm" data-addon-install="${escapeHtml(
+                    pk.id
+                  )}">Retry (${pk.size_mb} MB)</button>`
+                : "";
+            const removeBtn = pk.installed
+              ? `<button type="button" class="btn btn-ghost btn-sm" data-addon-uninstall="${escapeHtml(
+                  pk.id
+                )}">Remove</button>`
+              : "";
+            actionHtml = `${retryBtn}${removeBtn}`;
           } else if (pk.state === "coming_soon") {
             actionHtml = `<span class="addon-state-badge">Available soon</span>`;
           } else {
@@ -805,6 +821,15 @@ export function createProfileAddonsController({
         })
         .join("");
     }
+  }
+
+  function formatApiDetail(detail, fallback) {
+    if (typeof detail === "string" && detail.trim()) return detail.trim();
+    if (detail && typeof detail === "object") {
+      const msg = detail.message || detail.remediation;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+    }
+    return fallback;
   }
 
   async function toggleModule(modId, enabled) {
@@ -838,7 +863,7 @@ export function createProfileAddonsController({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        showToast(data.detail || `Install failed (${res.status})`, 4000);
+        showToast(formatApiDetail(data.detail, `Install failed (${res.status})`), 4000);
         return;
       }
       if (data.addons) {
@@ -867,7 +892,7 @@ export function createProfileAddonsController({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        showToast(data.detail || "Could not remove add-on.");
+        showToast(formatApiDetail(data.detail, "Could not remove add-on."), 4000);
         return;
       }
       if (data.addons) {
