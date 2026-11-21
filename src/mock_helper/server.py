@@ -383,6 +383,9 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
         partial_inflight: dict[SpeakerRole, bool] = {"interviewer": False, "candidate": False}
         bg_tasks: set[asyncio.Task[Any]] = set()
         send_lock = asyncio.Lock()
+        final_seg_queue: asyncio.Queue[
+            tuple[InterviewSession, SessionAudioRouter, SegmentedSpeech] | None
+        ] = asyncio.Queue()
 
         def spawn_bg(coro: Any) -> asyncio.Task[Any]:
             task = asyncio.create_task(coro)
@@ -421,18 +424,27 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
             )
 
             if seg.kind == "partial":
-                if partial_inflight[seg.speaker] or runtime.asr.state != ASRModelState.READY:
+                if (
+                    partial_inflight[seg.speaker]
+                    or runtime.asr.state != ASRModelState.READY
+                    or not final_seg_queue.empty()
+                ):
                     return
                 partial_inflight[seg.speaker] = True
                 try:
-                    speaker = seg.speaker
                     if use_acoustic_diarizer and runtime.voice_embedder.is_ready:
-                        speaker = await asyncio.to_thread(
-                            runtime.diarizer.classify_partial,
-                            seg.audio,
-                            default_speaker=seg.speaker,
+                        # Run CoreML WeSpeaker and MLX Parakeet concurrently on separate hardware units
+                        speaker, res = await asyncio.gather(
+                            asyncio.to_thread(
+                                runtime.diarizer.classify_partial,
+                                seg.audio,
+                                default_speaker=seg.speaker,
+                            ),
+                            asyncio.to_thread(runtime.asr.transcribe_pcm, seg.audio),
                         )
-                    res = await asyncio.to_thread(runtime.asr.transcribe_pcm, seg.audio)
+                    else:
+                        speaker = seg.speaker
+                        res = await asyncio.to_thread(runtime.asr.transcribe_pcm, seg.audio)
                     if res.text and runtime.active_session.id == target_session.id:
                         await upsert_utterance_and_route(
                             target_session=target_session,
@@ -554,17 +566,49 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
             if decision.ignored_stale:
                 return
 
-            runtime.store.append_utterance_event(target_session.id, utt)
+            is_inplace_draft = (
+                not utt.final
+                and existing is not None
+                and not decision.opened_new_qa
+            )
+
+            # Always log new utterances, finals, and every 4th intermediate draft (~5s crash recovery)
+            if utt.final or existing is None or (utt.rev % 4 == 0):
+                runtime.store.append_utterance_event(target_session.id, utt)
             if utt.final:
                 runtime.store.save(target_session)
 
             if runtime.active_session.id == target_session.id:
-                await broadcast_session(
-                    {
-                        "latest_qa_id": decision.qa_id,
-                        "opened_new_qa": decision.opened_new_qa,
+                if is_inplace_draft:
+                    draft_msg: dict[str, Any] = {
+                        "type": "utterance_draft",
+                        "session_id": target_session.id,
+                        "qa_id": decision.qa_id,
+                        "utterance": utt.model_dump(),
                     }
-                )
+                    if decision.qa_id:
+                        owner_qa = next(
+                            (q for q in target_session.qa_groups if q.id == decision.qa_id), None
+                        )
+                        if owner_qa is not None:
+                            p_state = derive_card_probe_state(
+                                target_session,
+                                owner_qa,
+                                warming_ids=runtime.warming_card_ids,
+                                loading_ids=runtime.loading_card_ids,
+                            )
+                            draft_msg["probe_state"] = p_state.value
+                            draft_msg["has_speculative_cache"] = (
+                                p_state == CardProbeState.READY_CACHED
+                            )
+                    await runtime.broadcast_all(draft_msg)
+                else:
+                    await broadcast_session(
+                        {
+                            "latest_qa_id": decision.qa_id,
+                            "opened_new_qa": decision.opened_new_qa,
+                        }
+                    )
 
             # LLM handles topic-shift card pivots (when needed) — never live speaker classification
             if (
@@ -713,10 +757,6 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                     extra["latest_qa_id"] = apply_res.opened_new_qa_id
                     extra["opened_new_qa"] = True
                 await broadcast_session(extra or None)
-
-        final_seg_queue: asyncio.Queue[tuple[InterviewSession, SessionAudioRouter, SegmentedSpeech] | None] = (
-            asyncio.Queue()
-        )
 
         async def final_segment_worker() -> None:
             while True:

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 CONTROL_TOKEN_RE = re.compile(r"<unk>|<pad>|<\|[^|>]*\|>")
 WHITESPACE_RE = re.compile(r"\s+")
 
-DEFAULT_MLX_CACHE_LIMIT_MB = 128
+DEFAULT_MLX_CACHE_LIMIT_MB = 64
 LONG_UTTERANCE_CACHE_CLEAR_SEC = 10.0
 
 
