@@ -31,7 +31,12 @@ class SileroVADRuntime:
     """Shared lightweight ONNX runtime for Silero VAD v5 (~2.2MB, CPU-instant)."""
 
     def __init__(self, repo_id: str = "onnx-community/silero-vad", filename: str = "onnx/model.onnx") -> None:
-        model_path = hf_hub_download(repo_id=repo_id, filename=filename)
+        try:
+            model_path = hf_hub_download(
+                repo_id=repo_id, filename=filename, local_files_only=True
+            )
+        except Exception:
+            model_path = hf_hub_download(repo_id=repo_id, filename=filename)
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
@@ -86,7 +91,7 @@ class ChannelVADSegmenter:
         self.max_segment_frames = max(100, max_segment_ms // FRAME_MS)
 
         self._onnx_state = np.zeros((2, 1, 128), dtype=np.float32)
-        self._context = np.zeros(CONTEXT_SAMPLES, dtype=np.float32)
+        self._frame_inp = np.zeros((1, CONTEXT_SAMPLES + FRAME_SAMPLES), dtype=np.float32)
         self._pending = np.zeros(0, dtype=np.float32)
         self._pre_roll: deque[np.ndarray] = deque(maxlen=pre_roll_frames)
 
@@ -115,7 +120,8 @@ class ChannelVADSegmenter:
     def push_pcm_int16(self, pcm_bytes: bytes) -> list[VADEvent]:
         if not pcm_bytes:
             return []
-        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+        np.multiply(samples, np.float32(1.0 / 32768.0), out=samples)
         return self.push_float32(samples)
 
     def push_float32(self, samples: np.ndarray) -> list[VADEvent]:
@@ -140,12 +146,11 @@ class ChannelVADSegmenter:
         return events
 
     def _process_frame(self, frame: np.ndarray) -> VADEvent | None:
-        inp = np.empty((1, CONTEXT_SAMPLES + FRAME_SAMPLES), dtype=np.float32)
-        inp[0, :CONTEXT_SAMPLES] = self._context
+        inp = self._frame_inp
         inp[0, CONTEXT_SAMPLES:] = frame
-        self._context = frame[-CONTEXT_SAMPLES:].copy()
-
         prob, self._onnx_state = self._rt.step(inp, self._onnx_state)
+        # Shift tail into context window for next 32ms frame (zero allocations)
+        inp[0, :CONTEXT_SAMPLES] = frame[-CONTEXT_SAMPLES:]
         frame_idx = self._total_frames_processed
         self._total_frames_processed += 1
 

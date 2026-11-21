@@ -1151,13 +1151,18 @@ def _serialize_session_obj(runtime: AppRuntime, session: InterviewSession) -> di
     data = session.model_dump()
     data["live_elapsed_ms"] = runtime.live_elapsed_ms() if is_active else session.elapsed_capture_ms
     data["metrics"] = session.compute_metrics().model_dump()
-    data["warmup_resolved"] = [u.model_dump() for u in session.warmup_utterances()]
+
+    # Reuse already-serialized utterance & card dicts instead of calling `.model_dump()` twice
+    utt_dicts_by_id = {u["id"]: u for u in data["utterances"]}
+    data["warmup_resolved"] = [
+        utt_dicts_by_id[uid] for uid in session.warmup_utterance_ids if uid in utt_dicts_by_id
+    ]
 
     warming_ids = runtime.warming_card_ids if is_active else set()
     loading_ids = runtime.loading_card_ids if is_active else set()
     card_probe_states: dict[str, str] = {}
     resolved_cards = []
-    for qa in session.qa_groups:
+    for qa, qa_dict in zip(session.qa_groups, data["qa_groups"]):
         p_state = derive_card_probe_state(
             session,
             qa,
@@ -1165,9 +1170,11 @@ def _serialize_session_obj(runtime: AppRuntime, session: InterviewSession) -> di
             loading_ids=loading_ids,
         )
         card_probe_states[qa.id] = p_state.value
-        qd = qa.model_dump()
+        qd = dict(qa_dict)
         qd["badge"] = f"{qa.badge_prefix()}{qa.index}"
-        qd["utterances"] = [u.model_dump() for u in session.utterances_for_card(qa, include_drafts=True)]
+        qd["utterances"] = [
+            utt_dicts_by_id[uid] for uid in qa.utterance_ids if uid in utt_dicts_by_id
+        ]
         qd["probe_state"] = p_state.value
         # Honest instant-cache flag: ONLY True when cache matches current utterance count & revisions!
         qd["has_speculative_cache"] = p_state == CardProbeState.READY_CACHED
