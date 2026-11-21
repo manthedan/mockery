@@ -35,34 +35,33 @@ def _build_kaldi_mel_filterbank(
     low_freq: float = 20.0,
     high_freq: float = 8000.0,
 ) -> np.ndarray:
-    def hz2mel(f: float) -> float:
-        return float(1127.0 * np.log(1.0 + f / 700.0))
+    def hz2mel(f: np.ndarray | float) -> np.ndarray | float:
+        return 1127.0 * np.log(1.0 + np.asarray(f, dtype=np.float64) / 700.0)
 
-    def mel2hz(m: np.ndarray) -> np.ndarray:
-        return 700.0 * (np.exp(m / 1127.0) - 1.0)
-
-    mels = np.linspace(hz2mel(low_freq), hz2mel(high_freq), n_mels + 2)
-    hz_pts = mel2hz(mels)
+    mels = np.linspace(float(hz2mel(low_freq)), float(hz2mel(high_freq)), n_mels + 2)
     fft_freqs = np.linspace(0.0, sr / 2.0, n_fft // 2 + 1)
+    fft_mels = np.asarray(hz2mel(fft_freqs), dtype=np.float64)
     fb = np.zeros((n_fft // 2 + 1, n_mels), dtype=np.float32)
     for m in range(n_mels):
-        left, center, right = hz_pts[m], hz_pts[m + 1], hz_pts[m + 2]
-        up = (fft_freqs - left) / max(1e-6, center - left)
-        down = (right - fft_freqs) / max(1e-6, right - center)
-        fb[:, m] = np.maximum(0.0, np.minimum(up, down))
+        left, center, right = mels[m], mels[m + 1], mels[m + 2]
+        up = (fft_mels - left) / max(1e-6, center - left)
+        down = (right - fft_mels) / max(1e-6, right - center)
+        fb[:, m] = np.maximum(0.0, np.minimum(up, down)).astype(np.float32)
     return fb
 
 
 _MEL_FB_80 = _build_kaldi_mel_filterbank()
-_POVEY_WIN_400 = (np.hanning(400).astype(np.float32) ** 0.85)[None, :]
+_HAMMING_WIN_400 = np.hamming(400).astype(np.float32)[None, :]
+_FBANK_EPS = np.float32(np.finfo(np.float32).eps)
 _FBANK_FRAME_LEN = 400
 _FBANK_FRAME_SHIFT = 160
 
 
 def _extract_kaldi_fbank80_raw(audio_f32: np.ndarray) -> np.ndarray:
     """
-    Computes un-normalized (pre-CMN) 80-bin Kaldi log-mel filterbank frames using zero-copy
-    `sliding_window_view` framing. Used directly for single-pass sliding-window slicing.
+    Computes un-normalized (pre-CMN) 80-bin Kaldi log-mel filterbank frames matching the
+    WeSpeaker ONNX reference (Hamming window, mel-space triangular weights, float32 eps floor)
+    using zero-copy `sliding_window_view` framing.
     """
     sig = np.asarray(audio_f32, dtype=np.float32)
     if sig.ndim > 1:
@@ -78,10 +77,10 @@ def _extract_kaldi_fbank80_raw(audio_f32: np.ndarray) -> np.ndarray:
     pre = np.empty_like(frames)
     pre[:, 0] = frames[:, 0] * np.float32(0.03)
     np.subtract(frames[:, 1:], frames[:, :-1] * np.float32(0.97), out=pre[:, 1:])
-    pre *= _POVEY_WIN_400
+    pre *= _HAMMING_WIN_400
     spec = np.fft.rfft(pre, n=512, axis=1)
     power = (spec.real * spec.real + spec.imag * spec.imag).astype(np.float32)
-    mel_energy = np.maximum(power @ _MEL_FB_80, np.float32(1e-10))
+    mel_energy = np.maximum(power @ _MEL_FB_80, _FBANK_EPS)
     return np.log(mel_energy).astype(np.float32)
 
 

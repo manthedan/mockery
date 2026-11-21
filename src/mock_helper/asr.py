@@ -804,24 +804,29 @@ class ParakeetEngine:
         )
 
     def transcribe_pcm(self, pcm_float32: np.ndarray) -> ASRTranscription:
-        model = self.ensure_loaded()
-        cfg = model.preprocessor_config
-        min_samples = cfg.hop_length * 2
-        if pcm_float32.size < min_samples:
+        self.ensure_loaded()
+        if pcm_float32.size == 0:
             return ASRTranscription(text="", inference_ms=0.0, audio_duration_ms=0.0)
 
-        audio_duration_ms = (pcm_float32.size / cfg.sample_rate) * 1000.0
-        pad_samples = int(cfg.sample_rate * 0.2)
         t0 = time.perf_counter()
-
-        # Single contiguous zero-padded float32 buffer (avoids separate ascontiguousarray + pad copies)
-        padded = np.zeros(pcm_float32.size + 2 * pad_samples, dtype=np.float32)
-        padded[pad_samples : pad_samples + pcm_float32.size] = pcm_float32
-
         with self._lock:
+            model = self._model
+            fast_dec = self._fast_decoder
+            if model is None:
+                return ASRTranscription(text="", inference_ms=0.0, audio_duration_ms=0.0)
+            cfg = model.preprocessor_config
+            min_samples = cfg.hop_length * 2
+            if pcm_float32.size < min_samples:
+                return ASRTranscription(text="", inference_ms=0.0, audio_duration_ms=0.0)
+
+            audio_duration_ms = (pcm_float32.size / cfg.sample_rate) * 1000.0
+            pad_samples = int(cfg.sample_rate * 0.2)
+            # Single contiguous zero-padded float32 buffer (avoids separate ascontiguousarray + pad copies)
+            padded = np.zeros(pcm_float32.size + 2 * pad_samples, dtype=np.float32)
+            padded[pad_samples : pad_samples + pcm_float32.size] = pcm_float32
+
             audio_mx = mx.array(padded)
             mel = get_logmel(audio_mx, cfg)
-            fast_dec = self._fast_decoder
             if fast_dec is not None:
                 raw_text = self._infer_fast_locked(model, fast_dec, mel)
             else:

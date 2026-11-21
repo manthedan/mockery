@@ -223,6 +223,7 @@ class InterviewSession(BaseModel):
     started_epoch_ms: int = Field(default_factory=lambda: int(time.time() * 1000))
     ended_epoch_ms: int | None = None
     elapsed_capture_ms: int = 0
+    journal_offset: int | None = None
     config: SessionConfig = Field(default_factory=SessionConfig)
 
     # Canonical source-of-truth log (upsertable by `Utterance.id` + `Utterance.rev`)
