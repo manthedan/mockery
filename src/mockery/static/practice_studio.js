@@ -1911,6 +1911,7 @@ export function createPracticeStudioController({
         : null;
     return {
       active: Boolean(sess),
+      practiceEnabled: state.addons?.modules_map?.practice_mode !== false,
       homeMode: local.homeMode,
       sessionId: sess?.id || null,
       phase: sess?.phase || null,

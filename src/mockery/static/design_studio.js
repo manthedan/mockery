@@ -3,6 +3,8 @@
  * Ink & Paper aesthetic in Light & Dark modes, zero CDN dependencies.
  */
 
+import { createMachine } from "./state_machines.js";
+
 const CANVAS_W = 920;
 const CANVAS_H = 420;
 const NODE_W = 148;
@@ -292,7 +294,136 @@ function edgeBorderPoint(fromCenter, toCenter, boxW, boxH) {
   };
 }
 
-export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
+/* ---------------- Explicit Discriminated Interaction State Machine ---------------- */
+
+export function createDesignInteractionState() {
+  return { mode: "idle" };
+}
+
+export function getSelectedFromInteraction(interaction) {
+  if (!interaction) return null;
+  if (interaction.mode === "selected") {
+    return { kind: interaction.kind, id: interaction.id };
+  }
+  if (interaction.mode === "dragging") {
+    return { kind: "node", id: interaction.nodeId };
+  }
+  return null;
+}
+
+export function reduceDesignInteraction(current, action) {
+  const cur = current && typeof current === "object" && current.mode ? current : { mode: "idle" };
+  const act = action && typeof action === "object" ? action : {};
+
+  switch (act.type) {
+    case "SELECT_TOOL": {
+      if (cur.mode === "dragging") return cur;
+      if (cur.mode === "connecting") return { mode: "idle" };
+      return cur;
+    }
+    case "START_CONNECT": {
+      if (cur.mode === "dragging") return cur;
+      return { mode: "connecting", fromId: act.fromId || null };
+    }
+    case "SET_CONNECT_SOURCE": {
+      if (cur.mode !== "connecting") return cur;
+      const nextFrom = act.fromId || null;
+      return {
+        mode: "connecting",
+        fromId: cur.fromId && cur.fromId === nextFrom ? null : nextFrom,
+      };
+    }
+    case "CANCEL_CONNECT": {
+      if (cur.mode !== "connecting") return cur;
+      return { mode: "idle" };
+    }
+    case "SELECT_ITEM": {
+      if (cur.mode === "dragging") return cur;
+      if ((act.kind !== "node" && act.kind !== "edge") || !act.id) return cur;
+      return { mode: "selected", kind: act.kind, id: act.id, textEditDirty: false };
+    }
+    case "MARK_TEXT_DIRTY": {
+      if (cur.mode !== "selected" || cur.textEditDirty) return cur;
+      return { ...cur, textEditDirty: true };
+    }
+    case "CLEAR_TEXT_DIRTY": {
+      if (cur.mode !== "selected" || !cur.textEditDirty) return cur;
+      return { ...cur, textEditDirty: false };
+    }
+    case "DESELECT": {
+      if (cur.mode === "selected") return { mode: "idle" };
+      if (cur.mode === "connecting") return { mode: "connecting", fromId: null };
+      return cur;
+    }
+    case "START_DRAG": {
+      if (cur.mode !== "idle" && cur.mode !== "selected") return cur;
+      if (!act.nodeId) return cur;
+      return {
+        mode: "dragging",
+        nodeId: act.nodeId,
+        pointerId: act.pointerId,
+        captureEl: act.captureEl || null,
+        offsetX: act.offsetX || 0,
+        offsetY: act.offsetY || 0,
+        startX: act.startX || 0,
+        startY: act.startY || 0,
+        moved: false,
+        snapshot: act.snapshot || null,
+      };
+    }
+    case "MOVE_DRAG": {
+      if (cur.mode !== "dragging" || cur.pointerId !== act.pointerId) return cur;
+      if (cur.moved) return cur;
+      return { ...cur, moved: true };
+    }
+    case "COMMIT_DRAG": {
+      if (cur.mode !== "dragging" || cur.pointerId !== act.pointerId) return cur;
+      return { mode: "selected", kind: "node", id: cur.nodeId, textEditDirty: false };
+    }
+    case "CANCEL_DRAG": {
+      if (cur.mode !== "dragging") return cur;
+      if (act.pointerId != null && cur.pointerId !== act.pointerId) return cur;
+      return { mode: "selected", kind: "node", id: cur.nodeId, textEditDirty: false };
+    }
+    case "RESET_IDLE": {
+      return { mode: "idle" };
+    }
+    default:
+      return cur;
+  }
+}
+
+export function deriveDesignAllowedActions({
+  interaction,
+  nodeCount = 0,
+  edgeCount = 0,
+  historyLen = 0,
+  futureLen = 0,
+}) {
+  const mode = interaction?.mode || "idle";
+  if (mode === "dragging") {
+    return ["move_node", "commit_drag", "cancel_drag"];
+  }
+  const actions = [];
+  if (mode === "connecting") {
+    actions.push("pick_connect_node", "cancel_connect");
+  } else {
+    actions.push("start_connect");
+  }
+  if (nodeCount < MAX_NODES) actions.push("add_node");
+  if (mode === "selected") {
+    actions.push("edit_selected", "delete_selected", "deselect");
+    if (interaction?.kind === "edge") actions.push("reverse_edge");
+  }
+  if (historyLen > 0) actions.push("undo");
+  if (futureLen > 0) actions.push("redo");
+  actions.push("load_starter_template", "export_png");
+  if (nodeCount > 0 || edgeCount > 0) actions.push("clear_canvas");
+  if (nodeCount > 0) actions.push("ask_ai_review");
+  return actions;
+}
+
+export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMachines = null }) {
   return function mountSystemDesignStudio({
     containerEl,
     session,
@@ -315,16 +446,45 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
               .filter(Boolean)
           : []
       ),
-      tool: "select", // "select" | "connect"
-      connectFromId: null,
-      selected: null, // { kind: "node" | "edge", id: string } | null
+      interaction: createDesignInteractionState(),
       history: [],
       future: [],
-      drag: null, // { nodeId, pointerId, captureEl, offsetX, offsetY, startX, startY, moved, snapshot }
-      textEditDirty: false,
       playbookOpen: false,
       placeCursor: 0,
+      destroyed: false,
     };
+
+    const modeMachine = createMachine({
+      name: "designStudio",
+      initial: "idle",
+      transitions: {
+        idle: ["selected", "dragging", "connecting"],
+        selected: ["idle", "dragging", "connecting"],
+        dragging: ["selected", "idle"],
+        connecting: ["idle", "selected"],
+      },
+      registry: clientMachines,
+    });
+
+    function dispatchInteraction(action, reason = null) {
+      const prev = state.interaction;
+      const next = reduceDesignInteraction(prev, action);
+      state.interaction = next;
+      if (next.mode !== prev.mode) {
+        if (!modeMachine.transition(next.mode, { event: action?.type || "interaction", reason })) {
+          modeMachine.reset(next.mode, { event: action?.type || "interaction", reason });
+        }
+      }
+      return next;
+    }
+
+    function currentTool() {
+      return state.interaction.mode === "connecting" ? "connect" : "select";
+    }
+
+    function currentSelected() {
+      return getSelectedFromInteraction(state.interaction);
+    }
 
     function getCurrentQuestion() {
       const qs = state.session?.questions || [];
@@ -498,13 +658,16 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
       if (emptyEl) emptyEl.classList.toggle("hidden", nodes.length > 0);
 
       // Update tool buttons + undo/redo buttons
+      const activeTool = currentTool();
+      const selected = currentSelected();
+      const isDragging = state.interaction.mode === "dragging";
       containerEl.querySelectorAll("[data-sd-tool]").forEach((btn) => {
-        btn.classList.toggle("active", btn.getAttribute("data-sd-tool") === state.tool);
+        btn.classList.toggle("active", btn.getAttribute("data-sd-tool") === activeTool);
       });
       const undoBtn = q("[data-sd-undo]");
       const redoBtn = q("[data-sd-redo]");
-      if (undoBtn) undoBtn.disabled = state.history.length === 0;
-      if (redoBtn) redoBtn.disabled = state.future.length === 0;
+      if (undoBtn) undoBtn.disabled = isDragging || state.history.length === 0;
+      if (redoBtn) redoBtn.disabled = isDragging || state.future.length === 0;
 
       // Render edges
       const edgeMarkup = [];
@@ -516,7 +679,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         const cB = { x: b.x + NODE_W / 2, y: b.y + NODE_H / 2 };
         const hasReverse = edges.some((o) => o.from === e.to && o.to === e.from);
 
-        const isSel = state.selected?.kind === "edge" && state.selected.id === e.id;
+        const isSel = selected?.kind === "edge" && selected.id === e.id;
         const mUrl = `url(#${isSel ? markerSelId : markerId})`;
 
         let pathD = "";
@@ -566,8 +729,9 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
       const nodeMarkup = [];
       for (const n of nodes) {
         const meta = NODE_TYPE_MAP.get(n.type) || NODE_TYPES[2];
-        const isSel = state.selected?.kind === "node" && state.selected.id === n.id;
-        const isConnectSrc = state.tool === "connect" && state.connectFromId === n.id;
+        const isSel = selected?.kind === "node" && selected.id === n.id;
+        const isConnectSrc =
+          state.interaction.mode === "connecting" && state.interaction.fromId === n.id;
         const titleTxt = truncateText(n.label, 20);
         const noteTxt = truncateText(n.note, 24);
         const cls = [
@@ -596,9 +760,9 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
       const box = q("[data-sd-inspector]");
       if (!box) return;
 
-      if (state.tool === "connect") {
-        const srcNode = state.connectFromId
-          ? state.graph.nodes.find((n) => n.id === state.connectFromId)
+      if (state.interaction.mode === "connecting") {
+        const srcNode = state.interaction.fromId
+          ? state.graph.nodes.find((n) => n.id === state.interaction.fromId)
           : null;
         box.innerHTML = `
           <div class="sd-inspector-status">
@@ -613,8 +777,10 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         return;
       }
 
-      if (state.selected?.kind === "node") {
-        const n = state.graph.nodes.find((x) => x.id === state.selected.id);
+      const selected = currentSelected();
+      const dragDisabled = state.interaction.mode === "dragging" ? "disabled" : "";
+      if (selected?.kind === "node") {
+        const n = state.graph.nodes.find((x) => x.id === selected.id);
         if (n) {
           const typeOpts = NODE_TYPES.map(
             (t) =>
@@ -622,14 +788,14 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
           ).join("");
           box.innerHTML = `
             <div class="sd-inspector-form">
-              <select class="field-input sd-insp-select" data-sd-edit-type aria-label="Component type">${typeOpts}</select>
-              <input type="text" class="field-input sd-insp-input" data-sd-edit-label value="${escapeHtml(n.label)}" maxlength="80" placeholder="Component name" aria-label="Component name" />
-              <input type="text" class="field-input sd-insp-note" data-sd-edit-note value="${escapeHtml(n.note)}" maxlength="140" placeholder="Tech / scale notes (e.g. Redis · 50k RPS)" aria-label="Component notes" />
-              <button type="button" class="btn btn-quiet btn-xs" data-sd-connect-from="${escapeHtml(n.id)}">Connect →</button>
-              <button type="button" class="btn btn-quiet btn-xs sd-danger-btn" data-sd-delete-selected>Delete</button>
+              <select class="field-input sd-insp-select" data-sd-edit-type aria-label="Component type" ${dragDisabled}>${typeOpts}</select>
+              <input type="text" class="field-input sd-insp-input" data-sd-edit-label value="${escapeHtml(n.label)}" maxlength="80" placeholder="Component name" aria-label="Component name" ${dragDisabled} />
+              <input type="text" class="field-input sd-insp-note" data-sd-edit-note value="${escapeHtml(n.note)}" maxlength="140" placeholder="Tech / scale notes (e.g. Redis · 50k RPS)" aria-label="Component notes" ${dragDisabled} />
+              <button type="button" class="btn btn-quiet btn-xs" data-sd-connect-from="${escapeHtml(n.id)}" ${dragDisabled}>Connect →</button>
+              <button type="button" class="btn btn-quiet btn-xs sd-danger-btn" data-sd-delete-selected ${dragDisabled}>Delete</button>
             </div>
           `;
-          if (focusLabel) {
+          if (focusLabel && !dragDisabled) {
             const inp = box.querySelector("[data-sd-edit-label]");
             inp?.focus();
             inp?.select();
@@ -638,8 +804,8 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         }
       }
 
-      if (state.selected?.kind === "edge") {
-        const e = state.graph.edges.find((x) => x.id === state.selected.id);
+      if (selected?.kind === "edge") {
+        const e = state.graph.edges.find((x) => x.id === selected.id);
         if (e) {
           const fromNode = state.graph.nodes.find((n) => n.id === e.from);
           const toNode = state.graph.nodes.find((n) => n.id === e.to);
@@ -662,7 +828,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
 
       box.innerHTML = `
         <div class="sd-inspector-hint">
-          Drag components to arrange · Double-click to rename · Use <strong>Connect Arrow</strong> to draw data flows · Press <strong>Delete</strong> to remove selected item
+          Drag components to arrange (Esc cancels drag) · Double-click to rename · Use <strong>Connect Arrow</strong> to draw data flows · Press <strong>Delete</strong> to remove selected item
         </div>
       `;
     }
@@ -686,6 +852,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
     }
 
     function addNode(type) {
+      if (state.interaction.mode === "dragging") return;
       if (state.graph.nodes.length >= MAX_NODES) {
         showToast(`Whiteboard supports up to ${MAX_NODES} components.`, 2400);
         return;
@@ -706,77 +873,68 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         y,
       };
       state.graph.nodes.push(node);
-      state.tool = "select";
-      state.connectFromId = null;
-      state.selected = { kind: "node", id: node.id };
-      state.textEditDirty = false;
+      dispatchInteraction({ type: "SELECT_ITEM", kind: "node", id: node.id }, "add_node");
       renderAll({ focusLabel: true });
       notifyChanged();
     }
 
     function deleteSelected() {
-      if (!state.selected) return;
+      if (state.interaction.mode !== "selected") return;
+      const selected = state.interaction;
       pushHistory();
-      if (state.selected.kind === "node") {
-        const nid = state.selected.id;
+      if (selected.kind === "node") {
+        const nid = selected.id;
         state.graph.nodes = state.graph.nodes.filter((n) => n.id !== nid);
         state.graph.edges = state.graph.edges.filter((e) => e.from !== nid && e.to !== nid);
-      } else if (state.selected.kind === "edge") {
-        const eid = state.selected.id;
+      } else if (selected.kind === "edge") {
+        const eid = selected.id;
         state.graph.edges = state.graph.edges.filter((e) => e.id !== eid);
       }
-      state.selected = null;
-      state.textEditDirty = false;
+      dispatchInteraction({ type: "RESET_IDLE" }, "delete_selected");
       renderAll();
       notifyChanged();
     }
 
     function undo() {
-      if (!state.history.length) return;
+      if (state.interaction.mode === "dragging" || !state.history.length) return;
       state.future.push(cloneGraph());
       state.graph = state.history.pop();
-      state.selected = null;
-      state.connectFromId = null;
-      state.textEditDirty = false;
+      dispatchInteraction({ type: "RESET_IDLE" }, "undo");
       renderAll();
       notifyChanged();
     }
 
     function redo() {
-      if (!state.future.length) return;
+      if (state.interaction.mode === "dragging" || !state.future.length) return;
       state.history.push(cloneGraph());
       state.graph = state.future.pop();
-      state.selected = null;
-      state.connectFromId = null;
-      state.textEditDirty = false;
+      dispatchInteraction({ type: "RESET_IDLE" }, "redo");
       renderAll();
       notifyChanged();
     }
 
     function loadStarterTemplate() {
+      if (state.interaction.mode === "dragging") return;
       pushHistory();
       state.graph = createStarterGraph(getCurrentQuestion());
-      state.selected = null;
-      state.tool = "select";
-      state.connectFromId = null;
-      state.textEditDirty = false;
+      dispatchInteraction({ type: "RESET_IDLE" }, "starter_template");
       renderAll();
       notifyChanged();
       showToast("Starter blueprint loaded — drag, edit, or add components freely!", 2400);
     }
 
     function clearCanvas() {
+      if (state.interaction.mode === "dragging") return;
       if (!state.graph.nodes.length && !state.graph.edges.length) return;
       pushHistory();
       state.graph = { version: 1, nodes: [], edges: [] };
-      state.selected = null;
-      state.connectFromId = null;
-      state.textEditDirty = false;
+      dispatchInteraction({ type: "RESET_IDLE" }, "clear_canvas");
       renderAll();
       notifyChanged();
     }
 
     function exportPng() {
+      if (state.destroyed || state.interaction.mode === "dragging") return;
       const svg = q("[data-sd-svg]");
       if (!svg) return;
       const cs = getComputedStyle(document.documentElement);
@@ -825,6 +983,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
       const img = new Image();
       img.onload = () => {
         try {
+          if (state.destroyed) return;
           const scale = 2;
           const canvas = document.createElement("canvas");
           canvas.width = CANVAS_W * scale;
@@ -835,27 +994,66 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
           ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
           ctx.drawImage(img, 0, 0, CANVAS_W, CANVAS_H);
           const pngUrl = canvas.toDataURL("image/png");
+          if (state.destroyed) return;
           const a = document.createElement("a");
           a.href = pngUrl;
           a.download = "mockery_system_design.png";
           a.click();
           showToast("Exported architecture whiteboard PNG.", 2200);
         } catch {
-          showToast("Could not export PNG in this browser.", 2600);
+          if (!state.destroyed) {
+            showToast("Could not export PNG in this browser.", 2600);
+          }
         } finally {
           URL.revokeObjectURL(url);
         }
       };
       img.onerror = () => {
         URL.revokeObjectURL(url);
-        showToast("Could not render whiteboard PNG.", 2600);
+        if (!state.destroyed) {
+          showToast("Could not render whiteboard PNG.", 2600);
+        }
       };
       img.src = url;
     }
 
     /* ---------------- Event Handlers ---------------- */
 
+    function releaseDragCapture(drag) {
+      if (!drag?.captureEl || typeof drag.captureEl.releasePointerCapture !== "function") return;
+      try {
+        if (drag.captureEl.hasPointerCapture?.(drag.pointerId)) {
+          drag.captureEl.releasePointerCapture(drag.pointerId);
+        }
+      } catch {
+        // Ignore browsers that already released capture on cancel/up
+      }
+    }
+
+    function cancelActiveDrag(pointerId = null, { render = true, reason = "cancel_drag" } = {}) {
+      if (state.interaction.mode !== "dragging") return false;
+      if (pointerId != null && state.interaction.pointerId !== pointerId) return false;
+      const drag = state.interaction;
+      dispatchInteraction({ type: "CANCEL_DRAG", pointerId }, reason);
+      releaseDragCapture(drag);
+      if (drag.snapshot) {
+        state.graph = cloneGraph(drag.snapshot);
+      } else {
+        const node = state.graph.nodes.find((n) => n.id === drag.nodeId);
+        if (node) {
+          node.x = drag.startX;
+          node.y = drag.startY;
+        }
+      }
+      if (render && !state.destroyed) {
+        renderAll();
+      }
+      return true;
+    }
+
     function onClick(ev) {
+      if (state.interaction.mode === "dragging") return;
+
       const addBtn = ev.target.closest("[data-sd-add]");
       if (addBtn) {
         addNode(addBtn.getAttribute("data-sd-add"));
@@ -864,15 +1062,18 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
 
       const toolBtn = ev.target.closest("[data-sd-tool]");
       if (toolBtn) {
-        state.tool = toolBtn.getAttribute("data-sd-tool") || "select";
-        state.connectFromId = null;
+        const tool = toolBtn.getAttribute("data-sd-tool") || "select";
+        if (tool === "connect") {
+          dispatchInteraction({ type: "START_CONNECT", fromId: null }, "toolbar_connect");
+        } else {
+          dispatchInteraction({ type: "SELECT_TOOL" }, "toolbar_select");
+        }
         renderAll();
         return;
       }
 
       if (ev.target.closest("[data-sd-cancel-connect]")) {
-        state.tool = "select";
-        state.connectFromId = null;
+        dispatchInteraction({ type: "CANCEL_CONNECT" }, "done_connecting");
         renderAll();
         return;
       }
@@ -917,8 +1118,10 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
 
       const connectFromBtn = ev.target.closest("[data-sd-connect-from]");
       if (connectFromBtn) {
-        state.tool = "connect";
-        state.connectFromId = connectFromBtn.getAttribute("data-sd-connect-from");
+        dispatchInteraction(
+          { type: "START_CONNECT", fromId: connectFromBtn.getAttribute("data-sd-connect-from") },
+          "inspector_connect"
+        );
         renderAll();
         return;
       }
@@ -928,15 +1131,21 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         return;
       }
 
-      if (ev.target.closest("[data-sd-reverse-edge]") && state.selected?.kind === "edge") {
-        const e = state.graph.edges.find((x) => x.id === state.selected.id);
+      if (
+        ev.target.closest("[data-sd-reverse-edge]") &&
+        state.interaction.mode === "selected" &&
+        state.interaction.kind === "edge"
+      ) {
+        const e = state.graph.edges.find((x) => x.id === state.interaction.id);
         if (e) {
           const existingOpposite = state.graph.edges.find(
             (x) => x.id !== e.id && x.from === e.to && x.to === e.from
           );
           if (existingOpposite) {
-            state.selected = { kind: "edge", id: existingOpposite.id };
-            state.textEditDirty = false;
+            dispatchInteraction(
+              { type: "SELECT_ITEM", kind: "edge", id: existingOpposite.id },
+              "select_opposite_edge"
+            );
             renderAll();
             showToast("A flow in the opposite direction already exists — selected it.", 2400);
             return;
@@ -945,7 +1154,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
           const tmp = e.from;
           e.from = e.to;
           e.to = tmp;
-          state.textEditDirty = false;
+          dispatchInteraction({ type: "CLEAR_TEXT_DIRTY" }, "reverse_edge");
           renderAll();
           notifyChanged();
         }
@@ -955,52 +1164,37 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
       const edgeGroup = ev.target.closest("[data-sd-edge]");
       if (edgeGroup) {
         const eid = edgeGroup.getAttribute("data-sd-edge");
-        state.tool = "select";
-        state.connectFromId = null;
-        state.selected = { kind: "edge", id: eid };
-        state.textEditDirty = false;
+        dispatchInteraction({ type: "SELECT_ITEM", kind: "edge", id: eid }, "click_edge");
         focusCanvas();
         renderAll();
         return;
       }
 
       if (ev.target.closest("[data-sd-bg]")) {
-        state.selected = null;
-        state.textEditDirty = false;
-        if (state.tool === "connect") state.connectFromId = null;
+        dispatchInteraction({ type: "DESELECT" }, "click_bg");
         focusCanvas();
         renderAll();
       }
     }
 
     function onDblClick(ev) {
+      if (state.interaction.mode === "dragging") return;
       const nodeEl = ev.target.closest("[data-sd-node]");
       if (nodeEl) {
-        state.tool = "select";
-        state.connectFromId = null;
-        state.selected = { kind: "node", id: nodeEl.getAttribute("data-sd-node") };
-        state.textEditDirty = false;
+        dispatchInteraction(
+          { type: "SELECT_ITEM", kind: "node", id: nodeEl.getAttribute("data-sd-node") },
+          "dblclick_node"
+        );
         renderAll({ focusLabel: true });
         return;
       }
       const edgeEl = ev.target.closest("[data-sd-edge]");
       if (edgeEl) {
-        state.tool = "select";
-        state.connectFromId = null;
-        state.selected = { kind: "edge", id: edgeEl.getAttribute("data-sd-edge") };
-        state.textEditDirty = false;
+        dispatchInteraction(
+          { type: "SELECT_ITEM", kind: "edge", id: edgeEl.getAttribute("data-sd-edge") },
+          "dblclick_edge"
+        );
         renderAll({ focusLabel: true });
-      }
-    }
-
-    function releaseDragCapture(drag) {
-      if (!drag?.captureEl || typeof drag.captureEl.releasePointerCapture !== "function") return;
-      try {
-        if (drag.captureEl.hasPointerCapture?.(drag.pointerId)) {
-          drag.captureEl.releasePointerCapture(drag.pointerId);
-        }
-      } catch {
-        // Ignore browsers that already released capture on cancel/up
       }
     }
 
@@ -1016,15 +1210,16 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
 
       focusCanvas();
 
-      if (state.tool === "connect") {
+      if (state.interaction.mode === "connecting") {
         ev.preventDefault();
-        if (!state.connectFromId) {
-          state.connectFromId = nid;
+        const fromId = state.interaction.fromId;
+        if (!fromId) {
+          dispatchInteraction({ type: "SET_CONNECT_SOURCE", fromId: nid }, "pick_source");
           renderAll();
           return;
         }
-        if (state.connectFromId === nid) {
-          state.connectFromId = null;
+        if (fromId === nid) {
+          dispatchInteraction({ type: "SET_CONNECT_SOURCE", fromId: nid }, "clear_source");
           renderAll();
           return;
         }
@@ -1032,45 +1227,40 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
           showToast(`Maximum ${MAX_EDGES} flows reached.`, 2200);
           return;
         }
-        const dup = state.graph.edges.find((e) => e.from === state.connectFromId && e.to === nid);
+        const dup = state.graph.edges.find((e) => e.from === fromId && e.to === nid);
         if (dup) {
-          state.selected = { kind: "edge", id: dup.id };
-          state.tool = "select";
-          state.connectFromId = null;
-          state.textEditDirty = false;
+          dispatchInteraction({ type: "SELECT_ITEM", kind: "edge", id: dup.id }, "select_dup_edge");
           renderAll({ focusLabel: true });
           return;
         }
         pushHistory();
-        const edge = { id: shortLocalId("e"), from: state.connectFromId, to: nid, label: "" };
+        const edge = { id: shortLocalId("e"), from: fromId, to: nid, label: "" };
         state.graph.edges.push(edge);
-        state.connectFromId = null;
-        state.tool = "select";
-        state.selected = { kind: "edge", id: edge.id };
-        state.textEditDirty = false;
+        dispatchInteraction({ type: "SELECT_ITEM", kind: "edge", id: edge.id }, "create_edge");
         renderAll({ focusLabel: true });
         notifyChanged();
         return;
       }
 
-      if (state.drag) return;
+      if (state.interaction.mode === "dragging") return;
 
       ev.preventDefault();
       const pt = svgPointFromEvent(ev);
       const svg = q("[data-sd-svg]");
-      state.selected = { kind: "node", id: nid };
-      state.textEditDirty = false;
-      state.drag = {
-        nodeId: nid,
-        pointerId: ev.pointerId,
-        captureEl: svg || null,
-        offsetX: pt.x - node.x,
-        offsetY: pt.y - node.y,
-        startX: node.x,
-        startY: node.y,
-        moved: false,
-        snapshot: cloneGraph(),
-      };
+      dispatchInteraction(
+        {
+          type: "START_DRAG",
+          nodeId: nid,
+          pointerId: ev.pointerId,
+          captureEl: svg || null,
+          offsetX: pt.x - node.x,
+          offsetY: pt.y - node.y,
+          startX: node.x,
+          startY: node.y,
+          snapshot: cloneGraph(),
+        },
+        "pointer_down"
+      );
       try {
         svg?.setPointerCapture?.(ev.pointerId);
       } catch {
@@ -1080,43 +1270,42 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
     }
 
     function onPointerMove(ev) {
-      if (!state.drag || ev.pointerId !== state.drag.pointerId) return;
-      const node = state.graph.nodes.find((n) => n.id === state.drag.nodeId);
+      if (state.interaction.mode !== "dragging" || ev.pointerId !== state.interaction.pointerId) return;
+      const drag = state.interaction;
+      const node = state.graph.nodes.find((n) => n.id === drag.nodeId);
       if (!node) return;
       const pt = svgPointFromEvent(ev);
-      const nextX = clamp(snap(pt.x - state.drag.offsetX), 12, CANVAS_W - NODE_W - 12);
-      const nextY = clamp(snap(pt.y - state.drag.offsetY), 12, CANVAS_H - NODE_H - 12);
+      const nextX = clamp(snap(pt.x - drag.offsetX), 12, CANVAS_W - NODE_W - 12);
+      const nextY = clamp(snap(pt.y - drag.offsetY), 12, CANVAS_H - NODE_H - 12);
       if (nextX !== node.x || nextY !== node.y) {
         node.x = nextX;
         node.y = nextY;
-        state.drag.moved = true;
+        dispatchInteraction({ type: "MOVE_DRAG", pointerId: ev.pointerId }, "pointer_move");
         renderCanvas();
       }
     }
 
     function onPointerUp(ev) {
-      if (!state.drag || ev.pointerId !== state.drag.pointerId) return;
-      const drag = state.drag;
-      state.drag = null;
+      if (state.interaction.mode !== "dragging" || ev.pointerId !== state.interaction.pointerId) return;
+      const drag = state.interaction;
+      dispatchInteraction({ type: "COMMIT_DRAG", pointerId: ev.pointerId }, "pointer_up");
       releaseDragCapture(drag);
       if (drag.moved) {
         pushHistory(drag.snapshot);
-        renderCanvas();
+        renderAll();
         notifyChanged();
+      } else {
+        renderAll();
       }
     }
 
     function onPointerCancel(ev) {
-      if (!state.drag || ev.pointerId !== state.drag.pointerId) return;
-      const drag = state.drag;
-      state.drag = null;
-      releaseDragCapture(drag);
-      const node = state.graph.nodes.find((n) => n.id === drag.nodeId);
-      if (node) {
-        node.x = drag.startX;
-        node.y = drag.startY;
-      }
-      renderCanvas();
+      cancelActiveDrag(ev.pointerId, { reason: "pointer_cancel" });
+    }
+
+    function onLostPointerCapture(ev) {
+      if (state.interaction.mode !== "dragging" || ev.pointerId !== state.interaction.pointerId) return;
+      cancelActiveDrag(ev.pointerId, { reason: "lost_pointer_capture" });
     }
 
     function onFocusOut(ev) {
@@ -1125,39 +1314,40 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
           "[data-sd-edit-label], [data-sd-edit-note], [data-sd-edit-edge-label]"
         )
       ) {
-        state.textEditDirty = false;
+        dispatchInteraction({ type: "CLEAR_TEXT_DIRTY" }, "focus_out");
       }
     }
 
     function onInput(ev) {
-      if (ev.target.matches("[data-sd-edit-label]") && state.selected?.kind === "node") {
-        const n = state.graph.nodes.find((x) => x.id === state.selected.id);
+      if (state.interaction.mode !== "selected") return;
+      if (ev.target.matches("[data-sd-edit-label]") && state.interaction.kind === "node") {
+        const n = state.graph.nodes.find((x) => x.id === state.interaction.id);
         if (n) {
-          if (!state.textEditDirty) {
+          if (!state.interaction.textEditDirty) {
             pushHistory();
-            state.textEditDirty = true;
+            dispatchInteraction({ type: "MARK_TEXT_DIRTY" }, "edit_label");
           }
           n.label = safeSliceChars(ev.target.value, 80);
           renderCanvas();
           notifyChanged();
         }
-      } else if (ev.target.matches("[data-sd-edit-note]") && state.selected?.kind === "node") {
-        const n = state.graph.nodes.find((x) => x.id === state.selected.id);
+      } else if (ev.target.matches("[data-sd-edit-note]") && state.interaction.kind === "node") {
+        const n = state.graph.nodes.find((x) => x.id === state.interaction.id);
         if (n) {
-          if (!state.textEditDirty) {
+          if (!state.interaction.textEditDirty) {
             pushHistory();
-            state.textEditDirty = true;
+            dispatchInteraction({ type: "MARK_TEXT_DIRTY" }, "edit_note");
           }
           n.note = safeSliceChars(ev.target.value, 140);
           renderCanvas();
           notifyChanged();
         }
-      } else if (ev.target.matches("[data-sd-edit-edge-label]") && state.selected?.kind === "edge") {
-        const e = state.graph.edges.find((x) => x.id === state.selected.id);
+      } else if (ev.target.matches("[data-sd-edit-edge-label]") && state.interaction.kind === "edge") {
+        const e = state.graph.edges.find((x) => x.id === state.interaction.id);
         if (e) {
-          if (!state.textEditDirty) {
+          if (!state.interaction.textEditDirty) {
             pushHistory();
-            state.textEditDirty = true;
+            dispatchInteraction({ type: "MARK_TEXT_DIRTY" }, "edit_edge_label");
           }
           e.label = safeSliceChars(ev.target.value, 60);
           renderCanvas();
@@ -1167,13 +1357,17 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
     }
 
     function onChange(ev) {
-      if (ev.target.matches("[data-sd-edit-type]") && state.selected?.kind === "node") {
-        const n = state.graph.nodes.find((x) => x.id === state.selected.id);
+      if (
+        ev.target.matches("[data-sd-edit-type]") &&
+        state.interaction.mode === "selected" &&
+        state.interaction.kind === "node"
+      ) {
+        const n = state.graph.nodes.find((x) => x.id === state.interaction.id);
         const nextType = ev.target.value;
         if (n && NODE_TYPE_MAP.has(nextType)) {
           pushHistory();
           n.type = nextType;
-          state.textEditDirty = false;
+          dispatchInteraction({ type: "CLEAR_TEXT_DIRTY" }, "edit_type");
           renderAll();
           notifyChanged();
         }
@@ -1192,6 +1386,12 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
     }
 
     function onKeyDown(ev) {
+      if (ev.key === "Escape" && state.interaction.mode === "dragging") {
+        ev.preventDefault();
+        cancelActiveDrag(null, { reason: "escape_drag" });
+        return;
+      }
+
       const active = document.activeElement;
       // Only handle whiteboard shortcuts when focus is inside the studio container
       if (!active || !containerEl.contains(active)) return;
@@ -1202,14 +1402,21 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         active.tagName === "SELECT" ||
         active.isContentEditable;
 
-      if (ev.key === "Escape" && state.tool === "connect") {
-        state.tool = "select";
-        state.connectFromId = null;
+      if (ev.key === "Escape" && state.interaction.mode === "connecting") {
+        ev.preventDefault();
+        dispatchInteraction({ type: "CANCEL_CONNECT" }, "escape_connect");
         renderAll();
         return;
       }
 
       if (inEditable) return;
+
+      if (ev.key === "Escape" && state.interaction.mode === "selected") {
+        ev.preventDefault();
+        dispatchInteraction({ type: "DESELECT" }, "escape_deselect");
+        renderAll();
+        return;
+      }
 
       if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "z") {
         ev.preventDefault();
@@ -1218,7 +1425,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         return;
       }
 
-      if ((ev.key === "Delete" || ev.key === "Backspace") && state.selected) {
+      if ((ev.key === "Delete" || ev.key === "Backspace") && state.interaction.mode === "selected") {
         ev.preventDefault();
         deleteSelected();
       }
@@ -1230,6 +1437,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
     containerEl.addEventListener("click", onClick);
     containerEl.addEventListener("dblclick", onDblClick);
     containerEl.addEventListener("pointerdown", onPointerDown);
+    containerEl.addEventListener("lostpointercapture", onLostPointerCapture);
     containerEl.addEventListener("input", onInput);
     containerEl.addEventListener("focusout", onFocusOut);
     containerEl.addEventListener("change", onChange);
@@ -1240,11 +1448,37 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
 
     return {
       getWorkspaceContext() {
-        const graph = cloneGraph();
+        const graph =
+          state.interaction.mode === "dragging" && state.interaction.snapshot
+            ? cloneGraph(state.interaction.snapshot)
+            : cloneGraph();
         return {
           diagram_graph: graph,
           diagram_summary: serializeDiagramSummary(graph),
           checked_requirements: Array.from(state.checkedReqs).slice(0, 100),
+        };
+      },
+      getStateSnapshot() {
+        const inter = state.interaction;
+        return {
+          studio: "system_design",
+          mode: inter.mode,
+          tool: currentTool(),
+          selected: currentSelected(),
+          connectFromId: inter.mode === "connecting" ? inter.fromId : null,
+          draggingNodeId: inter.mode === "dragging" ? inter.nodeId : null,
+          nodeCount: state.graph.nodes.length,
+          edgeCount: state.graph.edges.length,
+          canUndo: inter.mode !== "dragging" && state.history.length > 0,
+          canRedo: inter.mode !== "dragging" && state.future.length > 0,
+          playbookOpen: state.playbookOpen,
+          allowedActions: deriveDesignAllowedActions({
+            interaction: inter,
+            nodeCount: state.graph.nodes.length,
+            edgeCount: state.graph.edges.length,
+            historyLen: state.history.length,
+            futureLen: state.future.length,
+          }),
         };
       },
       updateSession(nextSession) {
@@ -1252,13 +1486,13 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast }) {
         renderPlaybook();
       },
       destroy() {
-        if (state.drag) {
-          releaseDragCapture(state.drag);
-          state.drag = null;
-        }
+        state.destroyed = true;
+        cancelActiveDrag(null, { render: false, reason: "destroy" });
+        clientMachines?.unregister?.("designStudio");
         containerEl.removeEventListener("click", onClick);
         containerEl.removeEventListener("dblclick", onDblClick);
         containerEl.removeEventListener("pointerdown", onPointerDown);
+        containerEl.removeEventListener("lostpointercapture", onLostPointerCapture);
         containerEl.removeEventListener("input", onInput);
         containerEl.removeEventListener("focusout", onFocusOut);
         containerEl.removeEventListener("change", onChange);
