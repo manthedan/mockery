@@ -165,6 +165,31 @@ class PracticeSession(BaseModel):
                     lines.append(f"- **One Final Polish:** {fb['one_more_polish']}")
                 lines.append("")
 
+        def _fenced_block(content: str, lang: str = "") -> list[str]:
+            runs = re.findall(r"`+", content)
+            fence = "`" * max(3, max((len(r) for r in runs), default=0) + 1)
+            return [f"{fence}{lang}", content, fence]
+
+        if isinstance(self.workspace_context, dict):
+            diag = str(self.workspace_context.get("diagram_summary") or "").strip()
+            if diag:
+                lines.append("## System Design Whiteboard Summary")
+                lines.append("")
+                lines.extend(_fenced_block(diag[:6000], "text"))
+                lines.append("")
+            code = str(self.workspace_context.get("code") or "").strip()
+            if code:
+                lang = re.sub(r"[^A-Za-z0-9_+-]", "", str(self.workspace_context.get("language") or "text")) or "text"
+                lines.append(f"## Coding Studio Solution ({lang})")
+                lines.append("")
+                lines.extend(_fenced_block(code[:12000], lang))
+                test_out = str(self.workspace_context.get("test_output") or "").strip()
+                if test_out:
+                    lines.append("")
+                    lines.append("**Latest Test Output:**")
+                    lines.extend(_fenced_block(test_out[:4000], "text"))
+                lines.append("")
+
         lines.append("## Full Practice Transcript")
         lines.append("")
         for t in self.turns:

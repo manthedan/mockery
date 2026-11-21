@@ -4022,6 +4022,389 @@ kbd {
 }
 
 /* ----------------------------------------------------------------------------
+   Milestone 3: System Design Whiteboard Studio
+   ---------------------------------------------------------------------------- */
+
+.sd-studio {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+
+.sd-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sd-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sd-count-pill {
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--ink-3);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.sd-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sd-playbook {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.sd-playbook-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.sd-playbook-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sd-req-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sd-req-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.sd-req-item input {
+  margin-top: 2px;
+  accent-color: var(--ink);
+}
+
+.sd-dive-list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+
+.sd-playbook-empty {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.sd-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sd-mode-group {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.sd-tool-btn {
+  padding: 4px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sd-tool-btn.active {
+  background: var(--ink);
+  color: var(--on-ink);
+}
+
+.sd-palette {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+}
+
+.sd-palette-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+
+.sd-palette-btn:hover {
+  border-color: var(--line-strong);
+  background: var(--hover);
+}
+
+.sd-palette-tag {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+
+.sd-canvas-wrap {
+  position: relative;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.sd-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+  user-select: none;
+  touch-action: none;
+}
+
+.sd-svg:focus {
+  outline: none;
+}
+
+.sd-svg:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+
+.sd-grid-dot {
+  fill: var(--line-strong);
+  opacity: 0.45;
+}
+
+.sd-arrow-fill {
+  fill: var(--ink-2);
+}
+
+.sd-arrow-fill-sel {
+  fill: var(--ink);
+}
+
+.sd-edge-group {
+  cursor: pointer;
+}
+
+.sd-edge-hit {
+  stroke: transparent;
+  stroke-width: 14;
+}
+
+.sd-edge-line {
+  stroke: var(--ink-2);
+  stroke-width: 1.6;
+  transition: stroke 0.12s ease, stroke-width 0.12s ease;
+}
+
+.sd-edge-group:hover .sd-edge-line,
+.sd-edge-group.is-selected .sd-edge-line {
+  stroke: var(--ink);
+  stroke-width: 2.3;
+}
+
+.sd-edge-label-bg {
+  fill: var(--bg);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.sd-edge-group.is-selected .sd-edge-label-bg {
+  stroke: var(--ink);
+}
+
+.sd-edge-label {
+  fill: var(--ink-2);
+  font-size: 10px;
+  font-weight: 500;
+  pointer-events: none;
+}
+
+.sd-node {
+  cursor: grab;
+}
+
+.sd-node:active {
+  cursor: grabbing;
+}
+
+.sd-node-box {
+  fill: var(--raised);
+  stroke: var(--line-strong);
+  stroke-width: 1.3;
+  transition: stroke 0.12s ease, stroke-width 0.12s ease;
+}
+
+.sd-node:hover .sd-node-box {
+  stroke: var(--ink-2);
+}
+
+.sd-node.is-selected .sd-node-box {
+  stroke: var(--ink);
+  stroke-width: 2.2;
+}
+
+.sd-node.is-connect-src .sd-node-box {
+  stroke: var(--good);
+  stroke-width: 2.4;
+  stroke-dasharray: 4 3;
+}
+
+.sd-node-type-note .sd-node-box {
+  stroke-dasharray: 4 3;
+  fill: var(--bg-sunken);
+}
+
+.sd-node-badge-bg {
+  fill: var(--bg-sunken);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.sd-node-badge-txt {
+  fill: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.sd-node-title {
+  fill: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.sd-node-note {
+  fill: var(--ink-2);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.sd-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--ink-3);
+  pointer-events: none;
+}
+
+.sd-inspector {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+}
+
+.sd-inspector-hint {
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.sd-inspector-status {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.sd-inspector-form {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sd-insp-select {
+  width: 126px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.sd-insp-input {
+  flex: 1 1 150px;
+  min-width: 120px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.sd-insp-note {
+  flex: 1.4 1 180px;
+  min-width: 140px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.sd-insp-flow {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.sd-danger-btn {
+  color: var(--bad, #b42318);
+}
+
+@media (max-width: 960px) {
+  .sd-playbook-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ----------------------------------------------------------------------------
    Narrow windows
    ---------------------------------------------------------------------------- */
 

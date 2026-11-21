@@ -627,11 +627,25 @@ export function createPracticeStudioController({
     }
   }
 
-  function unmountStudioPlugin() {
+  function unmountStudioPlugin({ flush = true } = {}) {
+    const hadPending = Boolean(local.workspaceSyncTimer || local.workspaceDirty);
     if (local.workspaceSyncTimer) {
       clearTimeout(local.workspaceSyncTimer);
       local.workspaceSyncTimer = null;
     }
+    if (
+      flush &&
+      hadPending &&
+      local.mountedPlugin &&
+      local.session &&
+      local.session.phase !== "completed"
+    ) {
+      const snap = getActiveWorkspaceContext();
+      if (snap) {
+        pushWorkspaceSnapshot(snap, { keepalive: true });
+      }
+    }
+    local.workspaceDirty = false;
     if (local.mountedPlugin?.destroy) {
       try {
         local.mountedPlugin.destroy();
@@ -659,27 +673,56 @@ export function createPracticeStudioController({
     return null;
   }
 
-  async function pushWorkspaceSnapshot(contextOverride = null) {
+  async function pushWorkspaceSnapshot(contextOverride = null, { keepalive = false } = {}) {
     if (!local.session || local.session.phase === "completed") return;
+    if (local.workspaceSyncTimer) {
+      clearTimeout(local.workspaceSyncTimer);
+      local.workspaceSyncTimer = null;
+    }
     const sid = local.session.id;
     const mySessionGen = local.sessionGen;
     const ctx = contextOverride || getActiveWorkspaceContext();
     if (!ctx) return;
+    local.workspaceDirty = false;
+    // Synchronously mirror onto local.session so toggling add-on off/on never remounts stale data
+    local.session.workspace_context = {
+      ...(local.session.workspace_context || {}),
+      ...ctx,
+    };
     try {
-      await fetch(`/api/practice/${encodeURIComponent(sid)}/workspace`, {
+      const res = await fetch(`/api/practice/${encodeURIComponent(sid)}/workspace`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspace_context: ctx }),
+        keepalive,
       });
-      if (mySessionGen !== local.sessionGen) return;
+      if (!res.ok) return;
+      const data = await res.json();
+      if (
+        mySessionGen === local.sessionGen &&
+        local.session &&
+        local.session.id === sid &&
+        data?.workspace_context
+      ) {
+        local.session.workspace_context = data.workspace_context;
+      }
     } catch {
       /* ignore background sync error */
     }
   }
 
   function scheduleWorkspaceSync() {
+    local.workspaceDirty = true;
+    const snap = getActiveWorkspaceContext();
+    if (snap && local.session && local.session.phase !== "completed") {
+      local.session.workspace_context = {
+        ...(local.session.workspace_context || {}),
+        ...snap,
+      };
+    }
     if (local.workspaceSyncTimer) clearTimeout(local.workspaceSyncTimer);
     local.workspaceSyncTimer = setTimeout(() => {
+      local.workspaceSyncTimer = null;
       pushWorkspaceSnapshot();
     }, 900);
   }
@@ -744,12 +787,13 @@ export function createPracticeStudioController({
   }
 
   function exitPracticeToHome() {
+    // Flush any pending whiteboard/code edits before incrementing sessionGen & clearing session
+    unmountStudioPlugin({ flush: true });
     local.sessionGen += 1;
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
     clearDraftInputs();
-    unmountStudioPlugin();
     local.session = null;
     setBusy(false);
     setPracticeVisible(false);

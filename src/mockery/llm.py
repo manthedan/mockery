@@ -1467,7 +1467,25 @@ class InterviewCopilotLLM:
         """
         effective_count = 1 if interview_type in ("system_design", "coding") else max(1, min(6, question_count))
 
+        def _to_str_list(val: Any) -> list[str]:
+            if isinstance(val, str):
+                s = val.strip()
+                return [s] if s else []
+            if isinstance(val, (list, tuple)):
+                out: list[str] = []
+                for item in val:
+                    if isinstance(item, str) and item.strip():
+                        out.append(item.strip())
+                    elif isinstance(item, (int, float)) and not isinstance(item, bool):
+                        out.append(str(item))
+                return out
+            return []
+
         def _bank_to_item(q: dict[str, Any]) -> dict[str, Any]:
+            playbook = q.get("playbook") if isinstance(q.get("playbook"), dict) else {}
+            core_reqs = _to_str_list(q.get("core_requirements")) or _to_str_list(playbook.get("core_requirements"))
+            deep_dives = _to_str_list(q.get("deep_dives")) or _to_str_list(playbook.get("deep_dives"))
+            follow_ups = _to_str_list(q.get("follow_ups")) or _to_str_list(q.get("hints"))
             return {
                 "bank_question_id": q.get("id"),
                 "source": "bank",
@@ -1476,11 +1494,11 @@ class InterviewCopilotLLM:
                 "competency": q.get("competency") or q.get("title") or "",
                 "prompt": q.get("prompt") or "",
                 "carl_focus": q.get("carl_focus") or "",
-                "follow_ups": list(q.get("follow_ups") or []),
-                "core_requirements": list(q.get("core_requirements") or []),
-                "deep_dives": list(q.get("deep_dives") or []),
-                "starter_code": dict(q.get("starter_code") or {}),
-                "tests": dict(q.get("tests") or {}),
+                "follow_ups": follow_ups,
+                "core_requirements": core_reqs,
+                "deep_dives": deep_dives,
+                "starter_code": dict(q.get("starter_code")) if isinstance(q.get("starter_code"), dict) else {},
+                "tests": dict(q.get("tests")) if isinstance(q.get("tests"), dict) else {},
                 "difficulty": str(q.get("difficulty") or ""),
             }
 
