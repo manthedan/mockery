@@ -447,16 +447,36 @@ class OnlineTwoSpeakerDiarizer:
             return has_any
 
     def status_dict(self) -> dict[str, Any]:
+        from .state_machines import (
+            compute_allowed_diarizer_events,
+            derive_diarizer_enrollment_state,
+        )
+
         with self._lock:
             enrolled = [k for k, v in self._centroids.items() if v is not None]
             sep = None
             ci, cc = self._centroids["interviewer"], self._centroids["candidate"]
             if ci is not None and cc is not None:
                 sep = round(float(ci @ cc), 3)
+            embedder_info = self.embedder.status_dict()
+            enrollment_state = derive_diarizer_enrollment_state(
+                embedder_ready=bool(embedder_info.get("ready")),
+                enrolled_count=len(enrolled),
+                manual_override=self._manual_override,
+            )
+            allowed, blocked = compute_allowed_diarizer_events(
+                enrollment_state,
+                has_utterance_history=bool(self._utt_history),
+            )
             return {
-                **self.embedder.status_dict(),
+                **embedder_info,
                 "enrolled_speakers": enrolled,
                 "centroid_cosine_sim": sep,
+                "manual_override": self._manual_override,
+                "utterance_history_count": len(self._utt_history),
+                "enrollment_state": enrollment_state.value,
+                "allowed_events": allowed,
+                "blocked_reasons": blocked,
             }
 
     def classify_partial(

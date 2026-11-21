@@ -163,9 +163,19 @@ class LocalTTSEngine:
         return list(self._cached_macos_voices)
 
     def status_dict(self) -> dict[str, Any]:
-        kokoro_ready = self.is_kokoro_installed() and self._has_kokoro_runtime()
+        from .state_machines import derive_tts_backend_state
+
+        kokoro_installed = self.is_kokoro_installed()
+        kokoro_runtime = self._has_kokoro_runtime()
+        kokoro_ready = kokoro_installed and kokoro_runtime and not self._kokoro_error
         macos_ok = sys.platform == "darwin" and bool(shutil.which("say")) and bool(shutil.which("afconvert"))
         engine = "kokoro" if kokoro_ready else ("macos_say" if macos_ok else "browser")
+        backend_state = derive_tts_backend_state(
+            kokoro_installed=kokoro_installed,
+            kokoro_runtime=kokoro_runtime,
+            kokoro_error=self._kokoro_error,
+            macos_say_available=macos_ok,
+        )
         if kokoro_ready:
             voices = ["af_heart", "af_bella", "am_michael", "bf_emma"]
         elif macos_ok:
@@ -178,8 +188,9 @@ class LocalTTSEngine:
             voices = []
         return {
             "engine": engine,
-            "kokoro_installed": self.is_kokoro_installed(),
-            "kokoro_available": self.is_kokoro_available(),
+            "backend_state": backend_state.value,
+            "kokoro_installed": kokoro_installed,
+            "kokoro_available": kokoro_runtime,
             "macos_say_available": macos_ok,
             "voices": voices,
             "default_voice": voices[0] if voices else "",
@@ -200,7 +211,7 @@ class LocalTTSEngine:
         clamped_rate = max(0.75, min(1.35, float(rate or 1.0)))
 
         # 1. Kokoro-82M local neural TTS (if installed)
-        if self.is_kokoro_installed() and self._has_kokoro_runtime():
+        if self.is_kokoro_installed() and self._has_kokoro_runtime() and not self._kokoro_error:
             if await asyncio.to_thread(self._ensure_kokoro_loaded):
                 kokoro_voice = voice if voice and voice.startswith(("af_", "am_", "bf_", "bm_")) else "af_heart"
 
@@ -209,8 +220,13 @@ class LocalTTSEngine:
                     samples, sr = self._kokoro.create(speech, voice=kokoro_voice, speed=clamped_rate, lang="en-us")
                     return _float32_to_wav_bytes(samples, sample_rate=int(sr))
 
-                wav_bytes = await asyncio.to_thread(_run_kokoro)
-                return wav_bytes, "kokoro"
+                try:
+                    wav_bytes = await asyncio.to_thread(_run_kokoro)
+                    return wav_bytes, "kokoro"
+                except Exception as exc:
+                    self._kokoro_error = str(exc)
+                    self._kokoro = None
+                    logger.warning("Kokoro-82M synthesis failed; falling back to local system voice: %s", exc)
 
         # 2. Zero-download macOS native `say` + `afconvert`
         if sys.platform == "darwin" and shutil.which("say") and shutil.which("afconvert"):

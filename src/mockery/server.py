@@ -67,10 +67,14 @@ from .state_machines import (
     AsyncJobState,
     CardProbeState,
     InvalidStateTransitionError,
+    PracticePhase,
+    compute_allowed_practice_events,
     compute_allowed_session_events,
     derive_card_probe_state,
+    derive_practice_phase,
     derive_session_phase,
     export_machine_specs,
+    serialize_practice_state_machines,
     validate_session_invariants,
 )
 from .storage import SessionAudioArchive, SessionStore
@@ -363,6 +367,7 @@ class AppRuntime:
         self.capture_started_epoch_ms: int | None = None
         self.regroup_job: AsyncJobState = AsyncJobState.IDLE
         self.calibration_job: AsyncJobState = AsyncJobState.IDLE
+        self.practice_debrief_jobs: dict[str, AsyncJobState] = {}
         self.warming_card_ids: set[str] = set()
         self.loading_card_ids: set[str] = set()
         self.card_probe_gen: dict[str, int] = {}
@@ -806,6 +811,21 @@ def create_app(
 
     @app.post("/api/addons/{pack_id}/install")
     async def install_addon_pack(pack_id: str) -> dict[str, Any]:
+        pack = runtime.addons.get_pack_spec(pack_id)
+        if pack is not None and "install" not in pack["allowed_events"]:
+            raise HTTPException(
+                status_code=409,
+                detail=InvalidStateTransitionError(
+                    machine="addon_pack",
+                    current_state=pack["state"],
+                    event="install",
+                    allowed_events=pack["allowed_events"],
+                    remediation=pack["blocked_reasons"].get(
+                        "install",
+                        f"Cannot install '{pack_id}' while in state '{pack['state']}'.",
+                    ),
+                ).to_dict(),
+            )
         try:
             status = await runtime.addons.install_pack(pack_id)
         except ValueError as exc:
@@ -822,6 +842,21 @@ def create_app(
 
     @app.delete("/api/addons/{pack_id}")
     async def uninstall_addon_pack(pack_id: str) -> dict[str, Any]:
+        pack = runtime.addons.get_pack_spec(pack_id)
+        if pack is not None and "uninstall" not in pack["allowed_events"]:
+            raise HTTPException(
+                status_code=409,
+                detail=InvalidStateTransitionError(
+                    machine="addon_pack",
+                    current_state=pack["state"],
+                    event="uninstall",
+                    allowed_events=pack["allowed_events"],
+                    remediation=pack["blocked_reasons"].get(
+                        "uninstall",
+                        f"Cannot remove '{pack_id}' while in state '{pack['state']}'.",
+                    ),
+                ).to_dict(),
+            )
         try:
             status = await runtime.addons.uninstall_pack(pack_id)
         except ValueError as exc:
@@ -970,7 +1005,7 @@ def create_app(
         sess = await asyncio.to_thread(runtime.practice_store.get, session_id)
         if sess is None:
             raise HTTPException(status_code=404, detail="Practice session not found.")
-        return {"session": sess.model_dump()}
+        return {"session": _serialize_practice_session(runtime, sess)}
 
     @app.post("/api/practice/start")
     async def start_practice_session(body: PracticeStartRequest) -> dict[str, Any]:
@@ -1075,7 +1110,10 @@ def create_app(
             turns=[opening_turn],
         )
         await asyncio.to_thread(runtime.practice_store.save, session)
-        return {"session": session.model_dump(), "opening_turn": opening_turn.model_dump()}
+        return {
+            "session": _serialize_practice_session(runtime, session),
+            "opening_turn": opening_turn.model_dump(),
+        }
 
     @app.post("/api/practice/{session_id}/turn")
     async def submit_practice_turn(session_id: str, body: PracticeTurnRequest) -> dict[str, Any]:
@@ -1084,32 +1122,39 @@ def create_app(
             raise HTTPException(status_code=400, detail="Answer text cannot be empty.")
         if len(answer_text) > MAX_PRACTICE_TURN_CHARS:
             raise HTTPException(status_code=413, detail="Answer exceeds maximum allowed length.")
+        _check_practice_not_debriefing(runtime, session_id, "submit_turn")
 
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
-            if session.phase == "awaiting_debrief":
-                raise HTTPException(
-                    status_code=409,
-                    detail="All questions are complete — generate your CARL Debrief to continue.",
+            phase = _require_practice_event(runtime, session, "submit_turn")
+
+            cur_q = session.current_question()
+            if cur_q is None:
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="submit_turn",
+                    allowed_events=[],
+                    remediation="No active question in this practice session.",
                 )
-            if session.phase != "active":
-                raise HTTPException(status_code=409, detail="This practice session is already completed.")
+                raise HTTPException(status_code=409, detail=err.to_dict())
+            if body.expected_question_id and body.expected_question_id != cur_q.id:
+                allowed, _ = compute_allowed_practice_events(session, phase=phase)
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="submit_turn",
+                    allowed_events=allowed,
+                    remediation="Active question has already advanced; refresh and answer the current question.",
+                )
+                raise HTTPException(status_code=409, detail=err.to_dict())
 
             try:
                 _merge_workspace_context(session, body.workspace_context)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
-
-            cur_q = session.current_question()
-            if cur_q is None:
-                raise HTTPException(status_code=409, detail="No active question in this practice session.")
-            if body.expected_question_id and body.expected_question_id != cur_q.id:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Active question has already advanced; refresh and answer the current question.",
-                )
 
             next_q = (
                 session.questions[session.current_question_index + 1]
@@ -1122,7 +1167,7 @@ def create_app(
                 question_id=cur_q.id,
                 text=answer_text,
             )
-            session.turns.append(cand_turn)
+            recent_with_cand = [t.model_dump() for t in session.turns[-9:]] + [cand_turn.model_dump()]
 
             reply = await runtime.llm.generate_practice_interviewer_reply(
                 role_title=session.role_title,
@@ -1132,7 +1177,7 @@ def create_app(
                 coach_style=session.config.coach_style,
                 current_question=cur_q.model_dump(),
                 next_question=next_q.model_dump() if next_q else None,
-                recent_turns=[t.model_dump() for t in session.turns[-10:]],
+                recent_turns=recent_with_cand,
                 candidate_answer=answer_text,
                 follow_up_count=cur_q.follow_up_count,
                 existing_carl=dict(cur_q.carl_signals),
@@ -1167,32 +1212,30 @@ def create_app(
                     if prompt_probe and prompt_probe not in reply_text.lower():
                         reply_text = f"{reply_text}\n\n{next_q.prompt.strip()}" if reply_text else next_q.prompt.strip()
                 else:
-                    session.phase = "awaiting_debrief"
+                    session.phase = PracticePhase.AWAITING_DEBRIEF.value
 
             interviewer_turn = PracticeTurn(
                 role="interviewer",
                 question_id=target_q_id,
                 text=reply_text or "Thanks for sharing that — let's keep going.",
             )
+            session.turns.append(cand_turn)
             session.turns.append(interviewer_turn)
             await asyncio.to_thread(runtime.practice_store.save, session)
             return {
-                "session": session.model_dump(),
+                "session": _serialize_practice_session(runtime, session),
                 "reply": reply,
                 "interviewer_turn": interviewer_turn.model_dump(),
             }
 
     @app.post("/api/practice/{session_id}/hint")
     async def request_practice_hint(session_id: str, body: PracticeHintRequest | None = None) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "request_hint")
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
-            if session.phase != "active":
-                raise HTTPException(
-                    status_code=409,
-                    detail="Hints are only available while a question is active.",
-                )
+            phase = _require_practice_event(runtime, session, "request_hint")
 
             if body and body.workspace_context:
                 try:
@@ -1202,7 +1245,14 @@ def create_app(
 
             cur_q = session.current_question()
             if cur_q is None:
-                raise HTTPException(status_code=409, detail="No active question.")
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="request_hint",
+                    allowed_events=[],
+                    remediation="No active question in this practice session.",
+                )
+                raise HTTPException(status_code=409, detail=err.to_dict())
 
             hint_text = await runtime.llm.generate_practice_hint(
                 interview_type=session.config.interview_type,
@@ -1220,7 +1270,7 @@ def create_app(
             session.live_nudge = {"tone": "tip", "message": hint_text}
             await asyncio.to_thread(runtime.practice_store.save, session)
             return {
-                "session": session.model_dump(),
+                "session": _serialize_practice_session(runtime, session),
                 "hint": hint_text,
                 "coach_turn": coach_turn.model_dump(),
             }
@@ -1230,12 +1280,12 @@ def create_app(
         session_id: str,
         body: PracticeNextRequest | None = None,
     ) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "advance_question")
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
-            if session.phase != "active":
-                raise HTTPException(status_code=409, detail="No remaining active questions in this session.")
+            phase = _require_practice_event(runtime, session, "advance_question")
 
             cur_q = session.current_question()
             if (
@@ -1244,10 +1294,15 @@ def create_app(
                 and cur_q is not None
                 and body.expected_question_id != cur_q.id
             ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Active question has already advanced; refresh before advancing again.",
+                allowed, _ = compute_allowed_practice_events(session, phase=phase)
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="advance_question",
+                    allowed_events=allowed,
+                    remediation="Active question has already advanced; refresh before advancing again.",
                 )
+                raise HTTPException(status_code=409, detail=err.to_dict())
 
             if cur_q is not None:
                 cur_q.status = "completed"
@@ -1265,62 +1320,82 @@ def create_app(
                 session.turns.append(turn)
                 await asyncio.to_thread(runtime.practice_store.save, session)
                 return {
-                    "session": session.model_dump(),
+                    "session": _serialize_practice_session(runtime, session),
                     "has_more": True,
                     "interviewer_turn": turn.model_dump(),
                 }
 
-            session.phase = "awaiting_debrief"
+            session.phase = PracticePhase.AWAITING_DEBRIEF.value
             session.live_nudge = None
             await asyncio.to_thread(runtime.practice_store.save, session)
-            return {"session": session.model_dump(), "has_more": False}
+            return {"session": _serialize_practice_session(runtime, session), "has_more": False}
 
     @app.post("/api/practice/{session_id}/workspace")
     async def update_practice_workspace(
         session_id: str,
         body: PracticeWorkspaceUpdateRequest,
     ) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "update_workspace")
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
-            if session.phase == "completed":
-                raise HTTPException(
-                    status_code=409,
-                    detail="Cannot edit workspace after the practice session is completed.",
-                )
+            _require_practice_event(runtime, session, "update_workspace")
             try:
                 _merge_workspace_context(session, body.workspace_context)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             await asyncio.to_thread(runtime.practice_store.save, session)
-            return {"ok": True, "workspace_context": session.workspace_context}
+            return {
+                "ok": True,
+                "workspace_context": session.workspace_context,
+                "state_machines": serialize_practice_state_machines(session),
+            }
 
     @app.post("/api/practice/{session_id}/debrief")
     async def generate_practice_debrief(session_id: str) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "generate_debrief")
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
-            if session.phase == "completed" and session.debrief is not None:
-                return {"session": session.model_dump(), "debrief": session.debrief}
-            for q in session.questions:
-                if q.status == "active":
-                    q.status = "completed"
-            debrief = await runtime.llm.generate_practice_debrief(
-                role_title=session.role_title,
-                company=session.company,
-                interview_type=session.config.interview_type,
-                target_level=session.config.target_level,
-                questions=[q.model_dump() for q in session.questions],
-                turns=[t.model_dump() for t in session.turns],
-                workspace_context=session.workspace_context or None,
-            )
-            session.debrief = debrief
-            session.phase = "completed"
-            session.live_nudge = None
-            await asyncio.to_thread(runtime.practice_store.save, session)
-            return {"session": session.model_dump(), "debrief": debrief}
+            _require_practice_event(runtime, session, "generate_debrief")
+            if session.phase == PracticePhase.COMPLETED.value and session.debrief is not None:
+                return {
+                    "session": _serialize_practice_session(runtime, session),
+                    "debrief": session.debrief,
+                }
+            questions_snapshot = [
+                {**q.model_dump(), "status": "completed" if q.status == "active" else q.status}
+                for q in session.questions
+            ]
+            runtime.practice_debrief_jobs[session.id] = AsyncJobState.RUNNING
+            try:
+                debrief = await runtime.llm.generate_practice_debrief(
+                    role_title=session.role_title,
+                    company=session.company,
+                    interview_type=session.config.interview_type,
+                    target_level=session.config.target_level,
+                    questions=questions_snapshot,
+                    turns=[t.model_dump() for t in session.turns],
+                    workspace_context=session.workspace_context or None,
+                )
+                for q in session.questions:
+                    if q.status == "active":
+                        q.status = "completed"
+                session.debrief = debrief
+                session.phase = PracticePhase.COMPLETED.value
+                session.live_nudge = None
+                await AddonManager._await_uninterruptible(
+                    asyncio.to_thread(runtime.practice_store.save, session)
+                )
+            finally:
+                runtime.practice_debrief_jobs.pop(session.id, None)
+
+            return {
+                "session": _serialize_practice_session(runtime, session),
+                "debrief": debrief,
+            }
 
     @app.post("/api/practice/{session_id}/retry")
     async def submit_practice_retry(session_id: str, body: PracticeRetryRequest) -> dict[str, Any]:
@@ -1329,16 +1404,13 @@ def create_app(
             raise HTTPException(status_code=400, detail="Retry answer cannot be empty.")
         if len(retry_text) > MAX_PRACTICE_TURN_CHARS:
             raise HTTPException(status_code=413, detail="Retry answer exceeds maximum allowed length.")
+        _check_practice_not_debriefing(runtime, session_id, "submit_retry")
 
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
-            if session.phase != "completed" or session.debrief is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Complete the CARL Debrief before submitting a retry drill.",
-                )
+            _require_practice_event(runtime, session, "submit_retry")
 
             drill = session.debrief.get("retry_drill") if isinstance(session.debrief, dict) else {}
             if not isinstance(drill, dict):
@@ -1394,7 +1466,7 @@ def create_app(
             )
             await asyncio.to_thread(runtime.practice_store.save, session)
             return {
-                "session": session.model_dump(),
+                "session": _serialize_practice_session(runtime, session),
                 "feedback": feedback,
             }
 
@@ -2606,3 +2678,59 @@ def _serialize_session_obj(runtime: AppRuntime, session: InterviewSession) -> di
         "invariant_violations": violations,
     }
     return data
+
+
+def _serialize_practice_session(
+    runtime: SessionRuntime,
+    session: PracticeSession,
+) -> dict[str, Any]:
+    """Serialize a PracticeSession with its canonical derived phase, allowed events, and invariants."""
+    debrief_job = runtime.practice_debrief_jobs.get(session.id, AsyncJobState.IDLE)
+    sm = serialize_practice_state_machines(session, debrief_job=debrief_job)
+    data = session.model_dump()
+    data["phase"] = sm["practice"]["phase"]
+    data["state_machines"] = sm
+    return data
+
+
+def _check_practice_not_debriefing(
+    runtime: SessionRuntime,
+    session_id: str,
+    event: str,
+) -> None:
+    """Fail fast with structured 409 transition_rejected if a debrief is actively running."""
+    if not PRACTICE_SESSION_ID_RE.match(session_id or ""):
+        raise HTTPException(status_code=404, detail="Practice session not found.")
+    if runtime.practice_debrief_jobs.get(session_id) == AsyncJobState.RUNNING:
+        err = InvalidStateTransitionError(
+            machine="practice_phase",
+            current_state=PracticePhase.DEBRIEFING.value,
+            event=event,
+            allowed_events=[],
+            remediation="Wait for the CARL Debrief to finish generating.",
+        )
+        raise HTTPException(status_code=409, detail=err.to_dict())
+
+
+def _require_practice_event(
+    runtime: SessionRuntime,
+    session: PracticeSession,
+    event: str,
+) -> PracticePhase:
+    """Enforce PracticePhase transition rules and raise structured 409 transition_rejected when blocked."""
+    debrief_job = runtime.practice_debrief_jobs.get(session.id, AsyncJobState.IDLE)
+    phase = derive_practice_phase(session, debrief_job=debrief_job)
+    allowed, blocked = compute_allowed_practice_events(session, phase=phase)
+    if event not in allowed:
+        err = InvalidStateTransitionError(
+            machine="practice_phase",
+            current_state=phase.value,
+            event=event,
+            allowed_events=allowed,
+            remediation=blocked.get(
+                event,
+                f"Event '{event}' is not permitted in state '{phase.value}'.",
+            ),
+        )
+        raise HTTPException(status_code=409, detail=err.to_dict())
+    return phase

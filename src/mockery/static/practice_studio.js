@@ -84,6 +84,15 @@ function fmtShortClock(sec) {
   return `${m}:${String(rem).padStart(2, "0")}`;
 }
 
+function formatApiDetail(detail, fallback) {
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (detail && typeof detail === "object") {
+    const msg = detail.message || detail.remediation;
+    if (typeof msg === "string" && msg.trim()) return msg.trim();
+  }
+  return fallback;
+}
+
 export function createPracticeStudioController({
   state,
   el,
@@ -133,6 +142,7 @@ export function createPracticeStudioController({
     workspaceDirty: false,
     workspaceSaveSeq: 0,
     workspaceAckSeq: 0,
+    debriefPollTimer: null,
   };
 
   function getSelectedFormat() {
@@ -600,7 +610,7 @@ export function createPracticeStudioController({
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
       if (!res.ok) {
-        throw new Error(data.detail || "Transcription failed");
+        throw new Error(formatApiDetail(data.detail, "Transcription failed"));
       }
       const transcript = String(data.text || "").trim();
       const inputEl = el(target === "retry" ? "practiceRetryInput" : "practiceAnswerInput");
@@ -686,7 +696,13 @@ export function createPracticeStudioController({
   }
 
   async function pushWorkspaceSnapshot(contextOverride = null, { keepalive = false } = {}) {
-    if (!local.session || local.session.phase === "completed") return false;
+    if (
+      !local.session ||
+      local.session.phase === "completed" ||
+      local.session.phase === "debriefing"
+    ) {
+      return false;
+    }
     if (local.workspaceSyncTimer) {
       clearTimeout(local.workspaceSyncTimer);
       local.workspaceSyncTimer = null;
@@ -739,10 +755,17 @@ export function createPracticeStudioController({
   }
 
   function scheduleWorkspaceSync() {
+    if (
+      !local.session ||
+      local.session.phase === "completed" ||
+      local.session.phase === "debriefing"
+    ) {
+      return;
+    }
     local.workspaceSaveSeq += 1;
     local.workspaceDirty = true;
     const snap = getActiveWorkspaceContext();
-    if (snap && local.session && local.session.phase !== "completed") {
+    if (snap) {
       local.session.workspace_context = {
         ...(local.session.workspace_context || {}),
         ...snap,
@@ -770,7 +793,10 @@ export function createPracticeStudioController({
         ? mods.coding_studio !== false
         : false;
     const factory = moduleAllowed ? local.studioPlugins.get(fmt) : null;
-    const isActive = local.session.phase === "active" || local.session.phase === "awaiting_debrief";
+    const isActive =
+      local.session.phase === "active" ||
+      local.session.phase === "awaiting_debrief" ||
+      local.session.phase === "debriefing";
 
     if (!factory || !isActive) {
       unmountStudioPlugin();
@@ -792,10 +818,49 @@ export function createPracticeStudioController({
       session: local.session,
       onWorkspaceChange: () => scheduleWorkspaceSync(),
       onAskAiReview: (promptText) => {
-        if (local.busy) return;
+        if (local.busy || local.session?.phase !== "active") return;
         submitTurn(promptText);
       },
     });
+  }
+
+  function stopDebriefPoll() {
+    if (local.debriefPollTimer) {
+      clearTimeout(local.debriefPollTimer);
+      local.debriefPollTimer = null;
+    }
+  }
+
+  function ensureDebriefPoll() {
+    if (local.debriefPollTimer || !local.session || local.session.phase !== "debriefing") {
+      return;
+    }
+    const sid = local.session.id;
+    const myGen = local.sessionGen;
+    local.debriefPollTimer = setTimeout(async () => {
+      local.debriefPollTimer = null;
+      if (myGen !== local.sessionGen || !local.session || local.session.id !== sid) {
+        return;
+      }
+      if (local.session.phase !== "debriefing") return;
+      try {
+        const res = await fetch(`/api/practice/sessions/${encodeURIComponent(sid)}`);
+        const data = await res.json().catch(() => ({}));
+        if (myGen !== local.sessionGen || !local.session || local.session.id !== sid) {
+          return;
+        }
+        if (res.ok && data.session) {
+          local.session = data.session;
+          renderPracticeSession();
+          return;
+        }
+      } catch {
+        /* retry while still debriefing */
+      }
+      if (myGen === local.sessionGen && local.session?.id === sid && local.session.phase === "debriefing") {
+        ensureDebriefPoll();
+      }
+    }, 1200);
   }
 
   /* ---------------- Practice Session Lifecycle ---------------- */
@@ -817,6 +882,7 @@ export function createPracticeStudioController({
   async function exitPracticeToHome() {
     // Capture & start awaiting normal workspace save BEFORE clearing session state
     const flushPromise = unmountStudioPlugin({ flush: true });
+    stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
@@ -858,6 +924,7 @@ export function createPracticeStudioController({
     if (local.busy) return;
     local.sessionGen += 1;
     const mySessionGen = local.sessionGen;
+    stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
@@ -893,7 +960,7 @@ export function createPracticeStudioController({
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
-      if (!res.ok) throw new Error(data.detail || "Could not start practice session");
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not start practice session"));
       local.session = data.session;
       setPracticeVisible(true);
       renderPracticeSession();
@@ -913,6 +980,7 @@ export function createPracticeStudioController({
   async function openPracticeSession(sessionId) {
     local.sessionGen += 1;
     const mySessionGen = local.sessionGen;
+    stopDebriefPoll();
     stopSpeaking();
     abortMicRecording();
     stopRetryTimer();
@@ -921,7 +989,7 @@ export function createPracticeStudioController({
       const res = await fetch(`/api/practice/sessions/${encodeURIComponent(sessionId)}`);
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
-      if (!res.ok) throw new Error(data.detail || "Could not load practice session");
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not load practice session"));
       local.session = data.session;
       local.voiceEnabled = Boolean(local.session.config?.voice_enabled ?? true);
       setPracticeVisible(true);
@@ -976,7 +1044,7 @@ export function createPracticeStudioController({
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
-      if (!res.ok) throw new Error(data.detail || "Turn failed");
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Turn failed"));
       local.session = data.session;
       renderPracticeSession();
       if (data.interviewer_turn?.text && local.voiceEnabled) {
@@ -1009,7 +1077,7 @@ export function createPracticeStudioController({
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
-      if (!res.ok) throw new Error(data.detail || "Could not get hint");
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not get hint"));
       local.session = data.session;
       renderPracticeSession();
     } catch (err) {
@@ -1034,7 +1102,7 @@ export function createPracticeStudioController({
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
-      if (!res.ok) throw new Error(data.detail || "Could not advance question");
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not advance question"));
       local.session = data.session;
       renderPracticeSession();
       if (!data.has_more) {
@@ -1070,7 +1138,7 @@ export function createPracticeStudioController({
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
-      if (!res.ok) throw new Error(data.detail || "Could not generate debrief");
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not generate debrief"));
       local.session = data.session;
       renderPracticeSession();
       refreshPracticeHistory();
@@ -1168,7 +1236,7 @@ export function createPracticeStudioController({
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen) return;
-      if (!res.ok) throw new Error(data.detail || "Could not evaluate retry");
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not evaluate retry"));
       local.session = data.session;
       if (input) input.value = "";
       resetRetryTimer();
@@ -1382,7 +1450,9 @@ export function createPracticeStudioController({
     if (!sess) return;
 
     const isCompleted = sess.phase === "completed" && Boolean(sess.debrief);
+    const isDebriefing = sess.phase === "debriefing";
     const isAwaitingDebrief = sess.phase === "awaiting_debrief";
+    const isInputLocked = isAwaitingDebrief || isDebriefing;
     const totalQ = Math.max(1, (sess.questions || []).length);
     const curIdx = Math.min(sess.current_question_index || 0, totalQ - 1);
     const curQ = (sess.questions || [])[curIdx] || null;
@@ -1399,6 +1469,8 @@ export function createPracticeStudioController({
     if (el("practiceProgressBadge")) {
       el("practiceProgressBadge").textContent = isCompleted
         ? "Completed · CARL Debrief"
+        : isDebriefing
+        ? "Generating CARL Debrief…"
         : isAwaitingDebrief
         ? "All Questions Done · Ready for Debrief"
         : `Q${curIdx + 1} of ${totalQ}`;
@@ -1407,24 +1479,36 @@ export function createPracticeStudioController({
       el("practiceVoiceToggleLabel").textContent = local.voiceEnabled ? "Voice: On" : "Voice: Off";
     }
 
-    el("practiceHintBtn")?.classList.toggle("hidden", isCompleted || isAwaitingDebrief);
+    el("practiceHintBtn")?.classList.toggle("hidden", isCompleted || isInputLocked);
     el("practiceNextQBtn")?.classList.toggle(
       "hidden",
-      isCompleted || isAwaitingDebrief || curIdx + 1 >= totalQ
+      isCompleted || isInputLocked || curIdx + 1 >= totalQ
     );
-    el("practiceDebriefBtn")?.classList.toggle("hidden", isCompleted);
+    const debriefBtn = el("practiceDebriefBtn");
+    if (debriefBtn) {
+      debriefBtn.classList.toggle("hidden", isCompleted);
+      if (isDebriefing) {
+        debriefBtn.disabled = true;
+        debriefBtn.textContent = "Generating debrief…";
+      } else if (!local.busy) {
+        debriefBtn.disabled = false;
+        debriefBtn.textContent = "End & CARL Debrief";
+      }
+    }
 
     const answerInput = el("practiceAnswerInput");
     const sendBtn = el("practiceSendBtn");
     const micBtn = el("practiceMicBtn");
     if (answerInput) {
-      answerInput.disabled = isAwaitingDebrief;
-      answerInput.placeholder = isAwaitingDebrief
+      answerInput.disabled = isInputLocked;
+      answerInput.placeholder = isDebriefing
+        ? "Generating your supportive CARL debrief — please hold on…"
+        : isAwaitingDebrief
         ? "All questions complete — click End & CARL Debrief above for your supportive coaching report."
         : "Type or speak your answer… (⌘/Ctrl+Enter to send)";
     }
-    if (sendBtn && !local.busy) sendBtn.disabled = isAwaitingDebrief;
-    if (micBtn && !local.recordingTarget) micBtn.disabled = isAwaitingDebrief;
+    if (sendBtn && !local.busy) sendBtn.disabled = isInputLocked;
+    if (micBtn && !local.recordingTarget) micBtn.disabled = isInputLocked;
 
     el("practiceActiveView")?.classList.toggle("hidden", isCompleted);
     el("practiceDebriefView")?.classList.toggle("hidden", !isCompleted);
@@ -1454,6 +1538,10 @@ export function createPracticeStudioController({
         coachToneEl.textContent = "Debrief Ready";
         coachMsgEl.textContent =
           "Review your strengths first, then try the 45-second Retry Drill to lock in the improvement.";
+      } else if (isDebriefing) {
+        coachToneEl.textContent = "Debriefing";
+        coachMsgEl.textContent =
+          "Synthesizing your strengths, CARL breakdown, and 45-second retry drill…";
       } else if (isAwaitingDebrief) {
         coachToneEl.textContent = "Wrap Up";
         coachMsgEl.textContent =
@@ -1472,6 +1560,12 @@ export function createPracticeStudioController({
         coachMsgEl.textContent =
           "Think out loud, anchor with Context, highlight what YOU drove, and close with measurable Result + Learning.";
       }
+    }
+
+    if (isDebriefing) {
+      ensureDebriefPoll();
+    } else {
+      stopDebriefPoll();
     }
 
     // Question Roadmap
