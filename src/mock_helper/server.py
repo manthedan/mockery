@@ -108,19 +108,24 @@ class AppRuntime:
         self.card_probe_gen: dict[str, int] = {}
         self.role_orientation_checked: set[str] = set()
         self.role_orientation_inflight: set[str] = set()
-        self.regrouped_signature: dict[str, tuple[int, int, int]] = {}
+        self.regrouped_signature: dict[str, tuple[Any, ...]] = {}
+        self.session_epoch: int = 0
 
         # Connected WebSocket senders & active capture owner
         self.ws_senders: set[Any] = set()
         self.capturing_sender: Any | None = None
         self.asr_watcher_task: asyncio.Task[Any] | None = None
 
+    def is_live_session(self, target_session: InterviewSession, epoch: int) -> bool:
+        return self.session_epoch == epoch and self.active_session is target_session
+
     @staticmethod
-    def transcript_regroup_sig(session: InterviewSession) -> tuple[int, int, int]:
+    def transcript_regroup_sig(session: InterviewSession) -> tuple[Any, ...]:
         return (
-            len(session.utterances),
-            sum(u.rev for u in session.utterances),
-            len(session.warmup_utterance_ids),
+            session.config.interview_type,
+            session.config.role_title,
+            tuple((u.id, u.rev, u.speaker) for u in session.utterances),
+            tuple(session.warmup_utterance_ids),
         )
 
     def current_phase_and_actions(self) -> tuple[str, list[str], dict[str, str]]:
@@ -200,6 +205,7 @@ class AppRuntime:
 
     def switch_session(self, new_session: InterviewSession) -> None:
         self.pause_or_end_capture(mark_ended=False)
+        self.session_epoch += 1
         self.regroup_job = AsyncJobState.IDLE
         self.calibration_job = AsyncJobState.IDLE
         self.warming_card_ids.clear()
@@ -602,13 +608,14 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
             if utt.final:
                 runtime.store.save_live(target_session)
 
-            if runtime.active_session.id == target_session.id:
+            if runtime.active_session is target_session:
                 if is_inplace_draft:
                     draft_msg: dict[str, Any] = {
                         "type": "utterance_draft",
                         "session_id": target_session.id,
                         "qa_id": decision.qa_id,
                         "utterance": utt.model_dump(),
+                        "metrics": target_session.compute_metrics().model_dump(),
                     }
                     if decision.qa_id:
                         owner_qa = next(
@@ -634,6 +641,7 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                         }
                     )
 
+            job_epoch = runtime.session_epoch
             # LLM handles topic-shift card pivots (when needed) — never live speaker classification
             if (
                 utt.final
@@ -646,11 +654,12 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                         target_session=target_session,
                         utterance_id=utt.id,
                         diarize=False,
+                        job_epoch=job_epoch,
                     )
                 )
 
             if decision.should_speculate_probes and decision.qa_id:
-                spawn_bg(precompute_speculative_probes(target_session, decision.qa_id))
+                spawn_bg(precompute_speculative_probes(target_session, decision.qa_id, job_epoch))
 
             # One-shot single-mic speaker role-orientation guard: catches sessions where the
             # candidate spoke first at t=00:00 and inverted both acoustic voice clusters globally.
@@ -668,20 +677,23 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                 n_cand = sum(1 for u in finals if u.speaker == "candidate")
                 total_words = sum(len(u.text.split()) for u in finals)
                 if len(finals) >= 8 and n_int >= 2 and n_cand >= 2 and total_words >= 60:
-                    spawn_bg(run_speaker_role_orientation_check(target_session))
+                    spawn_bg(run_speaker_role_orientation_check(target_session, job_epoch))
 
-        async def run_speaker_role_orientation_check(target_session: InterviewSession) -> None:
+        async def run_speaker_role_orientation_check(
+            target_session: InterviewSession, job_epoch: int
+        ) -> None:
             sid = target_session.id
             if sid in runtime.role_orientation_checked or sid in runtime.role_orientation_inflight:
                 return
             runtime.role_orientation_inflight.add(sid)
             try:
                 res = await runtime.llm.check_speaker_role_orientation(target_session)
+                if not runtime.is_live_session(target_session, job_epoch):
+                    return
                 runtime.role_orientation_checked.add(sid)
                 if (
                     res.get("inverted") is True
                     and res.get("confidence") == "high"
-                    and runtime.active_session.id == sid
                     and not runtime.diarizer.has_manual_override
                 ):
                     runtime.diarizer.swap_roles(mark_manual=False)
@@ -705,10 +717,11 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                 runtime.role_orientation_inflight.discard(sid)
 
         async def precompute_speculative_probes(
-            target_session: InterviewSession, qa_id: str
+            target_session: InterviewSession, qa_id: str, job_epoch: int
         ) -> None:
             if (
-                qa_id in runtime.warming_card_ids
+                not runtime.is_live_session(target_session, job_epoch)
+                or qa_id in runtime.warming_card_ids
                 or qa_id in runtime.loading_card_ids
                 or not runtime.llm_config.is_configured
             ):
@@ -720,13 +733,13 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
             start_hist_len = len(qa.dive_deeper_history)
             start_rev_sum = target_session.card_revision_sum(qa)
             runtime.warming_card_ids.add(qa_id)
-            if runtime.active_session.id == target_session.id:
+            if runtime.is_live_session(target_session, job_epoch):
                 await broadcast_session()
             should_rewarm = False
             try:
                 cached = await runtime.llm.suggest_probes(target_session, qa)
                 if (
-                    runtime.active_session.id == target_session.id
+                    runtime.is_live_session(target_session, job_epoch)
                     and qa_id not in runtime.loading_card_ids
                     and runtime.card_probe_gen.get(qa_id, 0) == start_gen
                     and len(qa.dive_deeper_history) == start_hist_len
@@ -738,10 +751,10 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                 logger.warning("Speculative probe warming failed: %s", exc)
             finally:
                 runtime.warming_card_ids.discard(qa_id)
-                if runtime.active_session.id == target_session.id:
+                if runtime.is_live_session(target_session, job_epoch):
                     await broadcast_session()
-            if should_rewarm and runtime.active_session.id == target_session.id:
-                spawn_bg(precompute_speculative_probes(target_session, qa_id))
+            if should_rewarm and runtime.is_live_session(target_session, job_epoch):
+                spawn_bg(precompute_speculative_probes(target_session, qa_id, job_epoch))
 
         triage_lock = asyncio.Lock()
 
@@ -750,15 +763,16 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
             target_session: InterviewSession,
             utterance_id: str,
             diarize: bool,
+            job_epoch: int,
         ) -> None:
             async with triage_lock:
-                if runtime.active_session.id != target_session.id:
+                if not runtime.is_live_session(target_session, job_epoch):
                     return
                 utt_obj = target_session.utterance_map().get(utterance_id)
                 if utt_obj is None or not utt_obj.final:
                     return
                 plan = await runtime.llm.triage_turn(target_session, utt_obj, diarize=diarize)
-                if plan is None or runtime.active_session.id != target_session.id:
+                if plan is None or not runtime.is_live_session(target_session, job_epoch):
                     return
                 apply_res = runtime.grouper.apply_turn_triage(
                     target_session,
@@ -812,6 +826,8 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
         if runtime.asr.state in (ASRModelState.LOADING, ASRModelState.SWITCHING):
             runtime.ensure_asr_watcher()
 
+        capture_gate = {"closed": False}
+
         try:
             while True:
                 message = await ws.receive()
@@ -819,6 +835,16 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                     break
 
                 if "bytes" in message and message["bytes"] is not None:
+                    # Drop late in-flight worklet packets arriving after flush_and_end/cancel_capture
+                    # or from a non-owner socket while another client owns active capture.
+                    if capture_gate["closed"]:
+                        continue
+                    if (
+                        runtime.is_capturing
+                        and runtime.capturing_sender is not None
+                        and runtime.capturing_sender is not send_json
+                    ):
+                        continue
                     runtime.begin_capture(owner=send_json)
                     raw_bytes = message["bytes"]
                     arch = runtime.ensure_archive()
@@ -847,6 +873,7 @@ def create_app(project_root: Path | None = None, preload_asr: bool = True) -> Fa
                             send_json=send_json,
                             broadcast_session=broadcast_session,
                             upsert_utterance_and_route=upsert_utterance_and_route,
+                            capture_gate=capture_gate,
                         )
                     except InvalidStateTransitionError as exc:
                         await send_json(exc.to_dict())
@@ -893,6 +920,7 @@ async def _handle_ws_command(
     send_json: Any,
     broadcast_session: Any,
     upsert_utterance_and_route: Any,
+    capture_gate: dict[str, bool] | None = None,
 ) -> None:
     action = str(cmd.get("type", ""))
 
@@ -901,6 +929,8 @@ async def _handle_ws_command(
         base_cfg = runtime.active_session.config.model_dump()
         cfg = SessionConfig.model_validate({**base_cfg, **cfg_data})
         runtime.switch_session(InterviewSession(config=cfg))
+        if capture_gate is not None:
+            capture_gate["closed"] = False
         await broadcast_session()
         return
 
@@ -919,10 +949,14 @@ async def _handle_ws_command(
 
     if action == "start_capture":
         runtime.begin_capture(enforce_transition=True, owner=send_json)
+        if capture_gate is not None:
+            capture_gate["closed"] = False
         await broadcast_session()
         return
 
     if action == "cancel_capture":
+        if capture_gate is not None:
+            capture_gate["closed"] = True
         runtime.pause_or_end_capture(mark_ended=False)
         await broadcast_session()
         return
@@ -1105,6 +1139,7 @@ async def _handle_ws_command(
         if qa.id in runtime.loading_card_ids:
             return
 
+        job_epoch = runtime.session_epoch
         runtime.card_probe_gen[qa.id] = runtime.card_probe_gen.get(qa.id, 0) + 1
         runtime.loading_card_ids.add(qa.id)
         await runtime.broadcast_all({"type": "dive_deeper_loading", "qa_id": qa.id})
@@ -1112,16 +1147,17 @@ async def _handle_ws_command(
         async def _run_dive_deeper() -> None:
             try:
                 res = await runtime.llm.suggest_probes(target_session, qa)
+                if not runtime.is_live_session(target_session, job_epoch):
+                    return
                 qa.speculative_cache = None
                 qa.dive_deeper_history.append(res)
                 runtime.store.save(target_session)
-                if runtime.active_session.id == target_session.id:
-                    await runtime.broadcast_all(
-                        {"type": "dive_deeper_result", "result": res.model_dump(), "cached": False}
-                    )
+                await runtime.broadcast_all(
+                    {"type": "dive_deeper_result", "result": res.model_dump(), "cached": False}
+                )
             finally:
                 runtime.loading_card_ids.discard(qa.id)
-                if runtime.active_session.id == target_session.id:
+                if runtime.is_live_session(target_session, job_epoch):
                     await broadcast_session()
 
         spawn_bg(_run_dive_deeper())
@@ -1137,6 +1173,7 @@ async def _handle_ws_command(
     if action == "regroup_cards":
         _require_allowed_event(runtime, "regroup_cards")
         target_session = runtime.active_session
+        job_epoch = runtime.session_epoch
         runtime.regroup_job = AsyncJobState.RUNNING
         await runtime.broadcast_all({"type": "regroup_loading"})
 
@@ -1144,15 +1181,18 @@ async def _handle_ws_command(
             try:
                 sig_before = runtime.transcript_regroup_sig(target_session)
                 boundaries = await runtime.llm.regroup_cards_full_context(target_session)
+                if not runtime.is_live_session(target_session, job_epoch):
+                    return
+                applied = False
                 if boundaries:
-                    runtime.grouper.apply_regroup_boundaries(target_session, boundaries)
-                    runtime.regrouped_signature[target_session.id] = sig_before
-                    runtime.store.save(target_session)
-                if runtime.active_session.id == target_session.id:
-                    runtime.regroup_job = AsyncJobState.IDLE
-                    await broadcast_session({"regrouped": bool(boundaries)})
+                    applied = runtime.grouper.apply_regroup_boundaries(target_session, boundaries)
+                    if applied:
+                        runtime.regrouped_signature[target_session.id] = sig_before
+                        runtime.store.save(target_session)
+                runtime.regroup_job = AsyncJobState.IDLE
+                await broadcast_session({"regrouped": applied})
             except Exception:
-                if runtime.active_session.id == target_session.id:
+                if runtime.is_live_session(target_session, job_epoch):
                     runtime.regroup_job = AsyncJobState.ERROR
                     await broadcast_session({"regrouped": False})
 
@@ -1160,6 +1200,8 @@ async def _handle_ws_command(
         return
 
     if action == "flush_and_end":
+        if capture_gate is not None:
+            capture_gate["closed"] = True
         cur_session = runtime.active_session
         cur_router = runtime.audio_router
         trailing = cur_router.flush_all()
@@ -1174,6 +1216,7 @@ async def _handle_ws_command(
     if action == "generate_calibration":
         _require_allowed_event(runtime, "generate_calibration")
         target_session = runtime.active_session
+        job_epoch = runtime.session_epoch
         if cmd.get("rating"):
             target_session.self_rating = InterviewerSelfRating.model_validate(cmd["rating"])
         regroup_first = bool(cmd.get("regroup_first", True))
@@ -1189,15 +1232,20 @@ async def _handle_ws_command(
                     and runtime.regrouped_signature.get(target_session.id) != cur_sig
                 )
                 if needs_regroup:
-                    if runtime.active_session.id == target_session.id:
+                    if runtime.is_live_session(target_session, job_epoch):
                         runtime.regroup_job = AsyncJobState.RUNNING
                     try:
                         boundaries = await runtime.llm.regroup_cards_full_context(target_session)
+                        if not runtime.is_live_session(target_session, job_epoch):
+                            return
                         if boundaries:
-                            runtime.grouper.apply_regroup_boundaries(target_session, boundaries)
-                            runtime.regrouped_signature[target_session.id] = cur_sig
+                            applied = runtime.grouper.apply_regroup_boundaries(
+                                target_session, boundaries
+                            )
+                            if applied:
+                                runtime.regrouped_signature[target_session.id] = cur_sig
                     finally:
-                        if runtime.active_session.id == target_session.id:
+                        if runtime.is_live_session(target_session, job_epoch):
                             runtime.regroup_job = AsyncJobState.IDLE
 
                 delta_buf: list[str] = []
@@ -1205,7 +1253,7 @@ async def _handle_ws_command(
 
                 async def _on_calib_delta(chunk: str) -> None:
                     nonlocal last_flush
-                    if not chunk or runtime.active_session.id != target_session.id:
+                    if not chunk or not runtime.is_live_session(target_session, job_epoch):
                         return
                     delta_buf.append(chunk)
                     now = time.monotonic()
@@ -1225,7 +1273,9 @@ async def _handle_ws_command(
                     target_session,
                     on_delta=_on_calib_delta,
                 )
-                if delta_buf and runtime.active_session.id == target_session.id:
+                if not runtime.is_live_session(target_session, job_epoch):
+                    return
+                if delta_buf:
                     await runtime.broadcast_all(
                         {
                             "type": "calibration_delta",
@@ -1236,12 +1286,11 @@ async def _handle_ws_command(
                     delta_buf.clear()
                 target_session.calibration_markdown = report_md
                 runtime.store.save(target_session)
-                if runtime.active_session.id == target_session.id:
-                    runtime.calibration_job = AsyncJobState.IDLE
-                    await runtime.broadcast_all({"type": "calibration_ready", "markdown": report_md})
-                    await broadcast_session()
+                runtime.calibration_job = AsyncJobState.IDLE
+                await runtime.broadcast_all({"type": "calibration_ready", "markdown": report_md})
+                await broadcast_session()
             except Exception:
-                if runtime.active_session.id == target_session.id:
+                if runtime.is_live_session(target_session, job_epoch):
                     runtime.calibration_job = AsyncJobState.ERROR
                     await broadcast_session()
 

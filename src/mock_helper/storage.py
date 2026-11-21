@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import struct
 import threading
 import time
@@ -10,6 +11,8 @@ from typing import Any, BinaryIO
 from .models import InterviewSession, Utterance
 from .sources import CHANNEL_CANDIDATE, CHANNEL_INTERVIEWER, CHANNEL_ROOM_MIC
 from .vad import SAMPLE_RATE
+
+logger = logging.getLogger(__name__)
 
 WAV_HEADER_BYTES = 44
 
@@ -151,6 +154,15 @@ class SessionStore:
         self._bg_in_flight: bool = False
         self._bg_closed: bool = False
         self._bg_thread: threading.Thread | None = None
+        self.bg_write_errors: int = 0
+        self.last_bg_write_error: str | None = None
+
+    def _current_journal_offset(self, safe_id: str) -> int:
+        jsonl_path = self.sessions_dir / f"{safe_id}.events.jsonl"
+        try:
+            return jsonl_path.stat().st_size
+        except FileNotFoundError:
+            return 0
 
     def _ensure_bg_worker_locked(self) -> None:
         if self._bg_thread is not None and self._bg_thread.is_alive():
@@ -185,8 +197,10 @@ class SessionStore:
                     if seq == latest_seq:
                         json_path = self.sessions_dir / f"{safe_id}.json"
                         _atomic_write_text(json_path, payload)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.bg_write_errors += 1
+                self.last_bg_write_error = f"{safe_id}: {exc}"
+                logger.exception("Background live save failed for session %s", safe_id)
             finally:
                 with self._bg_cond:
                     self._bg_in_flight = False
@@ -215,8 +229,9 @@ class SessionStore:
             "type": "utterance_upsert",
             "utterance": utt.model_dump(),
         }
-        with jsonl_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+        line_bytes = (json.dumps(record) + "\n").encode("utf-8")
+        with jsonl_path.open("ab") as fh:
+            fh.write(line_bytes)
             fh.flush()
         return jsonl_path
 
@@ -227,6 +242,7 @@ class SessionStore:
         skipping expensive dual-Markdown regeneration until session milestones/export.
         """
         safe_id = Path(session.id).name
+        session.journal_offset = self._current_journal_offset(safe_id)
         payload = session.model_dump_json()
         with self._bg_cond:
             seq = self._bg_seq.get(safe_id, 0) + 1
@@ -246,6 +262,7 @@ class SessionStore:
         json_path = self.sessions_dir / f"{safe_id}.json"
         md_path = self.sessions_dir / f"{safe_id}.md"
         cand_md_path = self.sessions_dir / f"{safe_id}.candidate.md"
+        session.journal_offset = self._current_journal_offset(safe_id)
         json_payload = session.model_dump_json(indent=indent)
         md_interviewer: str | None = None
         md_candidate: str | None = None
@@ -266,17 +283,24 @@ class SessionStore:
                 _atomic_write_text(cand_md_path, md_candidate)
         return json_path, md_path
 
-    def _recover_from_jsonl(self, safe_id: str) -> InterviewSession | None:
+    def _replay_journal_into(self, session: InterviewSession, safe_id: str, *, offset: int = 0) -> int:
         jsonl_path = self.sessions_dir / f"{safe_id}.events.jsonl"
         if not jsonl_path.exists():
-            return None
+            return 0
+        file_size = jsonl_path.stat().st_size
+        if offset < 0 or offset >= file_size:
+            return 0
         from .grouper import QAGrouper
 
-        session = InterviewSession(id=safe_id)
         grouper = QAGrouper()
-        recovered_any = False
-        for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
+        replayed = 0
+        with jsonl_path.open("rb") as fh:
+            fh.seek(offset)
+            raw_tail = fh.read()
+            new_offset = fh.tell()
+
+        for raw_line in raw_tail.splitlines():
+            line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
             try:
@@ -284,10 +308,21 @@ class SessionStore:
                 if rec.get("type") == "utterance_upsert" and rec.get("utterance"):
                     utt = Utterance.model_validate(rec["utterance"])
                     grouper.upsert_and_route(session, utt)
-                    recovered_any = True
+                    replayed += 1
             except Exception:
                 continue
-        return session if recovered_any else None
+        if replayed > 0:
+            grouper.sync_card_kinds(session)
+            session.journal_offset = new_offset
+        return replayed
+
+    def _recover_from_jsonl(self, safe_id: str) -> InterviewSession | None:
+        jsonl_path = self.sessions_dir / f"{safe_id}.events.jsonl"
+        if not jsonl_path.exists():
+            return None
+        session = InterviewSession(id=safe_id)
+        replayed = self._replay_journal_into(session, safe_id, offset=0)
+        return session if replayed > 0 else None
 
     def load(self, session_id: str) -> InterviewSession | None:
         self.flush_pending()
@@ -295,7 +330,10 @@ class SessionStore:
         json_path = self.sessions_dir / f"{safe_id}.json"
         if json_path.exists():
             try:
-                return InterviewSession.model_validate_json(json_path.read_text(encoding="utf-8"))
+                session = InterviewSession.model_validate_json(json_path.read_text(encoding="utf-8"))
+                if session.journal_offset is not None:
+                    self._replay_journal_into(session, safe_id, offset=session.journal_offset)
+                return session
             except Exception:
                 return self._recover_from_jsonl(safe_id)
         return self._recover_from_jsonl(safe_id)

@@ -16,6 +16,12 @@ class PCM16DownsamplerProcessor extends AudioWorkletProcessor {
     this.readPos = 0;
     this.sumSq = 0;
     this.meterCounter = 0;
+
+    this.port.onmessage = (ev) => {
+      if (ev.data && ev.data.type === "flush") {
+        this._flushAndAck();
+      }
+    };
   }
 
   _emitChunk() {
@@ -28,6 +34,18 @@ class PCM16DownsamplerProcessor extends AudioWorkletProcessor {
     this.outBuffer = new Int16Array(this.chunkSamples);
     this.outIndex = 0;
     this.port.postMessage({ pcmBuffer: finished.buffer, rms }, [finished.buffer]);
+  }
+
+  _flushAndAck() {
+    if (this.outIndex > 0) {
+      const rms = Math.sqrt(this.sumSq / Math.max(1, this.meterCounter));
+      this.sumSq = 0;
+      this.meterCounter = 0;
+      const tail = this.outBuffer.slice(0, this.outIndex);
+      this.outIndex = 0;
+      this.port.postMessage({ pcmBuffer: tail.buffer, rms }, [tail.buffer]);
+    }
+    this.port.postMessage({ flushed: true });
   }
 
   process(inputs) {
