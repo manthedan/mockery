@@ -838,7 +838,11 @@ def create_app(
                 runtime.profiles.update_redaction_prefs,
                 runtime.profiles.state.resume.prefs,
             )
-        return {"addons": status, "profile": runtime.profiles.public_dict()}
+        return {
+            "addons": status,
+            "profile": runtime.profiles.public_dict(),
+            "tts": runtime.tts.status_dict(),
+        }
 
     @app.delete("/api/addons/{pack_id}")
     async def uninstall_addon_pack(pack_id: str) -> dict[str, Any]:
@@ -866,7 +870,11 @@ def create_app(
                 runtime.profiles.update_redaction_prefs,
                 runtime.profiles.state.resume.prefs,
             )
-        return {"addons": status, "profile": runtime.profiles.public_dict()}
+        return {
+            "addons": status,
+            "profile": runtime.profiles.public_dict(),
+            "tts": runtime.tts.status_dict(),
+        }
 
     @app.get("/api/addons/pyodide/{asset_path:path}")
     async def serve_pyodide_asset(asset_path: str, request: Request) -> Response:

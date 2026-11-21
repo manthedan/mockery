@@ -124,7 +124,9 @@ const state = {
   discovery: null,
   onboardingChecked: false,
   onboardProvider: "gemini",
+  onboardStep: "ai", // "ai" | "packs"
   addons: null,
+  tts: null,
   profileSummary: null,
   practiceActive: false,
   clientMachines,
@@ -144,6 +146,7 @@ const _mockeryStateDescriptor = {
       wsState: state.wsState,
       captureState: state.captureState,
       modalState: state.modalState,
+      onboardStep: state.onboardStep,
       rightTab: state.rightTab,
       wideCopilot: state.wideCopilot,
       selectedQaId: state.selectedQaId,
@@ -152,6 +155,7 @@ const _mockeryStateDescriptor = {
       asr: state.asr,
       diarizer: state.diarizer,
       addons: state.addons,
+      tts: state.tts,
       profileSummary: state.profileSummary,
       practiceActive: state.practiceActive,
       serverMachines,
@@ -253,12 +257,24 @@ const captureMachine = createMachine({
 const modalCtrl = createModalTokenController({
   initial: "none",
   registry: clientMachines,
-  onChange: (next) => {
+  onChange: (next, prev) => {
     state.modalState = next;
     el("settingsModal")?.classList.toggle("hidden", next !== "settings");
     el("historyModal")?.classList.toggle("hidden", next !== "history");
     el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
     el("profileModal")?.classList.toggle("hidden", next !== "profile");
+    if (prev === "onboarding" && next !== "onboarding") {
+      if (state.onboardStep === "packs") {
+        try {
+          window.localStorage?.setItem("mockery_onboard_packs_seen", "1");
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!practiceStudio?.isPracticeActive?.()) {
+        practiceStudio?.stopSpeaking?.();
+      }
+    }
   },
 });
 
@@ -3170,7 +3186,136 @@ async function saveSettings() {
   }
 }
 
-async function openOnboardingModal(statusData = null) {
+function shouldPromptVoiceStep() {
+  if (state.tts) {
+    return Boolean(state.tts.kokoro_available && !state.tts.kokoro_installed);
+  }
+  const kokoro = (state.addons?.packs || []).find((p) => p.id === "kokoro_tts");
+  return Boolean(kokoro && kokoro.available && !kokoro.installed);
+}
+
+function isCloudLlmActive() {
+  const prov = state.llm?.provider || "";
+  return ["gemini", "anthropic", "openai", "deepseek", "openrouter"].includes(prov);
+}
+
+function renderOnboardingPacksStep() {
+  const packs = state.addons?.packs || [];
+  const kokoroPack = packs.find((p) => p.id === "kokoro_tts") || null;
+  const kokoroOp = packOps.get("kokoro_tts");
+  const kokoroInstalled = Boolean(state.tts?.kokoro_installed || kokoroPack?.installed);
+  const kokoroAvailable =
+    state.tts?.kokoro_available !== undefined
+      ? Boolean(state.tts.kokoro_available)
+      : kokoroPack?.available !== false;
+  const kokoroSize = kokoroPack?.size_mb || 183;
+
+  const badgeEl = el("onboardKokoroBadge");
+  const previewBtn = el("onboardKokoroPreviewBtn");
+  const installBtn = el("onboardKokoroInstallBtn");
+  const errEl = el("onboardKokoroError");
+
+  if (badgeEl) badgeEl.classList.toggle("hidden", !kokoroInstalled);
+  if (previewBtn) {
+    previewBtn.classList.toggle("hidden", !kokoroInstalled);
+  }
+  if (installBtn) {
+    installBtn.classList.toggle("hidden", kokoroInstalled || !kokoroAvailable);
+    const busy = kokoroOp === "installing" || kokoroOp === "uninstalling";
+    installBtn.disabled = busy;
+    installBtn.textContent =
+      kokoroOp === "installing"
+        ? `Downloading ${kokoroSize} MB…`
+        : kokoroOp === "uninstalling"
+          ? "Removing…"
+          : kokoroPack?.state === "error"
+            ? `Retry voice (${kokoroSize} MB)`
+            : `Install voice (${kokoroSize} MB)`;
+  }
+  if (errEl) {
+    const errMsg = kokoroPack?.error || state.tts?.error || "";
+    errEl.textContent = errMsg;
+    errEl.classList.toggle("hidden", !errMsg);
+  }
+
+  const doneBtn = el("onboardDoneBtn");
+  if (doneBtn) {
+    doneBtn.textContent = kokoroInstalled ? "Start using Mockery" : "Skip voice for now";
+    doneBtn.classList.toggle("btn-primary", kokoroInstalled);
+    doneBtn.classList.toggle("btn-outline", !kokoroInstalled);
+  }
+
+  const optList = el("onboardOptionalPacksList");
+  if (optList) {
+    const cloudActive = isCloudLlmActive();
+    const optionalIds = ["rampart_pii", "pyodide_python"];
+    const optionalPacks = optionalIds
+      .map((id) => packs.find((p) => p.id === id))
+      .filter(Boolean);
+
+    optList.innerHTML = optionalPacks
+      .map((pk) => {
+        const op = packOps.get(pk.id);
+        const isInstalling = op === "installing" || pk.state === "installing";
+        const isUninstalling = op === "uninstalling" || pk.state === "uninstalling";
+        const recTag =
+          pk.id === "rampart_pii" && cloudActive
+            ? `<span class="addon-size-pill is-rec">Recommended for cloud AI</span>`
+            : "";
+        let actionHtml = "";
+        if (isInstalling) {
+          actionHtml = `<span class="addon-state-badge is-busy">Downloading…</span>`;
+        } else if (isUninstalling) {
+          actionHtml = `<span class="addon-state-badge is-busy">Removing…</span>`;
+        } else if (pk.installed) {
+          actionHtml = `<span class="addon-state-badge is-ok">Installed</span>`;
+        } else {
+          actionHtml = `<button type="button" class="btn btn-outline btn-sm" data-onboard-install="${escapeHtml(
+            pk.id
+          )}">Install (${pk.size_mb} MB)</button>`;
+        }
+        return `
+          <div class="onboard-pack-row">
+            <div class="onboard-pack-main">
+              <div class="onboard-pack-title">
+                ${escapeHtml(pk.name)}
+                <span class="addon-size-pill">${pk.size_mb} MB</span>
+                ${recTag}
+              </div>
+              <div class="onboard-pack-desc">${escapeHtml(pk.description)}</div>
+              ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
+            </div>
+            <div class="onboard-pack-actions">${actionHtml}</div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+}
+
+function setOnboardStep(step) {
+  const nextStep = step === "packs" ? "packs" : "ai";
+  state.onboardStep = nextStep;
+  el("onboardStepAi")?.classList.toggle("hidden", nextStep !== "ai");
+  el("onboardStepPacks")?.classList.toggle("hidden", nextStep !== "packs");
+
+  for (const pill of document.querySelectorAll("[data-onboard-step]")) {
+    const active = pill.getAttribute("data-onboard-step") === nextStep;
+    pill.classList.toggle("active", active);
+    pill.setAttribute("aria-selected", active ? "true" : "false");
+  }
+
+  el("onboardSkipBtn")?.classList.toggle("hidden", nextStep !== "ai");
+  el("onboardBackBtn")?.classList.toggle("hidden", nextStep !== "packs");
+  el("onboardNextStepBtn")?.classList.toggle("hidden", nextStep !== "ai");
+  el("onboardDoneBtn")?.classList.toggle("hidden", nextStep !== "packs");
+
+  if (nextStep === "packs") {
+    renderOnboardingPacksStep();
+  }
+}
+
+async function openOnboardingModal(statusData = null, { initialStep = null } = {}) {
   const reqToken = modalCtrl.beginRequest();
   let data;
   let disc;
@@ -3187,6 +3332,14 @@ async function openOnboardingModal(statusData = null) {
   }
   if (!modalCtrl.isCurrent(reqToken)) return;
   state.llm = data.llm;
+  if (data.addons) {
+    state.addons = data.addons;
+    profileAddons?.applyStatusSnapshot({ addons: data.addons });
+  }
+  if (data.tts) {
+    state.tts = data.tts;
+    practiceStudio?.applyStatusSnapshot({ tts: data.tts });
+  }
   const presets = data.llm.presets || {};
 
   // 1. Detected local CLIs & running local LLM servers (1-click activation!)
@@ -3257,8 +3410,13 @@ async function openOnboardingModal(statusData = null) {
         const saved = await res.json();
         state.llm = saved.llm;
         syncHomeAiPrompt(saved.llm);
-        setModalState("none");
         showToast(`Connected ${chosen.label}.`, 2600);
+        if (shouldPromptVoiceStep()) {
+          btn.disabled = false;
+          setOnboardStep("packs");
+        } else {
+          setModalState("none");
+        }
       } else {
         btn.disabled = false;
         showToast("Could not activate provider.");
@@ -3296,6 +3454,7 @@ async function openOnboardingModal(statusData = null) {
 
   el("onboardApiKeyInput").value = "";
   el("onboardStatus").classList.add("hidden");
+  setOnboardStep(initialStep || "ai");
   setModalState("onboarding", { reqToken, event: "open_onboarding" });
 }
 
@@ -3347,8 +3506,13 @@ async function testAndSaveOnboardingKey() {
       state.llm = saved.llm;
       syncHomeAiPrompt(saved.llm);
       setTimeout(() => {
-        modalCtrl.closeIf("onboarding", onboardToken);
+        if (!modalCtrl.isCurrent(onboardToken) || state.modalState !== "onboarding") return;
         showToast(`${p.label || provKey} connected and ready.`, 2600);
+        if (shouldPromptVoiceStep()) {
+          setOnboardStep("packs");
+        } else {
+          modalCtrl.closeIf("onboarding", onboardToken);
+        }
       }, 450);
     }
   } catch (err) {
@@ -3391,12 +3555,28 @@ async function checkInitialOnboarding() {
     if (!res.ok) return;
     const data = await res.json();
     state.llm = data.llm;
+    state.addons = data.addons || state.addons;
+    state.tts = data.tts || state.tts;
     syncHomeAiPrompt(data.llm);
     profileAddons?.applyStatusSnapshot(data);
     practiceStudio?.applyStatusSnapshot(data);
     practiceStudio?.refreshPracticeHistory();
     if (data.llm?.needs_onboarding && state.modalState === "none") {
-      await openOnboardingModal(data);
+      await openOnboardingModal(data, { initialStep: "ai" });
+    } else if (
+      data.tts?.kokoro_available &&
+      !data.tts?.kokoro_installed &&
+      state.modalState === "none"
+    ) {
+      let seenPacks = false;
+      try {
+        seenPacks = window.localStorage?.getItem("mockery_onboard_packs_seen") === "1";
+      } catch {
+        seenPacks = false;
+      }
+      if (!seenPacks) {
+        await openOnboardingModal(data, { initialStep: "packs" });
+      }
     }
   } catch {
     /* ignore */
@@ -3991,12 +4171,32 @@ function initEvents() {
     }
   };
 
-  // First-Run Onboarding Modal
+  // First-Run Onboarding Modal (2-step wizard)
   el("homeSetupAiBtn")?.addEventListener("click", () => openOnboardingModal());
   el("closeOnboardingBtn")?.addEventListener("click", () => setModalState("none"));
   el("onboardTestSaveBtn")?.addEventListener("click", testAndSaveOnboardingKey);
   el("onboardSkipBtn")?.addEventListener("click", skipOnboardingTranscriptOnly);
   el("onboardMoreBtn")?.addEventListener("click", () => openSettingsModal());
+  el("onboardNextStepBtn")?.addEventListener("click", () => setOnboardStep("packs"));
+  el("onboardBackBtn")?.addEventListener("click", () => setOnboardStep("ai"));
+  el("onboardDoneBtn")?.addEventListener("click", () => setModalState("none"));
+  el("onboardKokoroInstallBtn")?.addEventListener("click", () => {
+    profileAddons?.installPack("kokoro_tts");
+  });
+  el("onboardKokoroPreviewBtn")?.addEventListener("click", () => {
+    practiceStudio?.previewVoice?.();
+  });
+  el("onboardOptionalPacksList")?.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-onboard-install]");
+    if (btn) {
+      profileAddons?.installPack(btn.getAttribute("data-onboard-install"));
+    }
+  });
+  for (const stepBtn of document.querySelectorAll("[data-onboard-step]")) {
+    stepBtn.addEventListener("click", () => {
+      setOnboardStep(stepBtn.getAttribute("data-onboard-step"));
+    });
+  }
   el("onboardApiKeyInput")?.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
@@ -4204,9 +4404,13 @@ profileAddons = createProfileAddonsController({
     pushSessionConfig();
     practiceStudio?.refreshQuestionPicker();
   },
-  onAddonsChange: (addons) => {
+  onAddonsChange: (addons, tts = null) => {
     state.addons = addons;
-    practiceStudio?.applyStatusSnapshot({ addons });
+    if (tts) state.tts = tts;
+    practiceStudio?.applyStatusSnapshot(tts ? { addons, tts } : { addons });
+    if (state.modalState === "onboarding" && state.onboardStep === "packs") {
+      renderOnboardingPacksStep();
+    }
   },
 });
 practiceStudio = createPracticeStudioController({
@@ -4215,9 +4419,16 @@ practiceStudio = createPracticeStudioController({
   escapeHtml,
   showToast,
   clientMachines,
+  packOps,
+  onInstallPack: (packId) => profileAddons?.installPack(packId),
   onPracticeActiveChange: () => {
     renderWorkspaceMode();
   },
+});
+packOps.subscribe(() => {
+  if (state.modalState === "onboarding" && state.onboardStep === "packs") {
+    renderOnboardingPacksStep();
+  }
 });
 practiceStudio.registerStudioPlugin(
   "system_design",

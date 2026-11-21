@@ -2595,6 +2595,179 @@ kbd {
   margin-top: 6px;
 }
 
+.onboard-head-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboard-steps {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.onboard-step-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.onboard-step-pill:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.onboard-step-pill.active {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.12));
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.onboard-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--line);
+  color: var(--ink-2);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.onboard-step-pill.active .onboard-step-num {
+  background: var(--accent);
+  color: #fff;
+}
+
+.onboard-hero-pack {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft, rgba(99, 102, 241, 0.08));
+}
+
+.onboard-hero-pack-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.onboard-hero-pack-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.onboard-hero-pack-desc {
+  margin: 5px 0 0;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.onboard-hero-pack-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.onboard-packs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.onboard-pack-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.onboard-pack-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.onboard-pack-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--ink);
+}
+
+.onboard-pack-desc {
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.onboard-pack-actions {
+  flex-shrink: 0;
+}
+
+.addon-size-pill.is-rec {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.14));
+  color: var(--accent);
+}
+
+.onboard-footer-left,
+.onboard-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.practice-voice-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  padding-left: 22px;
+}
+
+.practice-voice-note {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.practice-voice-select {
+  width: auto;
+  min-width: 175px;
+  padding: 4px 28px 4px 10px;
+  font-size: 12.5px;
+  height: 30px;
+}
+
 .modal-footer {
   display: flex;
   align-items: center;
