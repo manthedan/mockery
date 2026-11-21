@@ -93,7 +93,16 @@ class AddonManager:
         self.extra_handlers: dict[str, dict[str, Callable[..., Any]]] = extra_pack_handlers or {}
         self._installing: dict[str, str] = {}
         self._errors: dict[str, str] = {}
+        self._pack_locks: dict[str, asyncio.Lock] = {}
+        self._install_tasks: dict[str, asyncio.Task[Any]] = {}
         self._modules: dict[str, bool] = self._load_modules()
+
+    def _get_pack_lock(self, pack_id: str) -> asyncio.Lock:
+        lock = self._pack_locks.get(pack_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._pack_locks[pack_id] = lock
+        return lock
 
     def register_pack_handler(
         self,
@@ -192,7 +201,7 @@ class AddonManager:
                 "id": "pyodide_python",
                 "name": "Offline Python Runner (Pyodide WASM)",
                 "category": "coding",
-                "size_mb": 22,
+                "size_mb": 14,
                 "description": "Run Python unit tests sandboxed inside your browser during Coding Studio practice sessions.",
                 "repo_id": "",
                 "installed": (
@@ -240,53 +249,69 @@ class AddonManager:
             "packs": self._pack_specs(),
         }
 
+    async def _run_install_locked(self, pack_id: str) -> None:
+        lock = self._get_pack_lock(pack_id)
+        async with lock:
+            self._errors.pop(pack_id, None)
+            self._installing[pack_id] = "Downloading…"
+            try:
+                if pack_id == "rampart_pii":
+                    await asyncio.to_thread(self.redactor.ensure_downloaded)
+                elif pack_id in ("parakeet_v2", "parakeet_v3"):
+                    repo_id = (
+                        "mlx-community/parakeet-tdt-0.6b-v2"
+                        if pack_id == "parakeet_v2"
+                        else "mlx-community/parakeet-tdt-0.6b-v3"
+                    )
+                    from huggingface_hub import snapshot_download
+
+                    await asyncio.to_thread(snapshot_download, repo_id)
+                elif pack_id in self.extra_handlers and self.extra_handlers[pack_id]["available"]():
+                    fn = self.extra_handlers[pack_id]["install"]
+                    res = fn()
+                    if asyncio.iscoroutine(res):
+                        await res
+                else:
+                    raise ValueError(f"Unknown or unavailable add-on pack '{pack_id}'")
+            except Exception as exc:
+                self._errors[pack_id] = str(exc)
+                raise
+            finally:
+                self._installing.pop(pack_id, None)
+
     async def install_pack(self, pack_id: str) -> dict[str, Any]:
-        if pack_id in self._installing:
+        existing = self._install_tasks.get(pack_id)
+        if existing is not None and not existing.done():
+            await asyncio.shield(existing)
             return self.status_dict()
-        self._errors.pop(pack_id, None)
-        self._installing[pack_id] = "Downloading…"
+
+        task = asyncio.create_task(self._run_install_locked(pack_id))
+        self._install_tasks[pack_id] = task
         try:
+            await asyncio.shield(task)
+        finally:
+            if self._install_tasks.get(pack_id) is task and task.done():
+                self._install_tasks.pop(pack_id, None)
+        return self.status_dict()
+
+    async def uninstall_pack(self, pack_id: str) -> dict[str, Any]:
+        lock = self._get_pack_lock(pack_id)
+        async with lock:
+            self._errors.pop(pack_id, None)
             if pack_id == "rampart_pii":
-                await asyncio.to_thread(self.redactor.ensure_downloaded)
+                await asyncio.to_thread(self.redactor.delete_cache)
             elif pack_id in ("parakeet_v2", "parakeet_v3"):
                 repo_id = (
                     "mlx-community/parakeet-tdt-0.6b-v2"
                     if pack_id == "parakeet_v2"
                     else "mlx-community/parakeet-tdt-0.6b-v3"
                 )
-                from huggingface_hub import snapshot_download
-
-                await asyncio.to_thread(snapshot_download, repo_id)
-            elif pack_id in self.extra_handlers and self.extra_handlers[pack_id]["available"]():
-                fn = self.extra_handlers[pack_id]["install"]
+                await asyncio.to_thread(_hf_repo_delete, repo_id)
+            elif pack_id in self.extra_handlers:
+                fn = self.extra_handlers[pack_id]["uninstall"]
                 res = fn()
                 if asyncio.iscoroutine(res):
                     await res
             else:
-                raise ValueError(f"Unknown or unavailable add-on pack '{pack_id}'")
-        except Exception as exc:
-            self._errors[pack_id] = str(exc)
-            raise
-        finally:
-            self._installing.pop(pack_id, None)
-        return self.status_dict()
-
-    async def uninstall_pack(self, pack_id: str) -> dict[str, Any]:
-        self._errors.pop(pack_id, None)
-        if pack_id == "rampart_pii":
-            await asyncio.to_thread(self.redactor.delete_cache)
-        elif pack_id in ("parakeet_v2", "parakeet_v3"):
-            repo_id = (
-                "mlx-community/parakeet-tdt-0.6b-v2"
-                if pack_id == "parakeet_v2"
-                else "mlx-community/parakeet-tdt-0.6b-v3"
-            )
-            await asyncio.to_thread(_hf_repo_delete, repo_id)
-        elif pack_id in self.extra_handlers:
-            fn = self.extra_handlers[pack_id]["uninstall"]
-            res = fn()
-            if asyncio.iscoroutine(res):
-                await res
-        else:
-            raise ValueError(f"Unknown add-on pack '{pack_id}'")
+                raise ValueError(f"Unknown add-on pack '{pack_id}'")
         return self.status_dict()

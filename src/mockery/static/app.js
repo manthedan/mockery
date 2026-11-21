@@ -1,6 +1,7 @@
 import { createProfileAddonsController } from "./profile_addons.js";
 import { createPracticeStudioController } from "./practice_studio.js";
 import { createSystemDesignStudioPlugin } from "./design_studio.js";
+import { createCodingStudioPlugin } from "./coding_studio.js";
 
 const CHANNEL_INTERVIEWER = 0x01;
 const CHANNEL_CANDIDATE = 0x02;
@@ -3998,6 +3999,7 @@ profileAddons = createProfileAddonsController({
     practiceStudio?.refreshQuestionPicker();
   },
   onAddonsChange: (addons) => {
+    state.addons = addons;
     practiceStudio?.applyStatusSnapshot({ addons });
   },
 });
@@ -4013,6 +4015,19 @@ practiceStudio = createPracticeStudioController({
 practiceStudio.registerStudioPlugin(
   "system_design",
   createSystemDesignStudioPlugin({ escapeHtml, showToast })
+);
+practiceStudio.registerStudioPlugin(
+  "coding",
+  createCodingStudioPlugin({
+    escapeHtml,
+    showToast,
+    getAddons: () => state.addons || profileAddons.getAddons(),
+    onAddonsUpdated: (addons) => {
+      state.addons = addons;
+      profileAddons.applyStatusSnapshot({ addons });
+      practiceStudio.applyStatusSnapshot({ addons });
+    },
+  })
 );
 renderSpeakerToggle();
 renderCaptureControls();

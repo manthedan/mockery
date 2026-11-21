@@ -4405,6 +4405,268 @@ kbd {
 }
 
 /* ----------------------------------------------------------------------------
+   Milestone 4: Coding Interview Studio
+   ---------------------------------------------------------------------------- */
+
+.cs-studio {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.cs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cs-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cs-status-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-2);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.cs-status-pill.is-pass {
+  color: var(--good, #15803d);
+  border-color: color-mix(in srgb, var(--good, #15803d) 40%, var(--line));
+}
+
+.cs-status-pill.is-fail {
+  color: var(--bad, #b42318);
+  border-color: color-mix(in srgb, var(--bad, #b42318) 40%, var(--line));
+}
+
+.cs-status-pill.is-running {
+  color: var(--ink);
+  border-color: var(--ink-2);
+}
+
+.cs-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cs-hints-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 10px 12px;
+}
+
+.cs-hints-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cs-hints-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cs-hints-done {
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+.cs-hints-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.45;
+}
+
+.cs-hints-empty {
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.cs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cs-lang-group,
+.cs-tab-group {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.cs-lang-btn,
+.cs-tab-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.cs-lang-btn + .cs-lang-btn,
+.cs-tab-btn + .cs-tab-btn {
+  border-left: 1px solid var(--line);
+}
+
+.cs-lang-btn.active,
+.cs-tab-btn.active {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.cs-py-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.cs-py-banner-text {
+  flex: 1 1 260px;
+  line-height: 1.45;
+}
+
+.cs-py-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cs-editor-wrap {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: hidden;
+  min-height: 240px;
+  max-height: 360px;
+}
+
+.cs-editor-wrap:focus-within {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 18%, transparent);
+}
+
+.cs-editor-hint {
+  font-size: 11px;
+  color: var(--ink-2);
+  line-height: 1.35;
+}
+
+.cs-gutter {
+  margin: 0;
+  padding: 10px 8px 10px 4px;
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--line) 28%, var(--bg));
+  border-right: 1px solid var(--line);
+  user-select: none;
+  overflow: hidden;
+}
+
+.cs-textarea {
+  width: 100%;
+  min-height: 240px;
+  max-height: 360px;
+  padding: 10px 12px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+
+.cs-console {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.cs-console-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cs-console-meta {
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+
+.cs-console-body {
+  margin: 0;
+  padding: 9px 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 165px;
+  overflow-y: auto;
+}
+
+.cs-console-body.is-pass {
+  color: var(--good, #15803d);
+}
+
+.cs-console-body.is-fail {
+  color: var(--bad, #b42318);
+}
+
+/* ----------------------------------------------------------------------------
    Narrow windows
    ---------------------------------------------------------------------------- */
 
