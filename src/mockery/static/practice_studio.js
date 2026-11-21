@@ -33,6 +33,85 @@ const CARL_STATE_LABELS = {
   missing: "Pending",
 };
 
+// Once a session is over nothing is "pending" any more — an unfilled signal is simply missing.
+const CARL_STATE_LABELS_FINAL = {
+  strong: "Strong",
+  partial: "Partial",
+  missing: "Missing",
+};
+
+const CARL_DIMS = ["context", "action", "result", "learning"];
+
+// The four-signal data model is shared by every format; only the words a person reads change.
+const CARL_RUBRIC = {
+  kicker: "Live CARL Meter",
+  help: "Context → Action (what you drove) → Result (metric or outcome) → Learning.",
+  dims: {
+    context: ["C", "Context"],
+    action: ["A", "Action"],
+    result: ["R", "Result"],
+    learning: ["L", "Learning"],
+  },
+};
+
+const RUBRIC_BY_FORMAT = {
+  behavioral: CARL_RUBRIC,
+  general: CARL_RUBRIC,
+  system_design: {
+    kicker: "Live Design Signals",
+    help: "Requirements (scope & constraints) → Architecture (components & data flow) → Scale (bottlenecks & numbers) → Tradeoffs (what you chose and why).",
+    dims: {
+      context: ["R", "Requirements"],
+      action: ["A", "Architecture"],
+      result: ["S", "Scale"],
+      learning: ["T", "Tradeoffs"],
+    },
+  },
+  coding: {
+    kicker: "Live Coding Signals",
+    help: "Approach (plan before code) → Correctness (working solution) → Complexity (time & space) → Edge cases (tested boundaries).",
+    dims: {
+      context: ["A", "Approach"],
+      action: ["C", "Correctness"],
+      result: ["O", "Complexity"],
+      learning: ["E", "Edge cases"],
+    },
+  },
+};
+
+function rubricFor(fmt) {
+  return RUBRIC_BY_FORMAT[fmt] || CARL_RUBRIC;
+}
+
+function carlScore(signals) {
+  let score = 0;
+  for (const dim of CARL_DIMS) {
+    const val = signals?.[dim] || "missing";
+    if (val === "strong") score += 1;
+    else if (val === "partial") score += 0.5;
+  }
+  return score;
+}
+
+function fmtScore(score) {
+  return Number.isInteger(score) ? String(score) : score.toFixed(1);
+}
+
+function fmtRelativeTime(iso) {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return "";
+  const diffSec = Math.max(0, (Date.now() - t) / 1000);
+  if (diffSec < 60) return "now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  if (diffSec < 86400 * 7) return `${Math.floor(diffSec / 86400)}d ago`;
+  try {
+    return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch {
+    return "";
+  }
+}
+
 function downsampleToInt16(floatChunks, inputRate, targetRate = 16000) {
   let totalLen = 0;
   for (const ch of floatChunks) totalLen += ch.length;
@@ -300,14 +379,15 @@ export function createPracticeStudioController({
     el("setupSimulateBtn")?.classList.toggle("hidden", isPractice);
 
     const kicker = el("homeKickerLabel");
-    if (kicker) kicker.textContent = isPractice ? "Practice target role" : "New interview";
+    if (kicker) kicker.textContent = isPractice ? "Practicing for" : "New interview";
 
     const cap = el("homeModeCaption");
     if (cap) {
       cap.textContent = isPractice
-        ? "Solo AI interviewer with supportive CARL coaching & local voice"
-        : "Real-time transcript & probes while you interview someone";
+        ? "A solo AI interviewer with supportive coaching"
+        : "Live transcript & probes while you interview someone";
     }
+    el("setupLaunchpad")?.setAttribute("data-home-mode", next);
 
     if (isPractice) {
       refreshQuestionPicker();
@@ -334,7 +414,7 @@ export function createPracticeStudioController({
     if (phononVoices.length > 0) {
       groups.push({
         engine: "phonon",
-        label: "Phonon-31M (62 MB · Fast)",
+        label: "Phonon · Fast",
         voices: phononVoices.map((v) => ({
           value: `phonon:${v}`,
           raw: v,
@@ -345,7 +425,7 @@ export function createPracticeStudioController({
     if (kokoroVoices.length > 0) {
       groups.push({
         engine: "kokoro",
-        label: "Kokoro-82M (183 MB · Studio)",
+        label: "Kokoro · Studio",
         voices: kokoroVoices.map((v) => ({
           value: `kokoro:${v}`,
           raw: v,
@@ -392,15 +472,9 @@ export function createPracticeStudioController({
 
     const voiceLbl = el("practiceVoiceLabel");
     if (voiceLbl && tts) {
-      if (activeEngine === "kokoro") {
-        voiceLbl.textContent = "AI speaks questions aloud (Kokoro-82M studio voice, instant barge-in)";
-      } else if (activeEngine === "phonon") {
-        voiceLbl.textContent = "AI speaks questions aloud (Phonon-31M fast neural voice, instant barge-in)";
-      } else if (activeEngine === "macos_say") {
-        voiceLbl.textContent = "AI speaks questions aloud (macOS fallback voice, instant barge-in)";
-      } else {
-        voiceLbl.textContent = "AI speaks questions aloud (browser voice, instant barge-in)";
-      }
+      // One calm line; the engine in use is shown by the status line or voice picker beneath it.
+      voiceLbl.textContent = "Interviewer reads questions aloud";
+      voiceLbl.dataset.engine = activeEngine;
     }
 
     const upgradeRow = el("practiceKokoroUpgradeRow");
@@ -419,28 +493,34 @@ export function createPracticeStudioController({
       const anyNeuralAvailable = Boolean(tts.kokoro_available || tts.phonon_available);
       const showUpgrade = anyNeuralAvailable && !anyNeuralInstalled;
       upgradeRow.classList.toggle("hidden", !showUpgrade);
+      const voiceNote = upgradeRow.querySelector(".practice-voice-note");
+      if (voiceNote) {
+        voiceNote.textContent = activeEngine === "macos_say" ? "Using macOS voice" : "Using browser voice";
+      }
 
       if (installPhononBtn) {
         installPhononBtn.classList.toggle("hidden", !tts.phonon_available);
         const busy = phononOp === "installing" || phononOp === "uninstalling";
         installPhononBtn.disabled = busy;
+        installPhononBtn.classList.toggle("is-busy", busy);
         installPhononBtn.textContent =
           phononOp === "installing"
-            ? "Downloading Phonon (62 MB)…"
+            ? "Downloading…"
             : phononOp === "uninstalling"
               ? "Removing…"
-              : "Install Phonon-31M (62 MB · Fast)";
+              : "Fast · 62 MB";
       }
       if (installKokoroBtn) {
         installKokoroBtn.classList.toggle("hidden", !tts.kokoro_available);
         const busy = kokoroOp === "installing" || kokoroOp === "uninstalling";
         installKokoroBtn.disabled = busy;
+        installKokoroBtn.classList.toggle("is-busy", busy);
         installKokoroBtn.textContent =
           kokoroOp === "installing"
-            ? "Downloading Kokoro (183 MB)…"
+            ? "Downloading…"
             : kokoroOp === "uninstalling"
               ? "Removing…"
-              : "Install Kokoro-82M (183 MB · Studio)";
+              : "Studio · 183 MB";
       }
     }
 
@@ -553,15 +633,39 @@ export function createPracticeStudioController({
       }
       section.classList.remove("hidden");
       listEl.innerHTML = items
-        .slice(0, 8)
+        .slice(0, 12)
         .map((s) => {
           const role = s.company ? `${s.role_title} · ${s.company}` : s.role_title;
-          const fmt = FORMAT_LABELS[s.interview_type] || s.interview_type;
-          const status = s.has_debrief ? "Debrief ready" : "In progress";
+          const fmtKey = FORMAT_LABELS[s.interview_type] ? s.interview_type : "general";
+          const fmt = FORMAT_LABELS[s.interview_type] || s.interview_type || "Practice";
+          // The question theme is what tells two sessions for the same role apart.
+          const theme = String(s.focus_title || "").trim();
+          const title = theme || `${fmt} practice`;
+          const qCount = Number(s.question_count || 0);
+          const answered = Number(s.answered_count || 0);
+          const score = Number.isFinite(s.score) ? Number(s.score) : null;
+          let pillCls = "is-progress";
+          let pillText = qCount > 1 ? `Q${Math.min(answered + 1, qCount)} of ${qCount}` : "In progress";
+          if (s.has_debrief || s.phase === "completed") {
+            pillCls = "is-done";
+            pillText = score !== null ? `${fmtScore(score)} / 4` : "Debriefed";
+          } else if (s.phase === "awaiting_debrief" || s.phase === "debriefing") {
+            pillCls = "is-ready";
+            pillText = "Ready to debrief";
+          }
+          const when = fmtRelativeTime(s.created_at_iso);
+          const more = theme && qCount > 1 ? ` +${qCount - 1}` : "";
           return `
-            <button type="button" class="home-item practice-history-item" data-open-practice="${escapeHtml(s.id)}">
-              <div class="home-item-title">${escapeHtml(role)}</div>
-              <div class="home-item-meta">${escapeHtml(fmt)} · ${escapeHtml(s.target_level || "L5")} · ${escapeHtml(status)}</div>
+            <button type="button" class="home-item practice-history-item" data-open-practice="${escapeHtml(s.id)}" title="${escapeHtml(`${title} — ${role}`)}">
+              <span class="home-item-top">
+                <span class="home-item-title">${escapeHtml(title)}${more ? `<span class="ph-more">${escapeHtml(more)}</span>` : ""}</span>
+                <span class="session-time">${escapeHtml(when)}</span>
+              </span>
+              <span class="home-item-meta ph-meta">
+                <span class="ph-badge ph-badge-${escapeHtml(fmtKey)}">${escapeHtml(fmt)}</span>
+                <span class="ph-pill ${pillCls}">${escapeHtml(pillText)}</span>
+                <span class="session-meta-main">${escapeHtml(`${role} · ${s.target_level || "L5"}`)}</span>
+              </span>
             </button>
           `;
         })
@@ -910,7 +1014,7 @@ export function createPracticeStudioController({
     }
     if (lbl) {
       if (phase === "requesting_mic") lbl.textContent = "Requesting mic…";
-      else if (phase === "recording") lbl.textContent = "Stop & transcribe";
+      else if (phase === "recording") lbl.textContent = "Done speaking";
       else if (phase === "transcribing") lbl.textContent = "Transcribing…";
       else lbl.textContent = isRetry ? "Speak retry" : "Speak answer";
     }
@@ -977,7 +1081,7 @@ export function createPracticeStudioController({
     micMachine.reset("idle", { event: "abort_mic" });
     cleanupMicResources();
     if (prevTarget) {
-      updateMicUI(prevTarget, "idle", "Local mic ready");
+      updateMicUI(prevTarget, "idle", "Transcribed privately on this Mac");
     }
   }
 
@@ -1039,7 +1143,7 @@ export function createPracticeStudioController({
         if (myRecGen === local.recGen) {
           local.micTarget = null;
           micMachine.reset("idle", { event: "mic_aborted_during_exit" });
-          updateMicUI(target, "idle", "Local mic ready");
+          updateMicUI(target, "idle", "Transcribed privately on this Mac");
         }
         return;
       }
@@ -1084,10 +1188,11 @@ export function createPracticeStudioController({
       source.connect(processor);
       processor.connect(ctx.destination);
 
-      updateMicUI(target, "recording", "Listening locally · 0:00");
+      updateMicUI(target, "recording", "Listening · 0:00");
+      if (target === "retry") startRetryTimerIfIdle();
       local.recTimerHandle = setInterval(() => {
         const elapsed = (Date.now() - local.recStartedAt) / 1000;
-        updateMicUI(target, "recording", `Listening locally · ${fmtShortClock(elapsed)}`);
+        updateMicUI(target, "recording", `Listening · ${fmtShortClock(elapsed)}`);
       }, 400);
     } catch (err) {
       if (stream) {
@@ -1131,7 +1236,7 @@ export function createPracticeStudioController({
     }
 
     micMachine.transition("transcribing", { event: "start_transcribe" });
-    updateMicUI(target, "transcribing", "Transcribing locally with Parakeet…");
+    updateMicUI(target, "transcribing", "Transcribing on this Mac…");
     try {
       const res = await fetch("/api/asr/transcribe", {
         method: "POST",
@@ -1147,7 +1252,7 @@ export function createPracticeStudioController({
       if (target === "answer" && myQuestionId && currentQuestionId() !== myQuestionId) {
         local.micTarget = null;
         micMachine.transition("idle", { event: "transcribe_discarded_question_changed" });
-        updateMicUI(target, "idle", "Local mic ready");
+        updateMicUI(target, "idle", "Transcribed privately on this Mac");
         return;
       }
       const transcript = String(data.text || "").trim();
@@ -1185,7 +1290,15 @@ export function createPracticeStudioController({
     }
   }
 
+  function setStudioLayout(fmt) {
+    const ws = el("practiceWorkspace");
+    if (!ws) return;
+    if (fmt) ws.setAttribute("data-studio", fmt);
+    else ws.removeAttribute("data-studio");
+  }
+
   function unmountStudioPlugin({ flush = true } = {}) {
+    setStudioLayout(null);
     const hadPending = Boolean(
       local.workspaceSyncTimer ||
         local.workspaceDirty ||
@@ -1362,17 +1475,22 @@ export function createPracticeStudioController({
     if (local.mountedPluginKey === pluginKey && local.mountedPlugin) {
       local.mountedPlugin.updateSession?.(local.session);
       slot.classList.remove("hidden");
+      setStudioLayout(fmt);
       renderWorkspaceSaveStatus();
       return;
     }
 
     unmountStudioPlugin();
     slot.classList.remove("hidden");
+    setStudioLayout(fmt);
     local.mountedPluginKey = pluginKey;
     local.mountedPlugin = factory({
       containerEl: slot,
       session: local.session,
-      onWorkspaceChange: () => scheduleWorkspaceSync(),
+      onWorkspaceChange: () => {
+        scheduleWorkspaceSync();
+        renderRoadmapCard();
+      },
       onAskAiReview: (promptText) => {
         if (local.busy || local.session?.phase !== "active") return;
         submitTurn(promptText);
@@ -1527,8 +1645,7 @@ export function createPracticeStudioController({
     return true;
   }
 
-  const DEFAULT_PRACTICE_START_HINT =
-    "Answer by voice (local Parakeet mic) or typing. Supportive CARL debrief at the end.";
+  const DEFAULT_PRACTICE_START_HINT = "Answer out loud or by typing. A supportive debrief follows.";
 
   function setButtonLoading(btnId, loading, loadingLabel = null, idleLabel = null) {
     const btn = el(btnId);
@@ -1572,7 +1689,7 @@ export function createPracticeStudioController({
     setButtonLoading("practiceNextQBtn", false, null, "Next Q");
     const keepDebriefing = !force && local.session?.phase === "debriefing";
     if (!keepDebriefing) {
-      setButtonLoading("practiceDebriefBtn", false, null, "End & CARL Debrief");
+      setButtonLoading("practiceDebriefBtn", false, null, "End & Debrief");
       setCoachRailThinking(false);
     }
     setButtonLoading("practiceRetrySubmitBtn", false, null, "Evaluate Retry");
@@ -1590,7 +1707,7 @@ export function createPracticeStudioController({
     }, 250);
   }
 
-  function showPendingTurnCard({ container, roleClass = "pturn-interviewer", title = "AI Interviewer", stages = [], coachRailMsg = "" }) {
+  function showPendingTurnCard({ container, roleClass = "pturn-interviewer", title = "Interviewer", stages = [], coachRailMsg = "" }) {
     if (!container) return null;
     const card = document.createElement("div");
     card.className = `pturn ${roleClass} is-thinking`;
@@ -1657,14 +1774,14 @@ export function createPracticeStudioController({
       <div class="debrief-pending-head">
         <span class="debrief-pending-title">
           <span class="inline-spinner" aria-hidden="true"></span>
-          <span>Crafting your supportive CARL coaching report…</span>
+          <span>Writing your coaching debrief…</span>
         </span>
         <span class="thinking-elapsed" aria-hidden="true"></span>
       </div>
       <ul class="debrief-pending-steps">
         <li data-step="0" class="is-active"><span class="debrief-step-dot"></span><span>Reviewing your transcript &amp; workspace</span></li>
-        <li data-step="1"><span class="debrief-step-dot"></span><span>Scoring Context · Action · Result · Learning signals</span></li>
-        <li data-step="2"><span class="debrief-step-dot"></span><span>Building your 45-second Retry Weak Part drill</span></li>
+        <li data-step="1"><span class="debrief-step-dot"></span><span>Scoring your four signals</span></li>
+        <li data-step="2"><span class="debrief-step-dot"></span><span>Choosing one thing to retry</span></li>
       </ul>
       <div class="debrief-skeleton-lines" aria-hidden="true">
         <div class="debrief-skeleton-line" style="width: 88%"></div>
@@ -1679,7 +1796,7 @@ export function createPracticeStudioController({
     setCoachRailThinking(
       true,
       "Debriefing",
-      "Synthesizing your strengths, CARL breakdown, and 45-second retry drill…"
+      "Pulling together your strengths, a question-by-question breakdown, and one retry drill…"
     );
 
     const elapsedEl = card.querySelector(".thinking-elapsed");
@@ -1904,13 +2021,13 @@ export function createPracticeStudioController({
         showPendingTurnCard({
           container: feed,
           roleClass: "pturn-interviewer",
-          title: "AI Interviewer",
+          title: "Interviewer",
           stages: [
             { at: 0, text: "Reviewing your answer…" },
-            { at: 2.2, text: "Checking CARL signals & crafting a follow-up…" },
+            { at: 2.2, text: "Weighing your answer and shaping a follow-up…" },
             { at: 6.5, text: "Still thinking — waiting on model response…" },
           ],
-          coachRailMsg: "Evaluating your answer's CARL signals and crafting a live nudge…",
+          coachRailMsg: "Reading your answer for its strongest signals…",
         });
       }
 
@@ -2008,7 +2125,7 @@ export function createPracticeStudioController({
     showPendingTurnCard({
       container: el("practiceFeed"),
       roleClass: "pturn-interviewer",
-      title: "AI Interviewer",
+      title: "Interviewer",
       stages: [
         { at: 0, text: "Preparing the next question…" },
         { at: 2.5, text: "Tailoring the transition from your last answer…" },
@@ -2029,7 +2146,7 @@ export function createPracticeStudioController({
       local.session = data.session;
       renderPracticeSession();
       if (!data.has_more) {
-        showToast("All questions complete — click End & CARL Debrief when ready!", 3400);
+        showToast("All questions complete — click End & Debrief when you are ready.", 3400);
       } else if (data.interviewer_turn?.text && local.voiceEnabled) {
         speakText(data.interviewer_turn.text);
       }
@@ -2058,7 +2175,7 @@ export function createPracticeStudioController({
     if (!opMachine.transition("debriefing", { event: "run_debrief" })) return;
     setBusy(true);
     stopSpeaking();
-    setButtonLoading("practiceDebriefBtn", true, "Generating CARL coaching…");
+    setButtonLoading("practiceDebriefBtn", true, "Writing debrief…");
     local.debriefStartedAt = Date.now();
     showPendingDebriefCard(el("practiceFeed"), local.debriefStartedAt);
     try {
@@ -2117,20 +2234,45 @@ export function createPracticeStudioController({
     }
   }
 
+  const RETRY_SECONDS = 45;
+
+  function paintRetryTimer(remSec, { running = false } = {}) {
+    const clock = el("practiceRetryClock");
+    const ring = el("practiceRetryRing");
+    const card = el("practiceRetryCard");
+    const warn = running && remSec <= 10;
+    if (clock) {
+      clock.textContent = fmtShortClock(remSec);
+      clock.classList.toggle("is-warn", warn);
+    }
+    if (ring) {
+      const exact = running && local.retryDeadlineMs
+        ? Math.max(0, (local.retryDeadlineMs - Date.now()) / 1000)
+        : remSec;
+      ring.style.setProperty("--p", String(Math.max(0, Math.min(100, (exact / RETRY_SECONDS) * 100))));
+      ring.classList.toggle("is-warn", warn);
+    }
+    if (card) {
+      card.classList.toggle("is-timing", running);
+      card.classList.toggle("is-warn", warn);
+    }
+  }
+
   function resetRetryTimer() {
     stopRetryTimer({ nextState: "idle" });
-    local.retrySecondsLeft = 45;
-    const clock = el("practiceRetryClock");
+    local.retrySecondsLeft = RETRY_SECONDS;
+    paintRetryTimer(RETRY_SECONDS);
     const btn = el("practiceRetryTimerBtn");
-    if (clock) {
-      clock.textContent = "0:45";
-      clock.classList.remove("is-warn");
-    }
-    if (btn) btn.textContent = "Start 45s timer";
+    if (btn) btn.textContent = "Start timer";
+  }
+
+  function startRetryTimerIfIdle() {
+    if (retryTimerMachine.state === "running" || retryTimerMachine.state === "warning") return;
+    if (local.session?.phase !== "completed") return;
+    toggleRetryTimer();
   }
 
   function toggleRetryTimer() {
-    const clock = el("practiceRetryClock");
     const btn = el("practiceRetryTimerBtn");
     if (retryTimerMachine.state === "running" || retryTimerMachine.state === "warning") {
       resetRetryTimer();
@@ -2139,30 +2281,25 @@ export function createPracticeStudioController({
     if (!retryTimerMachine.transition("running", { event: "start_retry_timer" })) {
       retryTimerMachine.reset("running", { event: "start_retry_timer" });
     }
-    local.retrySecondsLeft = 45;
-    local.retryDeadlineMs = Date.now() + 45_000;
-    if (clock) {
-      clock.textContent = "0:45";
-      clock.classList.remove("is-warn");
-    }
-    if (btn) btn.textContent = "Reset timer";
+    local.retrySecondsLeft = RETRY_SECONDS;
+    local.retryDeadlineMs = Date.now() + RETRY_SECONDS * 1000;
+    paintRetryTimer(RETRY_SECONDS, { running: true });
+    if (btn) btn.textContent = "Reset";
     local.retryTimerHandle = setInterval(() => {
       const remSec = Math.max(0, Math.ceil((local.retryDeadlineMs - Date.now()) / 1000));
       local.retrySecondsLeft = remSec;
-      if (clock) {
-        clock.textContent = fmtShortClock(remSec);
-        clock.classList.toggle("is-warn", remSec <= 10);
-      }
+      paintRetryTimer(remSec, { running: true });
       if (remSec <= 10 && remSec > 0 && retryTimerMachine.state === "running") {
         retryTimerMachine.transition("warning", { event: "retry_timer_warning" });
       }
       if (remSec <= 0) {
         stopRetryTimer({ nextState: "expired" });
-        if (btn) btn.textContent = "Restart 45s";
+        paintRetryTimer(0);
+        if (btn) btn.textContent = "Restart";
         if (micMachine.state === "recording" && local.recordingTarget === "retry") {
           stopMicAndTranscribe();
         }
-        showToast("45 seconds up! Submit your retry to get immediate before→after feedback.", 3200);
+        showToast("Time. Submit your retry to see what changed.", 3200);
       }
     }, 250);
   }
@@ -2185,14 +2322,14 @@ export function createPracticeStudioController({
       const input = el("practiceRetryInput");
       const text = (input?.value || "").trim();
       if (!text) {
-        showToast("Record or type your 45-second retry answer first.", 2600);
+        showToast("Speak or type your retry first.", 2600);
         return;
       }
       setButtonLoading("practiceRetrySubmitBtn", true, "Evaluating retry…");
       showPendingTurnCard({
         container: el("practiceRetryHistory"),
         roleClass: "pturn-coach",
-        title: "CARL Retry Coach",
+        title: "Coach",
         stages: [
           { at: 0, text: "Comparing your retry against your original answer…" },
           { at: 2.5, text: "Writing before → after coaching feedback…" },
@@ -2216,7 +2353,7 @@ export function createPracticeStudioController({
       if (input) input.value = "";
       resetRetryTimer();
       renderPracticeSession();
-      showToast("Nice rep! Check your before → after coaching below.", 2800);
+      showToast("Nice rep. Your before → after is below.", 2800);
     } catch (err) {
       if (mySessionGen === local.sessionGen) {
         showToast(String(err.message || err), 3200);
@@ -2232,49 +2369,140 @@ export function createPracticeStudioController({
 
   /* ---------------- Rendering ---------------- */
 
-  function renderCarlMeter(carl) {
+  function sessionFormat(sess = local.session) {
+    return sess?.config?.interview_type || "behavioral";
+  }
+
+  function carlStateLabel(val, final = false) {
+    const table = final ? CARL_STATE_LABELS_FINAL : CARL_STATE_LABELS;
+    return table[val] || table.missing;
+  }
+
+  function renderCarlMeter(carl, { fmt = sessionFormat(), final = false, kicker = null } = {}) {
+    const rubric = rubricFor(fmt);
     const signals = carl || { context: "missing", action: "missing", result: "missing", learning: "missing" };
-    let score = 0;
-    for (const dim of ["context", "action", "result", "learning"]) {
+    for (const dim of CARL_DIMS) {
       const val = signals[dim] || "missing";
-      if (val === "strong") score += 1;
-      else if (val === "partial") score += 0.5;
       const pill = el("practiceCarlPills")?.querySelector(`[data-carl-dim="${dim}"]`);
-      if (pill) {
-        pill.classList.remove("is-strong", "is-partial", "is-missing");
-        pill.classList.add(`is-${val}`);
-        const stEl = pill.querySelector(".carl-state");
-        if (stEl) stEl.textContent = CARL_STATE_LABELS[val] || "Pending";
-      }
+      if (!pill) continue;
+      const [letter, name] = rubric.dims[dim];
+      pill.classList.remove("is-strong", "is-partial", "is-missing");
+      pill.classList.add(`is-${val}`);
+      pill.title = `${name}: ${carlStateLabel(val, final)}`;
+      const letterEl = pill.querySelector(".carl-letter");
+      if (letterEl && letterEl.textContent !== letter) letterEl.textContent = letter;
+      const nameEl = pill.querySelector(".carl-name");
+      if (nameEl && nameEl.textContent !== name) nameEl.textContent = name;
+      const stEl = pill.querySelector(".carl-state");
+      if (stEl) stEl.textContent = carlStateLabel(val, final);
     }
+    const kickerEl = el("practiceMeterKicker");
+    if (kickerEl) kickerEl.textContent = kicker || rubric.kicker;
+    const helpEl = el("practiceMeterHelp");
+    if (helpEl) helpEl.title = rubric.help;
     const scoreEl = el("practiceCarlScore");
-    if (scoreEl) {
-      scoreEl.textContent = `${Number.isInteger(score) ? score : score.toFixed(1)} / 4`;
+    if (scoreEl) scoreEl.textContent = `${fmtScore(carlScore(signals))} / 4`;
+  }
+
+  function renderCarlBadgesInline(carl, { fmt = sessionFormat(), final = false } = {}) {
+    const rubric = rubricFor(fmt);
+    return `<span class="carl-inline-strip">${CARL_DIMS.map((key) => {
+      const val = (carl && carl[key]) || "missing";
+      const [letter, name] = rubric.dims[key];
+      return `<span class="carl-chip is-${escapeHtml(val)}" title="${escapeHtml(
+        `${name}: ${carlStateLabel(val, final)}`
+      )}">${letter}</span>`;
+    }).join("")}</span>`;
+  }
+
+  /* Post-session scoring: the debrief reflects the latest retry, not a stale snapshot. */
+
+  function latestRetrySignals(sess) {
+    const hist = Array.isArray(sess?.retry_history) ? sess.retry_history : [];
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const after = hist[i]?.feedback?.carl_after;
+      if (after && typeof after === "object") return after;
     }
+    return null;
   }
 
-  function renderCarlBadgesInline(carl) {
-    const dims = [
-      ["C", "context"],
-      ["A", "action"],
-      ["R", "result"],
-      ["L", "learning"],
-    ];
-    return `<span class="carl-inline-strip">${dims
-      .map(([letter, key]) => {
-        const val = (carl && carl[key]) || "missing";
-        return `<span class="carl-chip is-${escapeHtml(val)}" title="${escapeHtml(key)}: ${escapeHtml(val)}">${letter}</span>`;
-      })
-      .join("")}</span>`;
+  function drillQuestionIndex(sess) {
+    const qs = Array.isArray(sess?.questions) ? sess.questions : [];
+    if (qs.length === 0) return -1;
+    const qid = sess?.debrief?.retry_drill?.question_id;
+    const byId = qs.findIndex((q) => q.id === qid);
+    if (byId >= 0) return byId;
+    let weakest = 0;
+    for (let i = 1; i < qs.length; i++) {
+      if (carlScore(qs[i].carl_signals) < carlScore(qs[weakest].carl_signals)) weakest = i;
+    }
+    return weakest;
   }
 
-  function renderTurnCard(t) {
+  function originalQuestionSignals(sess, idx) {
+    const review = Array.isArray(sess?.debrief?.question_reviews) ? sess.debrief.question_reviews[idx] : null;
+    if (review?.carl && typeof review.carl === "object") return review.carl;
+    return sess?.questions?.[idx]?.carl_signals || null;
+  }
+
+  function effectiveQuestionSignals(sess) {
+    const qs = Array.isArray(sess?.questions) ? sess.questions : [];
+    const after = latestRetrySignals(sess);
+    const drillIdx = after ? drillQuestionIndex(sess) : -1;
+    return qs.map((q, idx) => (idx === drillIdx ? after : q.carl_signals || null));
+  }
+
+  function aggregateSignals(list) {
+    const out = {};
+    const rows = list.filter(Boolean);
+    for (const dim of CARL_DIMS) {
+      if (rows.length === 0) {
+        out[dim] = "missing";
+        continue;
+      }
+      let total = 0;
+      for (const row of rows) {
+        total += row[dim] === "strong" ? 1 : row[dim] === "partial" ? 0.5 : 0;
+      }
+      const avg = total / rows.length;
+      out[dim] = avg >= 0.75 ? "strong" : avg >= 0.25 ? "partial" : "missing";
+    }
+    return out;
+  }
+
+  function renderRetryOutcome(before, after, fmt) {
+    if (!after) return "";
+    const rubric = rubricFor(fmt);
+    const moves = [];
+    for (const dim of CARL_DIMS) {
+      const from = (before && before[dim]) || "missing";
+      const to = after[dim] || "missing";
+      if (from === to) continue;
+      const rank = { missing: 0, partial: 1, strong: 2 };
+      const dir = (rank[to] || 0) > (rank[from] || 0) ? "is-up" : "is-down";
+      moves.push(
+        `<span class="retry-delta ${dir}"><span class="retry-delta-dim">${escapeHtml(rubric.dims[dim][1])}</span>` +
+          `<span class="retry-delta-from">${escapeHtml(carlStateLabel(from, true))}</span>` +
+          `<span class="retry-delta-arrow" aria-hidden="true">→</span>` +
+          `<span class="retry-delta-to">${escapeHtml(carlStateLabel(to, true))}</span></span>`
+      );
+    }
+    const scoreLine = `${fmtScore(carlScore(before))} → ${fmtScore(carlScore(after))} / 4`;
+    if (moves.length === 0) {
+      return `<div class="retry-outcome"><span class="retry-delta is-flat">Held steady at ${escapeHtml(
+        `${fmtScore(carlScore(after))} / 4`
+      )}</span></div>`;
+    }
+    return `<div class="retry-outcome">${moves.join("")}<span class="retry-outcome-score">${escapeHtml(scoreLine)}</span></div>`;
+  }
+
+  function renderTurnCard(t, { showCoachNote = false } = {}) {
     if (t.role === "interviewer") {
       return `
         <article class="pturn pturn-interviewer">
           <div class="pturn-head">
-            <span>AI Interviewer</span>
-            <button type="button" class="link-quiet pturn-replay-btn" data-replay-turn="${escapeHtml(t.id)}" title="Replay spoken question">Replay audio</button>
+            <span>Interviewer</span>
+            <button type="button" class="link-quiet pturn-replay-btn" data-replay-turn="${escapeHtml(t.id)}" title="Hear this question again" aria-label="Replay this question aloud"><svg class="icon-xs" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 3.4v9.2a.5.5 0 00.77.42l7.1-4.6a.5.5 0 000-.84l-7.1-4.6A.5.5 0 005 3.4z" fill="currentColor"/></svg><span>Replay</span></button>
           </div>
           <div class="pturn-body pturn-serif">${formatWithNewlines(t.text)}</div>
         </article>
@@ -2283,16 +2511,19 @@ export function createPracticeStudioController({
     if (t.role === "coach") {
       return `
         <article class="pturn pturn-coach">
-          <div class="pturn-head">Supportive Coach Hint</div>
+          <div class="pturn-head"><span>Coach hint</span></div>
           <div class="pturn-body">${formatWithNewlines(t.text)}</div>
         </article>
       `;
     }
     const retryTag = t.is_retry ? `<span class="pturn-retry-tag">Retry</span>` : "";
     const carlStrip = t.carl_signals ? renderCarlBadgesInline(t.carl_signals) : "";
-    const tipHtml = t.coach_tip
-      ? `<div class="pturn-coach-note">Coach: ${escapeHtml(t.coach_tip)}</div>`
-      : "";
+    // During a live interview the right-rail Supportive Coach already carries this tip;
+    // it is only repeated inline in the post-session transcript, where the rail has moved on.
+    const tipHtml =
+      showCoachNote && t.coach_tip
+        ? `<div class="pturn-coach-note">${escapeHtml(t.coach_tip)}</div>`
+        : "";
     return `
       <article class="pturn pturn-candidate">
         <div class="pturn-head">
@@ -2311,18 +2542,37 @@ export function createPracticeStudioController({
     const debrief = sess.debrief;
     if (!contentEl || !debrief) return;
 
+    const fmt = sessionFormat(sess);
+    const isCarl = rubricFor(fmt) === CARL_RUBRIC;
     const strengths = Array.isArray(debrief.top_strengths) ? debrief.top_strengths : [];
     const reviews = Array.isArray(debrief.question_reviews) ? debrief.question_reviews : [];
+    const drill = debrief.retry_drill || {};
+    const retries = Array.isArray(sess.retry_history) ? sess.retry_history : [];
+    const effective = effectiveQuestionSignals(sess);
+    const drillIdx = drillQuestionIndex(sess);
+    const sessionSignals = aggregateSignals(effective);
+    const retried = Boolean(latestRetrySignals(sess));
 
     contentEl.innerHTML = `
       <section class="debrief-hero">
-        <div class="practice-kicker">Supportive CARL Coaching Debrief</div>
+        <div class="practice-kicker">Coaching debrief</div>
         <h2 class="debrief-encouragement">${escapeHtml(debrief.overall_encouragement || "Great practice session!")}</h2>
         ${
           debrief.carl_primer
             ? `<p class="debrief-primer">${escapeHtml(debrief.carl_primer)}</p>`
             : ""
         }
+        <div class="debrief-hero-actions">
+          ${
+            drill.prompt
+              ? `<button type="button" class="btn btn-primary btn-sm" data-jump-retry>Jump to 45s Retry Drill ↓</button>`
+              : ""
+          }
+          <span class="debrief-hero-score">
+            <span class="debrief-hero-score-num">${escapeHtml(fmtScore(carlScore(sessionSignals)))} / 4</span>
+            <span>session score${retried ? " · after your retry" : ""}</span>
+          </span>
+        </div>
       </section>
 
       ${
@@ -2339,41 +2589,45 @@ export function createPracticeStudioController({
       ${
         reviews.length > 0
           ? `<section class="debrief-section">
-              <h3 class="debrief-section-title">Question-by-Question CARL Breakdown</h3>
+              <h3 class="debrief-section-title">Question-by-Question Breakdown</h3>
               <div class="debrief-q-list">
                 ${reviews
-                  .map(
-                    (qr, idx) => `
+                  .map((qr, idx) => {
+                    const improved = retried && idx === drillIdx && effective[idx];
+                    return `
                   <article class="debrief-q-card">
                     <div class="debrief-q-head">
-                      <div>
+                      <div class="debrief-q-heading">
                         <span class="debrief-q-num">Q${idx + 1}</span>
                         <span class="debrief-q-title">${escapeHtml(qr.title || "Practice Question")}</span>
                       </div>
-                      ${renderCarlBadgesInline(qr.carl)}
+                      <span class="debrief-q-score">
+                        ${improved ? `<span class="debrief-q-retried">After retry</span>` : ""}
+                        ${renderCarlBadgesInline(improved ? effective[idx] : qr.carl, { fmt, final: true })}
+                      </span>
                     </div>
                     ${qr.prompt ? `<p class="debrief-q-prompt">${escapeHtml(qr.prompt)}</p>` : ""}
                     ${
                       qr.strength
-                        ? `<div class="debrief-q-row"><strong>Strength:</strong> ${escapeHtml(qr.strength)}</div>`
+                        ? `<div class="debrief-q-row"><span class="debrief-q-label">What worked</span><span>${escapeHtml(qr.strength)}</span></div>`
                         : ""
                     }
                     ${
                       qr.coaching_tip
-                        ? `<div class="debrief-q-row"><strong>Next-Level Tip:</strong> ${escapeHtml(qr.coaching_tip)}</div>`
+                        ? `<div class="debrief-q-row"><span class="debrief-q-label">Next level</span><span>${escapeHtml(qr.coaching_tip)}</span></div>`
                         : ""
                     }
                     ${
                       qr.carl_reframe
                         ? `<div class="debrief-q-reframe">
-                            <span class="practice-kicker">Before → After CARL Reframe</span>
+                            <span class="practice-kicker">${isCarl ? "Suggested CARL reframe" : "Suggested reframe"}</span>
                             <p>${escapeHtml(qr.carl_reframe)}</p>
                           </div>`
                         : ""
                     }
                   </article>
-                `
-                  )
+                `;
+                  })
                   .join("")}
               </div>
             </section>`
@@ -2381,32 +2635,35 @@ export function createPracticeStudioController({
       }
     `;
 
-    // Retry Weak Part Drill
-    const drill = debrief.retry_drill || {};
+    // Retry drill
     if (retryCard && drill.prompt) {
       retryCard.classList.remove("hidden");
       if (el("practiceRetryFocus")) {
-        el("practiceRetryFocus").textContent = drill.focus || "Sharpen your CARL finish (45s)";
+        el("practiceRetryFocus").textContent = drill.focus || "Sharpen your finish";
       }
       if (el("practiceRetryPrompt")) {
         el("practiceRetryPrompt").textContent = drill.prompt;
       }
       const histEl = el("practiceRetryHistory");
       if (histEl) {
-        const retries = sess.retry_history || [];
+        let before = originalQuestionSignals(sess, drillIdx);
         histEl.innerHTML = retries
           .map((r, idx) => {
             const fb = r.feedback || {};
+            const after = fb.carl_after && typeof fb.carl_after === "object" ? fb.carl_after : null;
+            const outcome = renderRetryOutcome(before, after, fmt);
+            if (after) before = after;
             return `
               <div class="retry-result-card">
                 <div class="retry-result-head">
-                  <span>Retry #${idx + 1}</span>
-                  ${fb.carl_after ? renderCarlBadgesInline(fb.carl_after) : ""}
+                  <span>Retry ${idx + 1}</span>
+                  ${after ? renderCarlBadgesInline(after, { fmt, final: true }) : ""}
                 </div>
+                ${outcome}
                 <blockquote class="retry-quote">${escapeHtml(r.candidate_answer || "")}</blockquote>
                 ${fb.encouragement ? `<p class="retry-encourage">${escapeHtml(fb.encouragement)}</p>` : ""}
-                ${fb.what_improved ? `<p class="retry-detail"><strong>What improved:</strong> ${escapeHtml(fb.what_improved)}</p>` : ""}
-                ${fb.one_more_polish ? `<p class="retry-detail"><strong>One final polish:</strong> ${escapeHtml(fb.one_more_polish)}</p>` : ""}
+                ${fb.what_improved ? `<p class="retry-detail"><span class="debrief-q-label">What improved</span><span>${escapeHtml(fb.what_improved)}</span></p>` : ""}
+                ${fb.one_more_polish ? `<p class="retry-detail"><span class="debrief-q-label">One more polish</span><span>${escapeHtml(fb.one_more_polish)}</span></p>` : ""}
               </div>
             `;
           })
@@ -2419,7 +2676,76 @@ export function createPracticeStudioController({
     // Full transcript drawer
     const transEl = el("practiceDebriefTranscript");
     if (transEl) {
-      transEl.innerHTML = (sess.turns || []).map(renderTurnCard).join("");
+      transEl.innerHTML = (sess.turns || []).map((t) => renderTurnCard(t, { showCoachNote: true })).join("");
+    }
+  }
+
+  function renderRoadmapCard(sess = local.session) {
+    const roadmap = el("practiceRoadmap");
+    const card = el("practiceRoadmapCard");
+    const kicker = el("practiceRoadmapKicker");
+    if (!roadmap || !sess) return;
+
+    const fmt = sessionFormat(sess);
+    const questions = Array.isArray(sess.questions) ? sess.questions : [];
+    const isCompleted = sess.phase === "completed" && Boolean(sess.debrief);
+    const isAwaitingDebrief = sess.phase === "awaiting_debrief";
+    const totalQ = Math.max(1, questions.length);
+    const curIdx = Math.min(sess.current_question_index || 0, totalQ - 1);
+
+    // A one-question roadmap says nothing. Show the live requirements checklist instead, or step aside.
+    if (questions.length === 1 && !isCompleted) {
+      const reqs = Array.isArray(questions[0].core_requirements) ? questions[0].core_requirements : [];
+      if (reqs.length === 0) {
+        card?.classList.add("hidden");
+        roadmap.innerHTML = "";
+        return;
+      }
+      const liveCtx = local.mountedPlugin ? getActiveWorkspaceContext() : null;
+      const checkedRaw = liveCtx?.checked_requirements || sess.workspace_context?.checked_requirements || [];
+      const checked = new Set((Array.isArray(checkedRaw) ? checkedRaw : []).map((r) => String(r).trim()));
+      const covered = reqs.filter((r) => checked.has(String(r).trim())).length;
+      card?.classList.remove("hidden");
+      if (kicker) kicker.textContent = `Requirements · ${covered} of ${reqs.length}`;
+      roadmap.innerHTML = `<ul class="roadmap-reqs">${reqs
+        .map((r) => {
+          const done = checked.has(String(r).trim());
+          return `<li class="roadmap-req ${done ? "is-done" : ""}"><span class="roadmap-req-mark" aria-hidden="true"></span><span>${escapeHtml(r)}</span></li>`;
+        })
+        .join("")}</ul>`;
+      return;
+    }
+
+    card?.classList.remove("hidden");
+    if (kicker) kicker.textContent = isCompleted ? "Questions" : "Question Roadmap";
+    const effective = isCompleted ? effectiveQuestionSignals(sess) : null;
+    roadmap.innerHTML = questions
+      .map((q, idx) => {
+        const isCur = !isCompleted && !isAwaitingDebrief && idx === curIdx;
+        const cls = isCur ? "is-active" : q.status === "completed" ? "is-done" : "";
+        const badge = q.source === "tailored" ? "Tailored" : "Bank";
+        const signals = effective ? effective[idx] || q.carl_signals : q.carl_signals;
+        return `
+          <div class="roadmap-item ${cls}">
+            <div class="roadmap-head">
+              <span class="roadmap-num">Q${idx + 1}</span>
+              <span class="roadmap-title">${escapeHtml(q.title || q.competency || "Question")}</span>
+              <span class="roadmap-src">${escapeHtml(badge)}</span>
+            </div>
+            <div class="roadmap-carl">${renderCarlBadgesInline(signals, { fmt, final: isCompleted })}</div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  function renderVoiceToggle() {
+    const btn = el("practiceVoiceToggleBtn");
+    const lbl = el("practiceVoiceToggleLabel");
+    if (lbl) lbl.textContent = local.voiceEnabled ? "Voice on" : "Voice off";
+    if (btn) {
+      btn.setAttribute("aria-pressed", local.voiceEnabled ? "true" : "false");
+      btn.classList.toggle("is-off", !local.voiceEnabled);
     }
   }
 
@@ -2434,6 +2760,10 @@ export function createPracticeStudioController({
     const totalQ = Math.max(1, (sess.questions || []).length);
     const curIdx = Math.min(sess.current_question_index || 0, totalQ - 1);
     const curQ = (sess.questions || [])[curIdx] || null;
+    const fmtKey = sessionFormat(sess);
+
+    el("practiceWorkspace")?.setAttribute("data-phase", isCompleted ? "completed" : sess.phase || "active");
+    el("practiceWorkspace")?.setAttribute("data-format", fmtKey);
 
     if (el("practiceRoleTitle")) {
       el("practiceRoleTitle").textContent = sess.company
@@ -2446,16 +2776,16 @@ export function createPracticeStudioController({
     }
     if (el("practiceProgressBadge")) {
       el("practiceProgressBadge").textContent = isCompleted
-        ? "Completed · CARL Debrief"
+        ? "Debrief"
         : isDebriefing
-        ? "Generating CARL Debrief…"
+        ? "Writing debrief…"
         : isAwaitingDebrief
-        ? "All Questions Done · Ready for Debrief"
+        ? "Ready for debrief"
         : `Q${curIdx + 1} of ${totalQ}`;
     }
-    if (el("practiceVoiceToggleLabel")) {
-      el("practiceVoiceToggleLabel").textContent = local.voiceEnabled ? "Voice: On" : "Voice: Off";
-    }
+    renderVoiceToggle();
+    // Voice playback has nothing to say once the interview is over.
+    el("practiceVoiceToggleBtn")?.classList.toggle("hidden", isCompleted);
 
     el("practiceHintBtn")?.classList.toggle("hidden", isCompleted || isInputLocked);
     el("practiceNextQBtn")?.classList.toggle(
@@ -2465,12 +2795,14 @@ export function createPracticeStudioController({
     const debriefBtn = el("practiceDebriefBtn");
     if (debriefBtn) {
       debriefBtn.classList.toggle("hidden", isCompleted);
+      // Quiet outline while the interview is live; it only becomes the primary action once every question is done.
+      debriefBtn.classList.toggle("is-ready", isAwaitingDebrief);
       if (isDebriefing) {
         debriefBtn.disabled = true;
-        setButtonLoading("practiceDebriefBtn", true, "Generating debrief…");
+        setButtonLoading("practiceDebriefBtn", true, "Writing debrief…");
       } else if (opMachine.state === "idle") {
         debriefBtn.disabled = false;
-        setButtonLoading("practiceDebriefBtn", false, null, "End & CARL Debrief");
+        setButtonLoading("practiceDebriefBtn", false, null, "End & Debrief");
       }
     }
 
@@ -2480,10 +2812,10 @@ export function createPracticeStudioController({
     if (answerInput) {
       answerInput.disabled = isInputLocked;
       answerInput.placeholder = isDebriefing
-        ? "Generating your supportive CARL debrief — please hold on…"
+        ? "Writing your coaching debrief — one moment…"
         : isAwaitingDebrief
-        ? "All questions complete — click End & CARL Debrief above for your supportive coaching report."
-        : "Type or speak your answer… (⌘/Ctrl+Enter to send)";
+        ? "All questions complete — click End & Debrief above when you are ready."
+        : "Speak, or type your answer here…";
     }
     if (sendBtn && opMachine.state === "idle") sendBtn.disabled = isInputLocked;
     // Never re-enable mic button while requesting permission or transcribing
@@ -2501,7 +2833,7 @@ export function createPracticeStudioController({
     // Render feed
     const feed = el("practiceFeed");
     if (feed && !isCompleted) {
-      feed.innerHTML = (sess.turns || []).map(renderTurnCard).join("");
+      feed.innerHTML = (sess.turns || []).map((t) => renderTurnCard(t)).join("");
       if (isDebriefing) {
         if (!local.debriefStartedAt) local.debriefStartedAt = Date.now();
         showPendingDebriefCard(feed, local.debriefStartedAt);
@@ -2513,25 +2845,35 @@ export function createPracticeStudioController({
       renderDebriefView(sess);
     }
 
-    // Live CARL Meter
-    renderCarlMeter(curQ?.carl_signals);
+    // Live meter while interviewing; one session score (reflecting any retry) once it is over.
+    if (isCompleted) {
+      renderCarlMeter(aggregateSignals(effectiveQuestionSignals(sess)), {
+        fmt: fmtKey,
+        final: true,
+        kicker: "Session Score",
+      });
+    } else {
+      renderCarlMeter(curQ?.carl_signals, { fmt: fmtKey });
+    }
 
     // Live Supportive Coach card
     const coachMsgEl = el("practiceCoachMessage");
     const coachToneEl = el("practiceCoachTone");
     if (coachMsgEl && coachToneEl) {
       if (isCompleted) {
-        coachToneEl.textContent = "Debrief Ready";
-        coachMsgEl.textContent =
-          "Review your strengths first, then try the 45-second Retry Drill to lock in the improvement.";
+        const retried = Boolean(latestRetrySignals(sess));
+        coachToneEl.textContent = retried ? "Retry scored" : "Debrief ready";
+        coachMsgEl.textContent = retried
+          ? "Your session score now reflects the retry. Run it again to lock the stronger version in, or export the report."
+          : "Start with what went well, then run the retry drill while the feedback is fresh.";
       } else if (isDebriefing) {
         coachToneEl.textContent = "Debriefing";
         coachMsgEl.textContent =
-          "Synthesizing your strengths, CARL breakdown, and 45-second retry drill…";
+          "Pulling together your strengths, a question-by-question breakdown, and one retry drill…";
       } else if (isAwaitingDebrief) {
-        coachToneEl.textContent = "Wrap Up";
+        coachToneEl.textContent = "Wrap up";
         coachMsgEl.textContent =
-          "Awesome job completing every question! Click End & CARL Debrief above for your supportive breakdown and 45-second retry drill.";
+          "Every question answered — nicely done. Click End & Debrief above for your breakdown and a quick retry drill.";
       } else if (sess.live_nudge?.message) {
         coachToneEl.textContent = sess.live_nudge.tone === "encourage" ? "Nice signal" : "Coach tip";
         coachMsgEl.textContent = sess.live_nudge.message;
@@ -2544,7 +2886,11 @@ export function createPracticeStudioController({
       } else {
         coachToneEl.textContent = "Ready";
         coachMsgEl.textContent =
-          "Think out loud, anchor with Context, highlight what YOU drove, and close with measurable Result + Learning.";
+          fmtKey === "system_design"
+            ? "Think out loud. Pin down requirements first, then sketch the architecture and name your tradeoffs."
+            : fmtKey === "coding"
+            ? "Think out loud. State your approach and its complexity before you write the first line."
+            : "Think out loud. Set the context, show what you drove, and close with a measurable result and what you learned.";
       }
     }
 
@@ -2558,27 +2904,7 @@ export function createPracticeStudioController({
       }
     }
 
-    // Question Roadmap
-    const roadmap = el("practiceRoadmap");
-    if (roadmap) {
-      roadmap.innerHTML = (sess.questions || [])
-        .map((q, idx) => {
-          const isCur = !isCompleted && !isAwaitingDebrief && idx === curIdx;
-          const cls = isCur ? "is-active" : q.status === "completed" ? "is-done" : "";
-          const badge = q.source === "tailored" ? "Tailored" : "Bank";
-          return `
-            <div class="roadmap-item ${cls}">
-              <div class="roadmap-head">
-                <span class="roadmap-num">Q${idx + 1}</span>
-                <span class="roadmap-title">${escapeHtml(q.title || q.competency || "Question")}</span>
-                <span class="roadmap-src">${escapeHtml(badge)}</span>
-              </div>
-              <div class="roadmap-carl">${renderCarlBadgesInline(q.carl_signals)}</div>
-            </div>
-          `;
-        })
-        .join("");
-    }
+    renderRoadmapCard(sess);
   }
 
   function getStateSnapshot() {
@@ -2671,9 +2997,22 @@ export function createPracticeStudioController({
     el("practiceVoiceToggleBtn")?.addEventListener("click", () => {
       local.voiceEnabled = !local.voiceEnabled;
       if (!local.voiceEnabled) stopSpeaking();
-      if (el("practiceVoiceToggleLabel")) {
-        el("practiceVoiceToggleLabel").textContent = local.voiceEnabled ? "Voice: On" : "Voice: Off";
-      }
+      renderVoiceToggle();
+    });
+
+    // The Studio Bar replaces the global title bar, so it carries its own Profile & Settings entry points.
+    el("practiceProfileBtn")?.addEventListener("click", () => el("profileBtn")?.click());
+    el("practiceSettingsBtn")?.addEventListener("click", () => el("settingsBtn")?.click());
+
+    el("practiceDebriefContent")?.addEventListener("click", (ev) => {
+      if (!ev.target.closest("[data-jump-retry]")) return;
+      const card = el("practiceRetryCard");
+      if (!card) return;
+      const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      card.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+      card.classList.add("is-spotlit");
+      window.setTimeout(() => card.classList.remove("is-spotlit"), 1600);
+      el("practiceRetryMicBtn")?.focus({ preventScroll: true });
     });
 
     el("practiceHintBtn")?.addEventListener("click", () => requestHint());
@@ -2704,16 +3043,22 @@ export function createPracticeStudioController({
       const btn = el("practiceToggleTranscriptBtn");
       if (!box) return;
       const nowHidden = box.classList.toggle("hidden");
-      if (btn) btn.textContent = nowHidden ? "Show full transcript" : "Hide full transcript";
+      if (btn) {
+        btn.textContent = nowHidden ? "Show full transcript" : "Hide full transcript";
+        btn.setAttribute("aria-expanded", nowHidden ? "false" : "true");
+      }
+      if (!nowHidden) box.scrollIntoView({ block: "nearest" });
     });
 
-    el("practiceFeed")?.addEventListener("click", (ev) => {
+    const onReplayClick = (ev) => {
       const btn = ev.target.closest("[data-replay-turn]");
       if (!btn || !local.session) return;
       const tid = btn.getAttribute("data-replay-turn");
       const turn = (local.session.turns || []).find((t) => t.id === tid);
       if (turn?.text) speakText(turn.text, { force: true });
-    });
+    };
+    el("practiceFeed")?.addEventListener("click", onReplayClick);
+    el("practiceDebriefTranscript")?.addEventListener("click", onReplayClick);
 
     el("practiceInstallPhononBtn")?.addEventListener("click", () => {
       if (typeof onInstallPack === "function") {
@@ -2761,6 +3106,40 @@ export function createPracticeStudioController({
     speakText(text, { force: true, engine: engine || null, previewTag: tag });
   }
 
+  /* Question Banks → "Practice →": line the launcher up on one specific bank question. */
+  async function selectBankQuestion({ id, category = "", title = "" } = {}) {
+    if (!id) return false;
+    if (local.session || opMachine.state === "starting" || opMachine.state === "opening") {
+      showToast("Finish or leave your current session to practice this question.", 3000);
+      return false;
+    }
+    if (state.addons?.modules_map?.practice_mode === false) {
+      showToast("Turn on AI Mock Practice in Settings to practice this question.", 3000);
+      return false;
+    }
+    setHomeMode("practice");
+    const fmtBtn = category
+      ? el("setupTypePills")?.querySelector(`[data-setup-type="${CSS.escape(category)}"]`)
+      : null;
+    if (fmtBtn && !fmtBtn.classList.contains("active")) fmtBtn.click();
+    await refreshQuestionPicker();
+    const picker = el("practiceQuestionPicker");
+    if (picker) {
+      if (![...picker.options].some((o) => o.value === id)) {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = title || "Selected bank question";
+        picker.appendChild(opt);
+      }
+      picker.value = id;
+      picker.classList.add("is-flash");
+      window.setTimeout(() => picker.classList.remove("is-flash"), 1400);
+    }
+    el("practiceStartBtn")?.focus({ preventScroll: true });
+    showToast(`Opening question set${title ? `: ${title}` : ""}. Press Start when you are ready.`, 3000);
+    return true;
+  }
+
   if (packOps && typeof packOps.subscribe === "function") {
     packOps.subscribe(() => {
       renderVoiceControls();
@@ -2776,6 +3155,7 @@ export function createPracticeStudioController({
     openPracticeSession,
     exitPracticeToHome,
     setHomeMode,
+    selectBankQuestion,
     registerStudioPlugin,
     pushWorkspaceSnapshot,
     previewVoice,

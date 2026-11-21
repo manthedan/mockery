@@ -37,6 +37,17 @@ function friendlyLabel(raw) {
   return LABEL_FRIENDLY[raw] || String(raw || "PII").replace(/_/g, " ");
 }
 
+function jdRoleLabel(jd) {
+  if (!jd?.title) return "";
+  return jd.company ? `${jd.title} (${jd.company})` : jd.title;
+}
+
+function fmtPackSize(mb) {
+  const n = Number(mb);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return `${n >= 10 ? Math.round(n) : Math.round(n * 10) / 10} MB`;
+}
+
 export function createProfileAddonsController({
   state,
   el,
@@ -45,6 +56,7 @@ export function createProfileAddonsController({
   setModalState,
   onRoleApply,
   onAddonsChange,
+  onPracticeQuestion = null,
   clientMachines = null,
   packOps = null,
 }) {
@@ -102,30 +114,44 @@ export function createProfileAddonsController({
     // Home launchpad context summary
     const homeSummary = el("homeProfileSummary");
     const homeApplyBtn = el("homeApplyJdRoleBtn");
+    const jd = sum?.active_jd || null;
     if (homeSummary) {
       const parts = [];
       if (sum?.has_resume) {
         const cnt = Number(sum.resume_redacted_count || 0);
-        const engineLabel = sum.resume_engine === "rampart+rules" ? "Rampart" : "Rules";
         parts.push(
-          `Resume (${cnt > 0 ? `${cnt} PII scrubbed via ${engineLabel}` : `checked via ${engineLabel}`})`
+          cnt > 0
+            ? `Resume added · ${cnt} personal detail${cnt === 1 ? "" : "s"} hidden`
+            : "Resume added · kept private"
         );
       }
-      if (sum?.active_jd) {
-        const jd = sum.active_jd;
-        const label = jd.company ? `${jd.title} · ${jd.company}` : jd.title;
-        parts.push(`Target: ${label}`);
-      }
+      if (jd && !sum?.has_resume) parts.push("Target job saved");
       if (parts.length > 0) {
         homeSummary.textContent = parts.join("  ·  ");
         homeSummary.classList.add("is-populated");
       } else {
-        homeSummary.textContent = "Optional — upload resume (redacted locally) & target job listing";
+        homeSummary.textContent = "Add your resume and a target job for tailored questions";
         homeSummary.classList.remove("is-populated");
       }
     }
+
+    // Target job line under the role headline: shows what the session is aimed at,
+    // and offers the one-tap "Use JD role" chip only while the role differs.
+    const jdLine = el("homeJdTargetLine");
+    const jdText = el("homeJdTargetText");
+    const roleVal = String(el("setupRoleInput")?.value || "").trim();
+    const applied = Boolean(jd) && roleVal !== "" && roleVal === jdRoleLabel(jd);
+    if (jdLine) {
+      jdLine.classList.toggle("hidden", !jd);
+      jdLine.classList.toggle("is-applied", applied);
+    }
+    if (jdText && jd) {
+      const label = jd.company ? `${jd.title} · ${jd.company}` : jd.title;
+      jdText.textContent = applied ? `Practicing for your target job · ${jd.company || jd.title}` : `Target job: ${label}`;
+      jdText.title = label;
+    }
     if (homeApplyBtn) {
-      homeApplyBtn.classList.toggle("hidden", !sum?.active_jd);
+      homeApplyBtn.classList.toggle("hidden", !jd || applied);
     }
   }
 
@@ -175,6 +201,9 @@ export function createProfileAddonsController({
     el("profileTabResume")?.classList.toggle("hidden", tab !== "resume");
     el("profileTabJd")?.classList.toggle("hidden", tab !== "jd");
     el("profileTabBanks")?.classList.toggle("hidden", tab !== "banks");
+    // The privacy footnote is about the resume; it has no business on Question Banks.
+    el("profileFooterHint")?.classList.toggle("hidden", tab === "banks");
+    el("profileModal")?.setAttribute("data-profile-tab-active", tab);
 
     if (tab === "banks" && !skipLoadBanks) {
       loadBanks();
@@ -222,9 +251,11 @@ export function createProfileAddonsController({
       .map((part) => {
         const sp = placeholderMap.get(part);
         if (!sp) return escapeHtml(part);
+        const num = Number((part.match(/_(\d+)\]$/) || [])[1] || 1);
+        const name = friendlyLabel(sp.label);
         return `<span class="pii-inline-tag" title="${escapeHtml(
-          `${friendlyLabel(sp.label)} hidden (${sp.source})`
-        )}">${escapeHtml(part)}</span>`;
+          `Hidden — the AI only sees ${part}`
+        )}">${escapeHtml(num > 1 ? `${name} ${num}` : name)}</span>`;
       })
       .join("");
   }
@@ -240,13 +271,16 @@ export function createProfileAddonsController({
     const rampartReady = Boolean(rampart.ready ?? (rampart.installed && !rampart.error));
     if (engineBadge) {
       if (rampartReady) {
-        engineBadge.textContent = "Rampart Local ONNX (14.7 MB) · Active";
+        engineBadge.textContent = "Smart detection on";
+        engineBadge.title = "On-device Rampart classifier + pattern rules";
         engineBadge.classList.add("is-ok");
       } else if (rampart.error) {
-        engineBadge.textContent = `Rampart failed to initialize — using rules only (${rampart.error})`;
+        engineBadge.textContent = "Basic detection";
+        engineBadge.title = `Smart detection could not start (${rampart.error}). Pattern rules are still protecting you.`;
         engineBadge.classList.remove("is-ok");
       } else {
-        engineBadge.textContent = "Rules-only scrubber · Install Rampart AI for names & orgs";
+        engineBadge.textContent = "Basic detection";
+        engineBadge.title = "Pattern rules catch emails, phones, and links. Add smart detection for names and employers.";
         engineBadge.classList.remove("is-ok");
       }
     }
@@ -257,12 +291,12 @@ export function createProfileAddonsController({
       installBtn.classList.toggle("hidden", rampartReady && !busy);
       installBtn.disabled = busy;
       installBtn.textContent = installing
-        ? "Downloading 14.7 MB…"
+        ? "Downloading…"
         : uninstalling
           ? "Removing…"
           : rampart.installed
-            ? "Retry Rampart"
-            : "Install Rampart (14.7 MB)";
+            ? "Retry smart detection"
+            : "Add smart detection · 15 MB";
     }
 
     const emptyWrap = el("resumeEmptyState");
@@ -279,10 +313,13 @@ export function createProfileAddonsController({
     el("resumePasteWrap")?.classList.toggle("hidden", !local.pasteResumeOpen);
 
     el("resumeFileTitle").textContent = r.filename || "resume.txt";
-    const engineText = r.engine === "rampart+rules" ? "Rampart ONNX + rules" : "Rules only";
-    el("resumeFileMeta").textContent = `${r.char_count.toLocaleString()} chars · ${
-      r.redacted_count
-    } of ${r.total_detected} detected items scrubbed · ${engineText}`;
+    const detected = Number(r.total_detected || 0);
+    el("resumeFileMeta").textContent =
+      detected > 0
+        ? `${r.char_count.toLocaleString()} characters · ${r.redacted_count} of ${detected} personal detail${
+            detected === 1 ? "" : "s"
+          } hidden`
+        : `${r.char_count.toLocaleString()} characters · nothing personal found`;
 
     const prefs = r.prefs || {};
     const keepLocEl = el("prefKeepLocation");
@@ -305,27 +342,27 @@ export function createProfileAddonsController({
         }
       }
       if (seen.size === 0) {
-        chipsEl.innerHTML = `<span class="set-note">No personal identifiers detected in this resume.</span>`;
+        chipsEl.innerHTML = `<span class="set-note">Nothing personal found in this resume.</span>`;
       } else {
         chipsEl.innerHTML = Array.from(seen.values())
           .map((sp) => {
             const activeCls = sp.active ? "is-redacted" : "is-kept";
             const actionHint = sp.active
-              ? "Click to keep visible to the AI"
-              : "Click to scrub again";
+              ? "Hidden from the AI — click to make visible"
+              : "Visible to the AI — click to hide";
             const disp = String(sp.display_value || sp.placeholder || "");
-            const previewVal = disp.length > 34 ? `${disp.slice(0, 31)}…` : disp;
+            const previewVal = disp.length > 30 ? `${disp.slice(0, 27)}…` : disp;
             return `
               <button
                 type="button"
                 class="pii-chip ${activeCls}"
                 data-toggle-span-id="${escapeHtml(sp.id)}"
+                aria-pressed="${sp.active ? "true" : "false"}"
                 title="${escapeHtml(`${friendlyLabel(sp.label)}: ${disp} — ${actionHint}`)}"
               >
-                <span class="pii-chip-tag">${escapeHtml(
-                  sp.active ? sp.placeholder : friendlyLabel(sp.label)
-                )}</span>
+                <span class="pii-chip-label">${escapeHtml(friendlyLabel(sp.label))}</span>
                 <span class="pii-chip-orig">${escapeHtml(previewVal)}</span>
+                <span class="pii-chip-state">${sp.active ? "Hidden" : "Visible"}</span>
               </button>
             `;
           })
@@ -532,7 +569,7 @@ export function createProfileAddonsController({
       .map((jd) => {
         const isActive = jd.id === activeId;
         const isExpanded = local.expandedJdId === jd.id;
-        const subtitle = [jd.company, jd.target_level, `${jd.text.length.toLocaleString()} chars`]
+        const subtitle = [jd.company, jd.target_level, `${jd.text.length.toLocaleString()} characters`]
           .filter(Boolean)
           .join(" · ");
         return `
@@ -768,7 +805,7 @@ export function createProfileAddonsController({
       const activeJd = getActiveJd();
       const suffix =
         local.bankMatchJd && activeJd
-          ? ` · ranked for ${activeJd.title}${activeJd.company ? ` (${activeJd.company})` : ""}`
+          ? `, ranked for ${activeJd.title}${activeJd.company ? ` at ${activeJd.company}` : ""}`
           : "";
       countEl.textContent = `${questions.length} question${questions.length === 1 ? "" : "s"}${suffix}`;
     }
@@ -785,38 +822,56 @@ export function createProfileAddonsController({
         const jdScore = Number(q.jd_relevance_score || 0);
         const title = q.title || q.competency || catLabel;
         const extras = [];
-        if (q.carl_focus) extras.push(`CARL focus: ${q.carl_focus}`);
+        if (q.carl_focus) extras.push(`Focus: ${q.carl_focus}`);
         if (Array.isArray(q.core_requirements) && q.core_requirements.length > 0) {
-          extras.push(`Core: ${q.core_requirements.slice(0, 3).join(" · ")}`);
+          extras.push(`Covers ${q.core_requirements.slice(0, 3).join(", ")}`);
         }
         if (Array.isArray(q.follow_ups) && q.follow_ups.length > 0) {
-          extras.push(`${q.follow_ups.length} adaptive follow-ups`);
+          extras.push(`${q.follow_ups.length} follow-up${q.follow_ups.length === 1 ? "" : "s"}`);
         }
-        if (q.difficulty) extras.push(`Difficulty: ${q.difficulty}`);
+        const practiceBtn = q.id
+          ? `<button
+               type="button"
+               class="chip-action bank-practice-btn"
+               data-bank-practice="${escapeHtml(q.id)}"
+               data-bank-category="${escapeHtml(q.category || "")}"
+               data-bank-title="${escapeHtml(title)}"
+               title="Start a practice session with this question"
+             >Practice <span aria-hidden="true">→</span></button>`
+          : "";
         return `
-          <div class="bank-item">
+          <article class="bank-item">
             <div class="bank-item-head">
-              <div class="bank-item-meta">
-                <span class="bank-cat-pill">${escapeHtml(catLabel)}</span>
-                ${levels ? `<span class="bank-level-pill">${escapeHtml(levels)}</span>` : ""}
-                ${
-                  jdScore > 0
-                    ? `<span class="bank-jd-match">JD match</span>`
-                    : ""
-                }
-              </div>
-              <span class="bank-item-title">${escapeHtml(title)}</span>
+              <span class="bank-item-title">${renderInlineCode(title)}</span>
+              ${practiceBtn}
             </div>
-            <p class="bank-item-prompt">${escapeHtml(q.prompt)}</p>
+            <div class="bank-item-meta">
+              <span class="bank-cat-pill">${escapeHtml(catLabel)}</span>
+              ${levels ? `<span class="bank-level-pill">${escapeHtml(levels)}</span>` : ""}
+              ${q.difficulty ? `<span class="bank-level-pill">${escapeHtml(String(q.difficulty))}</span>` : ""}
+              ${jdScore > 0 ? `<span class="bank-jd-match">Matches your target job</span>` : ""}
+            </div>
+            <p class="bank-item-prompt">${renderInlineCode(q.prompt)}</p>
             ${
               extras.length > 0
-                ? `<div class="bank-item-foot">${escapeHtml(extras.join("  ·  "))}</div>`
+                ? `<div class="bank-item-foot">${extras
+                    .map((x) => `<span>${renderInlineCode(x)}</span>`)
+                    .join("")}</div>`
                 : ""
             }
-          </div>
+          </article>
         `;
       })
       .join("");
+  }
+
+  // Bank prompts are authored with inline markdown backticks. Render them as
+  // real <code> (never raw backticks) and keep tokens like `->` unbroken.
+  function renderInlineCode(text) {
+    return escapeHtml(String(text ?? "")).replace(
+      /`([^`\n]+)`/g,
+      (_m, code) => `<code class="md-code">${code}</code>`
+    );
   }
 
   function renderProfileModal() {
@@ -873,7 +928,8 @@ export function createProfileAddonsController({
             </span>
             <input
               type="checkbox"
-              class="studio-check addon-mod-toggle"
+              role="switch"
+              class="switch addon-mod-toggle"
               data-addon-module="${escapeHtml(m.id)}"
               ${m.enabled ? "checked" : ""}
               ${local.busyModules.has(m.id) ? "disabled" : ""}
@@ -890,24 +946,25 @@ export function createProfileAddonsController({
         .map((pk) => {
           const installing = sharedPackOps.isInstalling(pk.id) || pk.state === "installing";
           const uninstalling = sharedPackOps.isUninstalling(pk.id) || pk.state === "uninstalling";
+          const sizeLabel = fmtPackSize(pk.size_mb);
           let actionHtml = "";
           if (installing) {
-            actionHtml = `<button type="button" class="btn btn-outline btn-sm" disabled>Installing…</button>`;
+            actionHtml = `<button type="button" class="btn btn-outline btn-sm is-loading" disabled>Downloading…</button>`;
           } else if (uninstalling) {
             actionHtml = `<button type="button" class="btn btn-outline btn-sm" disabled>Removing…</button>`;
           } else if (pk.state === "installed") {
             actionHtml = `
               <span class="addon-state-badge is-ok">Installed</span>
-              <button type="button" class="btn btn-ghost btn-sm" data-addon-uninstall="${escapeHtml(
+              <button type="button" class="btn btn-ghost btn-sm addon-remove-btn" data-addon-uninstall="${escapeHtml(
                 pk.id
-              )}">Remove</button>
+              )}" title="Remove from this Mac${sizeLabel ? ` · frees ${sizeLabel}` : ""}">Remove</button>
             `;
           } else if (pk.state === "error") {
             const retryBtn =
               pk.available !== false
                 ? `<button type="button" class="btn btn-outline btn-sm" data-addon-install="${escapeHtml(
                     pk.id
-                  )}">Retry (${pk.size_mb} MB)</button>`
+                  )}">Retry</button>`
                 : "";
             const removeBtn = pk.installed
               ? `<button type="button" class="btn btn-ghost btn-sm" data-addon-uninstall="${escapeHtml(
@@ -920,15 +977,12 @@ export function createProfileAddonsController({
           } else {
             actionHtml = `<button type="button" class="btn btn-outline btn-sm" data-addon-install="${escapeHtml(
               pk.id
-            )}">Install (${pk.size_mb} MB)</button>`;
+            )}">Install${sizeLabel ? ` · ${sizeLabel}` : ""}</button>`;
           }
           return `
             <div class="addon-row">
               <div class="addon-row-main">
-                <div class="addon-row-title">
-                  ${escapeHtml(pk.name)}
-                  <span class="addon-size-pill">${pk.size_mb} MB</span>
-                </div>
+                <div class="addon-row-title">${escapeHtml(pk.name)}</div>
                 <div class="addon-row-desc">${escapeHtml(pk.description)}</div>
                 ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
               </div>
@@ -1076,8 +1130,13 @@ export function createProfileAddonsController({
       const jd = state.profileSummary?.active_jd;
       if (jd && typeof onRoleApply === "function") {
         onRoleApply(jd);
+        renderProfileSummaryIndicators(state.profileSummary);
         showToast(`Role set to ${jd.title}.`, 1800);
       }
+    });
+    // Keep the "Use JD role" chip honest as the role headline is edited by hand.
+    el("setupRoleInput")?.addEventListener("input", () => {
+      if (state.profileSummary) renderProfileSummaryIndicators(state.profileSummary);
     });
 
     el("closeProfileBtn")?.addEventListener("click", () => setModalState("none"));
@@ -1170,6 +1229,7 @@ export function createProfileAddonsController({
         const jd = (local.profile?.job_listings || []).find((j) => j.id === id);
         if (jd && typeof onRoleApply === "function") {
           onRoleApply(jd);
+          renderProfileSummaryIndicators();
           showToast(`Role set to ${jd.title}.`, 1800);
         }
         return;
@@ -1203,6 +1263,21 @@ export function createProfileAddonsController({
     el("banksListContainer")?.addEventListener("click", (ev) => {
       if (ev.target.closest("[data-retry-banks]")) {
         loadBanks();
+        return;
+      }
+      const practiceBtn = ev.target.closest("[data-bank-practice]");
+      if (practiceBtn && typeof onPracticeQuestion === "function") {
+        const payload = {
+          id: practiceBtn.getAttribute("data-bank-practice"),
+          category: practiceBtn.getAttribute("data-bank-category") || "",
+          title: practiceBtn.getAttribute("data-bank-title") || "",
+        };
+        practiceBtn.disabled = true;
+        Promise.resolve(onPracticeQuestion(payload))
+          .catch(() => false)
+          .then(() => {
+            if (practiceBtn.isConnected) practiceBtn.disabled = false;
+          });
       }
     });
 

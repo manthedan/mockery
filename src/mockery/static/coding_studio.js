@@ -197,6 +197,145 @@ export function formatTestRunSummary({ language, ok, stdout, error, durationMs, 
   return safeClipText(parts.join("\n\n"), MAX_TEST_OUTPUT_UTF8_BYTES);
 }
 
+/* ---------------- Zero-dependency syntax highlighting ---------------- */
+
+function escapeCodeHtml(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+const SYNTAX_RULES = {
+  javascript: {
+    re: /(\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|("(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?|`(?:\\[\s\S]|[^`\\])*`?)|(\b(?:0[xX][\da-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?n?)\b)|([A-Za-z_$][\w$]*)/g,
+    keywords: new Set(
+      "async await break case catch class const continue debugger default delete do else export extends finally for from function if import in instanceof let new of return static super switch this throw try typeof var void while yield".split(
+        " "
+      )
+    ),
+    literals: new Set(["true", "false", "null", "undefined", "NaN", "Infinity"]),
+    definers: new Set(["function", "class"]),
+  },
+  python: {
+    re: /(#[^\n]*)|((?:[rRbBfFuU]{0,2})(?:"""[\s\S]*?(?:"""|$)|\'\'\'[\s\S]*?(?:\'\'\'|$)|"(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?))|(\b(?:0[xX][\da-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?j?)\b)|([A-Za-z_]\w*)/g,
+    keywords: new Set(
+      "and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case".split(
+        " "
+      )
+    ),
+    literals: new Set(["True", "False", "None", "self", "cls"]),
+    definers: new Set(["def", "class"]),
+  },
+};
+
+/**
+ * Tokenize source into highlighted, HTML-escaped markup. Pure and
+ * dependency-free: the output always renders exactly the input characters,
+ * so it can sit pixel-aligned behind a transparent <textarea>.
+ */
+export function highlightCode(source, language) {
+  const text = String(source ?? "");
+  const rules = SYNTAX_RULES[language];
+  if (!rules) return escapeCodeHtml(text);
+  const re = new RegExp(rules.re.source, "g");
+  let out = "";
+  let last = 0;
+  let prevWord = "";
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0] === "") {
+      re.lastIndex += 1;
+      continue;
+    }
+    if (m.index > last) out += escapeCodeHtml(text.slice(last, m.index));
+    const tok = m[0];
+    let cls = "";
+    if (m[1] !== undefined) cls = "syn-com";
+    else if (m[2] !== undefined) cls = "syn-str";
+    else if (m[3] !== undefined) cls = "syn-num";
+    else if (rules.keywords.has(tok)) cls = "syn-kw";
+    else if (rules.literals.has(tok)) cls = "syn-lit";
+    else if (rules.definers.has(prevWord)) cls = "syn-def";
+    else {
+      let i = re.lastIndex;
+      while (text[i] === " ") i += 1;
+      if (text[i] === "(") cls = "syn-fn";
+    }
+    out += cls ? `<span class="${cls}">${escapeCodeHtml(tok)}</span>` : escapeCodeHtml(tok);
+    if (m[4] !== undefined) prevWord = tok;
+    else if (m[1] === undefined) prevWord = "";
+    last = re.lastIndex;
+  }
+  if (last < text.length) out += escapeCodeHtml(text.slice(last));
+  return out;
+}
+
+/* ---------------- Human-readable test output ---------------- */
+
+const RAW_FRAME_RE =
+  /^\s*at\s|_sandbox_worker\.js|https?:\/\/(?:127\.0\.0\.1|localhost)[^\s)]*|^\s*File ".*", line \d+|^Traceback \(most recent call last\):|^\s*(?:eval|anonymous)@|pyodide\.asm|<anonymous>:\d+/;
+const PASS_LINE_RE = /^\s*(?:✓|✔|✅|\[?\s*(?:pass(?:ed)?|ok)\s*\]?(?=[\s:·\-–—]|$))/i;
+const FAIL_LINE_RE = /^\s*(?:✗|✘|×|❌|\[?\s*(?:fail(?:ed|ure)?|not ok|error)\s*\]?(?=[\s:·\-–—]|$))/i;
+const ALL_PASS_RE = /all\s+(?:\d+\s+)?tests?\s+passed/i;
+
+function stripResultMarker(line) {
+  return line
+    .replace(PASS_LINE_RE, "")
+    .replace(FAIL_LINE_RE, "")
+    .replace(/^[\s:·\-–—]+/, "")
+    .trim();
+}
+
+/**
+ * Turn raw runner stdout + error text into calm rows. Stack frames that point
+ * at the local sandbox worker (http://127.0.0.1…/js_sandbox_worker.js) are
+ * moved into `rawTrace` so the candidate sees "what failed", not plumbing.
+ */
+export function summarizeTestOutput({ stdout = "", error = "" } = {}) {
+  const rows = [];
+  const trace = [];
+  const pushLine = (line, fromError) => {
+    const text = String(line).replace(/\s+$/, "");
+    if (!text.trim()) return;
+    if (RAW_FRAME_RE.test(text)) {
+      trace.push(text);
+      return;
+    }
+    if (ALL_PASS_RE.test(text)) {
+      const raw = stripResultMarker(text) || text.trim();
+      const calm = raw === raw.toUpperCase() ? raw.charAt(0) + raw.slice(1).toLowerCase() : raw;
+      rows.push({ tone: "pass", text: calm, summary: true });
+    } else if (PASS_LINE_RE.test(text)) {
+      rows.push({ tone: "pass", text: stripResultMarker(text) || "Passed" });
+    } else if (FAIL_LINE_RE.test(text) || fromError) {
+      rows.push({ tone: "fail", text: stripResultMarker(text) || text.trim() });
+    } else {
+      rows.push({ tone: "info", text: text.trim() });
+    }
+  };
+  String(stdout || "").split("\n").forEach((l) => pushLine(l, false));
+  const errLines = String(error || "").split("\n");
+  let errHeadSeen = false;
+  errLines.forEach((l) => {
+    if (!l.trim()) return;
+    if (RAW_FRAME_RE.test(l)) {
+      trace.push(l.replace(/\s+$/, ""));
+      return;
+    }
+    // Only the first non-frame error line is the headline; the rest is detail.
+    if (!errHeadSeen) {
+      errHeadSeen = true;
+      pushLine(l, true);
+    } else {
+      rows.push({ tone: "detail", text: l.trim() });
+    }
+  });
+  const passCount = rows.filter((r) => r.tone === "pass" && !r.summary).length;
+  const failCount = rows.filter((r) => r.tone === "fail").length;
+  return { rows, rawTrace: trace.join("\n"), passCount, failCount };
+}
+
 function shortRunId() {
   return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -313,13 +452,13 @@ export function deriveCodingRunnerState({
   if (language === "python" && !pyodideInstalled) {
     return {
       status: "pyodide_missing",
-      pillText: "Python Not Installed",
+      pillText: "Python runner not added",
       pillTone: "neutral",
       canRun: false,
       canCancel: false,
       runButtonText: "Run Tests",
-      consoleMeta: "Install Offline Python above to run tests locally",
-      consoleBodyDefault: "Offline Python runner is not installed.",
+      consoleMeta: "Add the Python runner above to run tests",
+      consoleBodyDefault: "You can write Python now. Tests run on this Mac once the runner is added.",
       consoleTone: "neutral",
       allowedActions: ["install_pyodide", ...baseActions],
     };
@@ -653,15 +792,17 @@ export function createCodingStudioPlugin({
         <div class="cs-studio" data-cs-root>
           <div class="cs-header">
             <div class="cs-header-left">
-              <span class="practice-kicker">Coding Interview Studio</span>
+              <span class="practice-kicker">Editor</span>
               <span class="cs-status-pill" data-cs-status role="status" aria-live="polite">Ready</span>
             </div>
             <div class="cs-header-actions">
-              <button type="button" class="btn btn-quiet btn-xs" data-cs-hints-toggle>Hints</button>
-              <button type="button" class="btn btn-quiet btn-xs" data-cs-reset title="Restore starter template for this language">Reset Starter</button>
-              <button type="button" class="btn btn-quiet btn-xs" data-cs-run title="Run unit tests (⌘/Ctrl+Enter)">Run Tests</button>
+              <button type="button" class="sd-chip-btn" data-cs-hints-toggle title="Reveal the approach one step at a time">Guided steps</button>
+              <button type="button" class="btn btn-quiet btn-xs sd-review-btn" data-cs-review title="Send your code and latest test results to your interviewer">
+                <svg class="sd-review-glyph" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 1.6l1.5 4.1 4.1 1.5-4.1 1.5L8 12.8 6.5 8.7 2.4 7.2l4.1-1.5z" fill="currentColor"/></svg>
+                <span>Ask AI to review</span>
+              </button>
               <button type="button" class="btn btn-quiet btn-xs cs-cancel-btn hidden" data-cs-cancel title="Cancel active sandbox run">Cancel</button>
-              <button type="button" class="btn btn-ink btn-xs" data-cs-review>Ask AI to review code</button>
+              <button type="button" class="btn btn-primary btn-xs cs-run-btn" data-cs-run title="Run unit tests (⌘/Ctrl+Enter)">Run Tests</button>
             </div>
           </div>
 
@@ -671,16 +812,22 @@ export function createCodingStudioPlugin({
             <div class="cs-lang-group" role="group" aria-label="Programming language">
               ${langBtns}
             </div>
+            <span class="sd-toolbar-spacer" aria-hidden="true"></span>
             <div class="cs-tab-group" role="tablist" aria-label="Editor view">
               <button type="button" role="tab" class="cs-tab-btn active" data-cs-tab="solution">Solution</button>
-              <button type="button" role="tab" class="cs-tab-btn" data-cs-tab="tests">Test Suite</button>
+              <button type="button" role="tab" class="cs-tab-btn" data-cs-tab="tests">Tests</button>
             </div>
+            <button type="button" class="sd-icon-btn" data-cs-reset title="Restore the starter code for this language" aria-label="Restore starter code">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.2 8a4.8 4.8 0 108-3.6M3.2 2.6v3.2h3.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
           </div>
 
           <div class="cs-py-banner hidden" data-cs-py-banner></div>
 
           <div class="cs-editor-wrap">
             <pre class="cs-gutter" data-cs-gutter aria-hidden="true">1</pre>
+            <div class="cs-code-layer">
+            <pre class="cs-highlight" data-cs-highlight aria-hidden="true"></pre>
             <textarea
               class="cs-textarea"
               data-cs-editor
@@ -689,21 +836,38 @@ export function createCodingStudioPlugin({
               autocapitalize="off"
               aria-label="Code editor (press Escape then Tab to move focus out of the editor)"
             ></textarea>
+            </div>
           </div>
-          <div class="cs-editor-hint" data-cs-editor-hint aria-live="polite">Tab indents · Press <strong>Esc</strong> then <strong>Tab</strong> to leave editor · <strong>⌘/Ctrl+Enter</strong> runs tests</div>
+          <div class="cs-editor-hint" data-cs-editor-hint aria-live="polite"><kbd>Tab</kbd> indents · <kbd>Esc</kbd> then <kbd>Tab</kbd> leaves the editor · <kbd>⌘↵</kbd> runs tests</div>
 
           <div class="cs-console" data-cs-console>
             <div class="cs-console-head">
-              <span class="practice-kicker">Test Runner Output</span>
+              <span class="practice-kicker">Test results</span>
               <span class="cs-console-meta" data-cs-console-meta role="status" aria-live="polite">Press Run Tests or ⌘/Ctrl+Enter</span>
             </div>
-            <pre class="cs-console-body" data-cs-console-body></pre>
+            <div class="cs-console-body" data-cs-console-body></div>
           </div>
         </div>
       `;
     }
 
+    function syncHighlight(text) {
+      const layer = q("[data-cs-highlight]");
+      if (!layer) return;
+      const key = `${state.language}\u0000${text}`;
+      if (state.lastHighlightKey === key) return;
+      state.lastHighlightKey = key;
+      // Trailing newline keeps the backdrop's scroll height equal to the textarea's.
+      layer.innerHTML = `${highlightCode(text, state.language)}\n`;
+      const editor = q("[data-cs-editor]");
+      if (editor) {
+        layer.scrollTop = editor.scrollTop;
+        layer.scrollLeft = editor.scrollLeft;
+      }
+    }
+
     function syncGutter(text) {
+      syncHighlight(text);
       const gutter = q("[data-cs-gutter]");
       if (!gutter) return;
       const lines = Math.max(1, (text.match(/\n/g) || []).length + 1);
@@ -720,10 +884,10 @@ export function createCodingStudioPlugin({
       hint.classList.toggle("is-escaped", state.tabEscaped);
       if (state.tabEscaped) {
         hint.innerHTML =
-          "Escape armed — press <strong>Tab</strong> or <strong>Shift+Tab</strong> to move focus out of editor (type any key to resume indenting)";
+          "Press <kbd>Tab</kbd> or <kbd>⇧Tab</kbd> to leave the editor — or keep typing to stay";
       } else {
         hint.innerHTML =
-          "Tab indents · Press <strong>Esc</strong> then <strong>Tab</strong> to leave editor · <strong>⌘/Ctrl+Enter</strong> runs tests";
+          "<kbd>Tab</kbd> indents · <kbd>Esc</kbd> then <kbd>Tab</kbd> leaves the editor · <kbd>⌘↵</kbd> runs tests";
       }
     }
 
@@ -768,8 +932,10 @@ export function createCodingStudioPlugin({
 
       if (btn) {
         btn.textContent = hints.length
-          ? `Hints (${Math.min(state.revealedHints, hints.length)}/${hints.length})`
-          : "Hints";
+          ? `Guided steps ${Math.min(state.revealedHints, hints.length)}/${hints.length}`
+          : "Guided steps";
+        btn.classList.toggle("is-open", !!state.hintsOpen);
+        btn.setAttribute("aria-expanded", state.hintsOpen ? "true" : "false");
       }
       box.classList.toggle("hidden", !state.hintsOpen);
       if (!state.hintsOpen) return;
@@ -784,17 +950,17 @@ export function createCodingStudioPlugin({
       box.innerHTML = `
         <div class="cs-hints-inner">
           <div class="cs-hints-head">
-            <span class="practice-kicker">Progressive Coaching Hints</span>
+            <span class="practice-kicker">Guided steps</span>
             ${
               hasMore
-                ? `<button type="button" class="btn btn-quiet btn-xs" data-cs-reveal-hint>Reveal Hint ${state.revealedHints + 1} of ${hints.length}</button>`
-                : `<span class="cs-hints-done">All ${hints.length} hints revealed</span>`
+                ? `<button type="button" class="btn btn-quiet btn-xs" data-cs-reveal-hint>Reveal step ${state.revealedHints + 1} of ${hints.length}</button>`
+                : `<span class="cs-hints-done">All ${hints.length} steps revealed</span>`
             }
           </div>
           ${
             visible.length
               ? `<ol class="cs-hints-list">${visible.map((h) => `<li>${escapeHtml(h)}</li>`).join("")}</ol>`
-              : `<div class="cs-hints-empty">Try sketching your approach first — reveal a hint only when you want a nudge.</div>`
+              : `<div class="cs-hints-empty">Sketch your approach first — reveal a step only when you want a nudge.</div>`
           }
         </div>
       `;
@@ -813,12 +979,12 @@ export function createCodingStudioPlugin({
       }
       banner.innerHTML = `
         <div class="cs-py-banner-text">
-          <strong>Offline Python runner ${uninstalling ? "is being removed…" : "not installed."}</strong>
-          You can write Python and have the AI review it right now, or install the verified local Pyodide WASM pack (~14 MB) to execute Python unit tests offline.
+          <strong>${uninstalling ? "Removing the Python test runner…" : "Run Python tests on this Mac"}</strong>
+          Add the local Python test runner (14 MB) to run tests offline. You can still write Python and ask for a review right now.
         </div>
         <div class="cs-py-banner-actions">
           <button type="button" class="btn btn-ink btn-xs" data-cs-install-pyodide ${busy ? "disabled" : ""}>
-            ${installing ? "Downloading Pyodide…" : uninstalling ? "Removing Pyodide…" : "Install Offline Python (~14 MB)"}
+            ${installing ? "Downloading…" : uninstalling ? "Removing…" : "Add Python runner"}
           </button>
           <button type="button" class="btn btn-quiet btn-xs" data-cs-switch-js ${busy ? "disabled" : ""}>
             Switch to JavaScript
@@ -880,15 +1046,38 @@ export function createCodingStudioPlugin({
         derived.status === "saved"
       ) {
         const currentRes = getMatchingResult(state.language);
-        const parts = [];
-        if (currentRes?.stdout) parts.push(currentRes.stdout);
-        if (currentRes?.error) parts.push(currentRes.error);
-        body.textContent =
-          parts.join("\n\n").trim() || currentRes?.summary || derived.consoleBodyDefault;
+        const digest = summarizeTestOutput({
+          stdout: currentRes?.stdout || "",
+          error: currentRes?.error || "",
+        });
+        if (!digest.rows.length && !digest.rawTrace) {
+          renderConsolePlain(body, currentRes?.summary || derived.consoleBodyDefault);
+          return;
+        }
+        const marks = { pass: "✓", fail: "✕", info: "·", detail: "" };
+        const labels = { pass: "Pass", fail: "Fail", info: "", detail: "" };
+        const rowsHtml = digest.rows
+          .map(
+            (r) =>
+              `<li class="cs-out-row is-${r.tone}${r.summary ? " is-summary" : ""}">
+                 <span class="cs-out-mark" aria-hidden="true">${marks[r.tone] ?? ""}</span>
+                 ${labels[r.tone] ? `<span class="cs-out-label">${labels[r.tone]}</span>` : ""}
+                 <span class="cs-out-text">${escapeHtml(r.text)}</span>
+               </li>`
+          )
+          .join("");
+        const traceHtml = digest.rawTrace
+          ? `<details class="cs-raw-trace"><summary>Show raw trace</summary><pre>${escapeHtml(digest.rawTrace)}</pre></details>`
+          : "";
+        body.innerHTML = `${rowsHtml ? `<ul class="cs-out-rows">${rowsHtml}</ul>` : ""}${traceHtml}`;
         return;
       }
 
-      body.textContent = derived.consoleBodyDefault;
+      renderConsolePlain(body, derived.consoleBodyDefault);
+    }
+
+    function renderConsolePlain(body, text) {
+      body.innerHTML = `<p class="cs-out-empty">${escapeHtml(text || "")}</p>`;
     }
 
     function renderAll(opts = {}) {
@@ -1274,6 +1463,11 @@ export function createCodingStudioPlugin({
       if (!ev.target.matches("[data-cs-editor]")) return;
       const gutter = q("[data-cs-gutter]");
       if (gutter) gutter.scrollTop = ev.target.scrollTop;
+      const layer = q("[data-cs-highlight]");
+      if (layer) {
+        layer.scrollTop = ev.target.scrollTop;
+        layer.scrollLeft = ev.target.scrollLeft;
+      }
     }
 
     function onFocusOut(ev) {
