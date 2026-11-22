@@ -10,6 +10,7 @@ from typing import Any
 from mockery.llm import _extract_json_object
 from mockery.prompts import (
     practice_tone_instruction,
+    probe_guidance_for,
     render_prompt,
     triage_diarize_rules,
     validate_prompt_template,
@@ -18,6 +19,9 @@ from mockery.prompts import (
 TARGET_TO_PROMPT_NAME: dict[str, str] = {
     "triage_window": "triage_window",
     "practice_interviewer": "practice_interviewer_reply",
+    "suggest_probes": "suggest_probes",
+    "practice_retry_eval": "practice_retry_eval",
+    "practice_hint": "practice_hint",
 }
 
 CARL_DIMS: tuple[str, ...] = ("context", "action", "result", "learning")
@@ -141,6 +145,24 @@ def validate_dataset(target: str, rows: list[dict[str, Any]]) -> None:
                 exp_carl.get(d) not in CARL_RANK for d in CARL_DIMS
             ):
                 raise ValueError(f"Row {row_id!r} requires valid `expected.expected_carl` for all 4 CARL dims.")
+        elif target == "suggest_probes":
+            for req_str in ("interview_type", "role_title", "card_title", "transcript"):
+                if not isinstance(row.get(req_str), str) or not row[req_str].strip():
+                    raise ValueError(f"Row {row_id!r} requires non-empty string `{req_str}`.")
+        elif target == "practice_retry_eval":
+            for req_str in ("role_title", "target_level", "drill_focus", "drill_prompt", "original_answer", "retry_answer"):
+                if not isinstance(row.get(req_str), str) or not row[req_str].strip():
+                    raise ValueError(f"Row {row_id!r} requires non-empty string `{req_str}`.")
+            exp_ca = expected.get("expected_carl_after")
+            if not isinstance(exp_ca, dict) or any(exp_ca.get(d) not in CARL_RANK for d in CARL_DIMS):
+                raise ValueError(f"Row {row_id!r} requires valid `expected.expected_carl_after` for all 4 CARL dims.")
+        elif target == "practice_hint":
+            for req_str in ("interview_type", "target_level"):
+                if not isinstance(row.get(req_str), str) or not row[req_str].strip():
+                    raise ValueError(f"Row {row_id!r} requires non-empty string `{req_str}`.")
+            cur_q = row.get("current_question")
+            if not isinstance(cur_q, dict) or not isinstance(cur_q.get("prompt"), str) or not cur_q["prompt"].strip():
+                raise ValueError(f"Row {row_id!r} requires `current_question.prompt`.")
 
 
 def split_dataset(
@@ -198,6 +220,17 @@ def render_system_prompt_for_example(
             target_level=str(example.get("target_level") or "Senior (L5)"),
             tone_instruction=practice_tone_instruction(coach_style),
         )
+    if target == "suggest_probes":
+        interview_type = str(example.get("interview_type") or "behavioral")
+        return render_prompt(
+            "suggest_probes",
+            override_text=override_text,
+            probe_guidance=probe_guidance_for(interview_type),
+        )
+    if target == "practice_retry_eval":
+        return render_prompt("practice_retry_eval", override_text=override_text)
+    if target == "practice_hint":
+        return render_prompt("practice_hint", override_text=override_text)
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 
@@ -264,11 +297,70 @@ def build_practice_interviewer_user_prompt(example: dict[str, Any]) -> str:
     )
 
 
+def build_suggest_probes_user_prompt(example: dict[str, Any]) -> str:
+    """Matches the exact user prompt built by InterviewCopilotLLM.suggest_probes."""
+    already_asked = list(example.get("already_asked") or [])
+    prior_suggested = list(example.get("prior_suggested") or [])
+    do_not_repeat = (already_asked[-6:] + prior_suggested[-6:])[-10:]
+    avoid_block = ""
+    if do_not_repeat:
+        avoid_block = (
+            "\nQuestions already asked or suggested (DO NOT repeat or paraphrase these):\n- "
+            + "\n- ".join(do_not_repeat)
+        )
+    return (
+        f"Target Role: {example.get('role_title')} | Focus: {example.get('interview_type')}\n"
+        f"Rubric Context: {example.get('rubric_notes') or 'Standard pragmatic engineering bar'}\n\n"
+        f"Active Card ({example.get('card_badge', 'Q1')}: {example.get('card_title')}):\n{example.get('transcript')}"
+        f"{avoid_block}"
+    )
+
+
+def build_practice_retry_eval_user_prompt(example: dict[str, Any]) -> str:
+    """Matches the exact user prompt built by InterviewCopilotLLM.evaluate_practice_retry."""
+    return (
+        f"Role: {example.get('role_title')} ({example.get('target_level')})\n"
+        f"Retry Drill Focus: {example.get('drill_focus')}\nDrill Prompt: {example.get('drill_prompt')}\n\n"
+        f"Original Answer:\n{str(example.get('original_answer') or '')[:2500]}\n\n"
+        f"45-Second Retry Answer:\n{str(example.get('retry_answer') or '')[:2500]}"
+    )
+
+
+def build_practice_hint_user_prompt(example: dict[str, Any]) -> str:
+    """Matches the exact user prompt built by InterviewCopilotLLM.generate_practice_hint."""
+    current_question = example.get("current_question") or {}
+    recent_turns = example.get("recent_turns") or []
+    history = "\n".join(
+        f"{str(t.get('role', '')).upper()}: {t.get('text', '')}"
+        for t in recent_turns[-5:]
+        if t.get("role") in ("interviewer", "candidate")
+    )
+    ws_note = ""
+    ws = example.get("workspace_context")
+    if isinstance(ws, dict):
+        if ws.get("diagram_summary"):
+            ws_note += f"\nCurrent diagram:\n{str(ws['diagram_summary'])[:1500]}"
+        if ws.get("code"):
+            ws_note += f"\nCurrent code:\n{str(ws['code'])[:1500]}"
+    return (
+        f"Format: {example.get('interview_type')} ({example.get('target_level')})\n"
+        f"Question: {current_question.get('prompt')}\n"
+        f"Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
+        f"Recent exchange:\n{history}{ws_note}"
+    )
+
+
 def build_user_prompt_for_example(target: str, example: dict[str, Any]) -> str:
     if target == "triage_window":
         return build_triage_user_prompt(example)
     if target == "practice_interviewer":
         return build_practice_interviewer_user_prompt(example)
+    if target == "suggest_probes":
+        return build_suggest_probes_user_prompt(example)
+    if target == "practice_retry_eval":
+        return build_practice_retry_eval_user_prompt(example)
+    if target == "practice_hint":
+        return build_practice_hint_user_prompt(example)
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 
@@ -860,6 +952,390 @@ def score_practice_interviewer_reply(
     }
 
 
+_PRONOUN_POLICE_RE = re.compile(
+    r"(?:you\s+said\s+['\"]?we['\"]?|['\"]?i['\"]?\s+(?:vs\.?|versus)\s+['\"]?we['\"]?|stop\s+saying\s+['\"]?we['\"]?|instead\s+of\s+['\"]?we['\"]?)",
+    re.I,
+)
+_MATH_PEDANTRY_RE = re.compile(
+    r"(?:back[- ]of[- ]the[- ]envelope|exact\s+(?:bytes|qps|bandwidth|storage)\s+calculation|calculate\s+the\s+exact)",
+    re.I,
+)
+
+
+def _token_jaccard(a: str, b: str) -> float:
+    sa = {w for w in _word_tokens(a) if len(w) >= 3}
+    sb = {w for w in _word_tokens(b) if len(w) >= 3}
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def score_suggest_probes(
+    raw_output: str,
+    example: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    """Deterministic scorer for Live Copilot `suggest_probes`."""
+    failures: list[str] = []
+    suggestions: list[str] = []
+
+    parsed, json_score, json_note = _parse_json_with_strictness(raw_output)
+    if json_note:
+        failures.append(json_note)
+        if parsed is not None:
+            suggestions.append("Emit raw JSON only without markdown fences or preamble.")
+    if parsed is None:
+        return 0.0, {
+            "example_id": example.get("id"),
+            "subscores": {"json_validity": 0.0},
+            "failures": failures,
+            "suggestions": ["Require strict JSON object matching quick_read + 3 probes."],
+        }
+
+    expected = example.get("expected") or {}
+    raw_qr = parsed.get("quick_read")
+    raw_probes = parsed.get("probes")
+    qr = raw_qr.strip() if isinstance(raw_qr, str) else ""
+    qr_ok = isinstance(raw_qr, str) and 5 <= len(qr.split()) <= 32 and _count_sentences(qr) <= 2
+
+    valid_probes: list[dict[str, str]] = []
+    if isinstance(raw_probes, list):
+        for p in raw_probes:
+            if (
+                isinstance(p, dict)
+                and isinstance(p.get("angle"), str)
+                and isinstance(p.get("question"), str)
+                and isinstance(p.get("why"), str)
+                and p["angle"].strip()
+                and p["question"].strip()
+                and p["why"].strip()
+            ):
+                valid_probes.append(
+                    {
+                        "angle": p["angle"].strip(),
+                        "question": p["question"].strip(),
+                        "why": p["why"].strip(),
+                    }
+                )
+
+    count_ok = isinstance(raw_probes, list) and len(raw_probes) == 3 and len(valid_probes) == 3
+    if not qr_ok:
+        failures.append(f"`quick_read` should be 1 crisp sentence (5-32 words), got {len(qr.split())} words.")
+        suggestions.append("Keep `quick_read` to 1 crisp sentence summarizing what's solid vs where to probe next.")
+    if not count_ok:
+        failures.append(f"Expected exactly 3 valid probe objects, got {len(valid_probes)}.")
+        suggestions.append("Always return exactly 3 probes, each with non-empty `angle`, `question`, and `why`.")
+
+    schema_score = (0.35 if qr_ok else 0.0) + (0.65 if count_ok else 0.25 * min(3, len(valid_probes)) / 3.0)
+
+    # Conciseness & question form (angle 1-4 words, question <= 24 words ending with ?, why <= 16 words)
+    concise_pts: list[float] = []
+    for idx, p in enumerate(valid_probes, 1):
+        a_w = len(p["angle"].split())
+        q_w = len(p["question"].split())
+        w_w = len(p["why"].split())
+        a_ok = 1 <= a_w <= 4
+        q_ok = 5 <= q_w <= 24 and p["question"].endswith("?")
+        w_ok = 3 <= w_w <= 16
+        if not a_ok:
+            failures.append(f"Probe {idx} `angle` ({a_w} words) should be 1-4 words: {p['angle']!r}.")
+        if not q_ok:
+            failures.append(f"Probe {idx} `question` ({q_w} words) must be <=24 words ending in '?': {p['question']!r}.")
+            suggestions.append("Keep every probe `question` natural, under 24 words, and ending with a question mark.")
+        if not w_ok:
+            failures.append(f"Probe {idx} `why` ({w_w} words) should be 3-16 words.")
+        concise_pts.append((0.25 if a_ok else 0.0) + (0.50 if q_ok else 0.0) + (0.25 if w_ok else 0.0))
+    concise_score = sum(concise_pts) / max(3, len(concise_pts)) if concise_pts else 0.0
+
+    # Non-repetition against already_asked / prior_suggested AND probe-to-probe diversity
+    forbid_list = [str(x) for x in (expected.get("forbid_repeat_of") or []) if str(x).strip()]
+    repeat_hits = 0
+    for idx, p in enumerate(valid_probes, 1):
+        for prev in forbid_list:
+            if _token_jaccard(p["question"], prev) >= 0.48:
+                repeat_hits += 1
+                failures.append(f"Probe {idx} repeats already-asked/prior question: {p['question']!r} ~ {prev!r}.")
+                suggestions.append("Check `Questions already asked or suggested` carefully and never repeat or closely paraphrase them.")
+                break
+    # Check pairwise diversity among the 3 probes
+    dup_pair = False
+    for i in range(len(valid_probes)):
+        for j in range(i + 1, len(valid_probes)):
+            if _token_jaccard(valid_probes[i]["question"], valid_probes[j]["question"]) >= 0.55:
+                dup_pair = True
+                failures.append(f"Probes {i+1} and {j+1} overlap too closely.")
+    novelty_score = max(0.0, 1.0 - 0.35 * repeat_hits - (0.25 if dup_pair else 0.0)) if valid_probes else 0.0
+
+    # Grounding in concrete transcript details
+    all_text = (qr + " " + " ".join(f"{p['angle']} {p['question']} {p['why']}" for p in valid_probes)).lower()
+    must_ref = [str(k).lower() for k in (expected.get("must_reference_any") or []) if str(k).strip()]
+    hits = sum(1 for tok in must_ref if tok in all_text)
+    if must_ref:
+        grounding_score = 1.0 if hits >= 2 else (0.6 if hits == 1 else 0.0)
+        if hits < 2:
+            failures.append(f"Probes weakly grounded in transcript details (matched {hits} of {must_ref[:6]}).")
+            suggestions.append("Anchor probes in specific systems, mechanisms, or claims the candidate just mentioned.")
+    else:
+        grounding_score = 1.0 if valid_probes else 0.0
+
+    # Naturalness guards: no pronoun policing, no arithmetic pedantry on system design
+    guard_ok = 1.0
+    if expected.get("forbid_pronoun_policing") and _PRONOUN_POLICE_RE.search(all_text):
+        guard_ok -= 0.6
+        failures.append("Pronoun-policing phrasing ('I' vs 'we') detected.")
+        suggestions.append("Never lecture or quiz the candidate about using 'we' instead of 'I'.")
+    if expected.get("forbid_arithmetic_pedantry") and _MATH_PEDANTRY_RE.search(all_text):
+        guard_ok -= 0.5
+        failures.append("Forced back-of-the-envelope arithmetic pedantry detected on System Design.")
+        suggestions.append("Focus System Design probes on bottlenecks, tradeoffs, and failure modes—not whiteboard arithmetic.")
+    guard_score = max(0.0, guard_ok)
+
+    subscores = {
+        "json_validity": round(json_score, 4),
+        "schema": round(schema_score, 4),
+        "conciseness": round(concise_score, 4),
+        "novelty": round(novelty_score, 4),
+        "grounding": round(grounding_score, 4),
+        "naturalness_guards": round(guard_score, 4),
+    }
+    total = (
+        0.10 * subscores["json_validity"]
+        + 0.15 * subscores["schema"]
+        + 0.25 * subscores["conciseness"]
+        + 0.20 * subscores["novelty"]
+        + 0.18 * subscores["grounding"]
+        + 0.12 * subscores["naturalness_guards"]
+    )
+    return round(max(0.0, min(1.0, total)), 4), {
+        "example_id": example.get("id"),
+        "subscores": subscores,
+        "failures": failures,
+        "suggestions": list(dict.fromkeys(suggestions)),
+    }
+
+
+def score_practice_retry_eval(
+    raw_output: str,
+    example: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    """Deterministic scorer for 45-second `practice_retry_eval` with anti-sycophancy grading checks."""
+    failures: list[str] = []
+    suggestions: list[str] = []
+
+    parsed, json_score, json_note = _parse_json_with_strictness(raw_output)
+    if json_note:
+        failures.append(json_note)
+        if parsed is not None:
+            suggestions.append("Emit raw JSON only without markdown fences or prose.")
+    if parsed is None:
+        return 0.0, {
+            "example_id": example.get("id"),
+            "subscores": {"json_validity": 0.0},
+            "failures": failures,
+            "suggestions": ["Require strict JSON object matching practice_retry_eval schema."],
+        }
+
+    expected = example.get("expected") or {}
+    raw_enc = parsed.get("encouragement")
+    raw_imp = parsed.get("what_improved")
+    raw_pol = parsed.get("one_more_polish")
+    raw_ca = parsed.get("carl_after") if isinstance(parsed.get("carl_after"), dict) else {}
+
+    enc = raw_enc.strip() if isinstance(raw_enc, str) else ""
+    imp = raw_imp.strip() if isinstance(raw_imp, str) else ""
+    pol = raw_pol.strip() if isinstance(raw_pol, str) else ""
+
+    carl_valid = sum(
+        1 for d in CARL_DIMS if isinstance(raw_ca.get(d), str) and raw_ca[d].strip().lower() in CARL_RANK
+    )
+    schema_checks = [
+        isinstance(raw_enc, str) and bool(enc),
+        isinstance(raw_imp, str) and bool(imp),
+        isinstance(raw_pol, str),
+        carl_valid == 4,
+    ]
+    schema_score = sum(1.0 for ok in schema_checks if ok) / len(schema_checks)
+    if not schema_checks[0]:
+        failures.append("Missing or non-string `encouragement`.")
+    if not schema_checks[1]:
+        failures.append("Missing or non-string `what_improved`.")
+    if not schema_checks[2]:
+        failures.append("`one_more_polish` must be a string.")
+    if carl_valid < 4:
+        failures.append(f"`carl_after` invalid/missing dimensions ({carl_valid}/4).")
+
+    # CARL accuracy + anti-sycophancy check (penalize falsely inflating a missing/partial dim to strong!)
+    exp_ca = expected.get("expected_carl_after") or {}
+    must_not_inflate = set(expected.get("must_not_inflate") or [])
+    acc_pts: list[float] = []
+    inflated: list[str] = []
+    for dim in CARL_DIMS:
+        pv = raw_ca.get(dim).strip().lower() if isinstance(raw_ca.get(dim), str) else ""
+        ev = str(exp_ca.get(dim, "missing")).strip().lower()
+        if pv not in CARL_RANK:
+            acc_pts.append(0.0)
+            continue
+        diff = abs(CARL_RANK[pv] - CARL_RANK[ev])
+        if diff == 0:
+            acc_pts.append(1.0)
+        elif diff == 1:
+            acc_pts.append(0.5)
+            failures.append(f"`carl_after.{dim}` slightly off: expected {ev!r}, got {pv!r}.")
+        else:
+            acc_pts.append(0.0)
+            failures.append(f"`carl_after.{dim}` far off: expected {ev!r}, got {pv!r}.")
+        if dim in must_not_inflate and CARL_RANK[pv] > CARL_RANK[ev]:
+            inflated.append(f"{dim}: expected {ev}, falsely upgraded to {pv}")
+
+    carl_acc = sum(acc_pts) / len(CARL_DIMS)
+    sycophancy_mult = 1.0 if not inflated else max(0.0, 1.0 - 0.45 * len(inflated))
+    if inflated:
+        failures.append("Sycophantic CARL inflation on unimproved dimension(s): " + ", ".join(inflated))
+        suggestions.append(
+            "Grade `carl_after` honestly from actual evidence in the retry text—never inflate a missing or vague dimension to `strong` just to be polite."
+        )
+    carl_score = carl_acc * sycophancy_mult
+
+    # Conciseness & grounding in actual before-vs-after diff
+    combined = f"{enc} {imp} {pol}"
+    enc_ok = bool(enc) and _count_sentences(enc) <= 2 and len(enc.split()) <= 40
+    imp_ok = bool(imp) and _count_sentences(imp) <= 2 and len(imp.split()) <= 50
+    pol_ok = (not pol) or (_count_sentences(pol) <= 2 and len(pol.split()) <= 40)
+    if enc and not enc_ok:
+        failures.append(f"`encouragement` too verbose ({len(enc.split())} words, {_count_sentences(enc)} sentences).")
+    if imp and not imp_ok:
+        failures.append(f"`what_improved` too verbose ({len(imp.split())} words, {_count_sentences(imp)} sentences).")
+    if pol and not pol_ok:
+        failures.append(f"`one_more_polish` too verbose ({len(pol.split())} words, {_count_sentences(pol)} sentences).")
+
+    must_ref = [str(k).lower() for k in (expected.get("must_reference_any") or []) if str(k).strip()]
+    low = combined.lower()
+    grounded = (not must_ref) or any(tok in low for tok in must_ref)
+    if not grounded:
+        failures.append(f"Retry feedback not grounded in actual retry details (expected one of {must_ref[:6]}).")
+        suggestions.append("Cite concrete details from the candidate's retry (metrics, actions, or missing gaps) in `what_improved` and `one_more_polish`.")
+
+    style_grounding = (
+        (0.45 if grounded else 0.0)
+        + (0.20 if enc_ok else 0.0)
+        + (0.20 if imp_ok else 0.0)
+        + (0.15 if pol_ok else 0.0)
+    )
+
+    harsh_hits = [pat.pattern for pat in HARSH_TONE_PATTERNS if pat.search(combined)]
+    if harsh_hits:
+        failures.append(f"Harsh tone detected: {harsh_hits}")
+        suggestions.append("Stay warm and constructive even when a dimension is still missing.")
+    tone_score = 0.0 if (harsh_hits or not enc) else 1.0
+
+    subscores = {
+        "json_validity": round(json_score, 4),
+        "schema": round(schema_score, 4),
+        "carl_honesty": round(carl_score, 4),
+        "grounding_and_style": round(style_grounding, 4),
+        "tone": round(tone_score, 4),
+    }
+    total = (
+        0.10 * subscores["json_validity"]
+        + 0.15 * subscores["schema"]
+        + 0.40 * subscores["carl_honesty"]
+        + 0.22 * subscores["grounding_and_style"]
+        + 0.13 * subscores["tone"]
+    )
+    return round(max(0.0, min(1.0, total)), 4), {
+        "example_id": example.get("id"),
+        "subscores": subscores,
+        "failures": failures,
+        "suggestions": list(dict.fromkeys(suggestions)),
+    }
+
+
+def score_practice_hint(
+    raw_output: str,
+    example: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    """Deterministic scorer for plain-text 2-sentence whisper `practice_hint` with strict no-spoiler guard."""
+    failures: list[str] = []
+    suggestions: list[str] = []
+
+    text = (raw_output or "").strip()
+    if not text:
+        return 0.0, {
+            "example_id": example.get("id"),
+            "subscores": {"format": 0.0},
+            "failures": ["Empty hint output."],
+            "suggestions": ["Return 1-2 warm plain-text coaching sentences."],
+        }
+
+    expected = example.get("expected") or {}
+
+    # 1. Plain text only (no JSON object, no markdown headers/fences/bullets)
+    looks_json = text.startswith("{") and text.endswith("}")
+    has_md = bool(re.search(r"(^|\n)\s*(#{1,6}\s|```|[-*]\s)", text))
+    format_score = 1.0
+    if looks_json:
+        format_score = 0.0
+        failures.append("Hint emitted JSON instead of plain text.")
+        suggestions.append("Output plain conversational text only—never JSON or markdown.")
+    elif has_md:
+        format_score = 0.4
+        failures.append("Hint contained markdown headers, code fences, or bullet lists.")
+        suggestions.append("Emit plain whisper prose with no markdown headers, code fences, or bullet points.")
+
+    # 2. Brevity: 1-2 sentences, 12-55 words
+    wc = len(text.split())
+    sc = _count_sentences(text)
+    len_ok = 12 <= wc <= 55
+    sent_ok = 1 <= sc <= 2
+    if not len_ok:
+        failures.append(f"Hint word count ({wc}) out of 12-55 word whisper budget.")
+        suggestions.append("Keep whisper hints tight (1-2 crisp sentences, ~20-45 words).")
+    if not sent_ok:
+        failures.append(f"Hint has {sc} sentences (expected 1-2 sentences).")
+        suggestions.append("Limit whisper hints strictly to 1-2 sentences.")
+    brevity_score = (0.5 if len_ok else 0.1) + (0.5 if sent_ok else 0.0)
+
+    # 3. Grounding in candidate's current situation/workspace
+    low = text.lower()
+    must_ref = [str(k).lower() for k in (expected.get("must_reference_any") or []) if str(k).strip()]
+    grounded = (not must_ref) or any(tok in low for tok in must_ref)
+    if not grounded:
+        failures.append(f"Hint did not ground in candidate's current block (expected one of {must_ref[:6]}).")
+        suggestions.append("Reference what the candidate has tried or where they are stuck before nudging next step.")
+    grounding_score = 1.0 if grounded else 0.0
+
+    # 4. Strict no-spoiler + warm tone guard
+    harsh_hits = [pat.pattern for pat in HARSH_TONE_PATTERNS if pat.search(text)]
+    forbidden = [str(s) for s in (expected.get("forbidden_spoilers") or []) if str(s).strip()]
+    spoiler_hits = [s for s in forbidden if s.lower() in low]
+    if harsh_hits:
+        failures.append(f"Harsh phrasing detected: {harsh_hits}")
+    if spoiler_hits:
+        failures.append(f"Hint spoiled the solution/data-structure/code: {spoiler_hits}")
+        suggestions.append(
+            "NEVER name the exact data structure, algorithm, library, or code fix—ask a guiding question about the invariant or bottleneck instead."
+        )
+    safety_score = 0.0 if (harsh_hits or spoiler_hits) else 1.0
+
+    subscores = {
+        "plain_text_format": round(format_score, 4),
+        "brevity": round(brevity_score, 4),
+        "grounding": round(grounding_score, 4),
+        "no_spoiler_and_tone": round(safety_score, 4),
+    }
+    total = (
+        0.18 * subscores["plain_text_format"]
+        + 0.24 * subscores["brevity"]
+        + 0.23 * subscores["grounding"]
+        + 0.35 * subscores["no_spoiler_and_tone"]
+    )
+    return round(max(0.0, min(1.0, total)), 4), {
+        "example_id": example.get("id"),
+        "subscores": subscores,
+        "failures": failures,
+        "suggestions": list(dict.fromkeys(suggestions)),
+    }
+
+
 def score_example(
     target: str,
     raw_output: str,
@@ -869,4 +1345,10 @@ def score_example(
         return score_triage_window(raw_output, example)
     if target == "practice_interviewer":
         return score_practice_interviewer_reply(raw_output, example)
+    if target == "suggest_probes":
+        return score_suggest_probes(raw_output, example)
+    if target == "practice_retry_eval":
+        return score_practice_retry_eval(raw_output, example)
+    if target == "practice_hint":
+        return score_practice_hint(raw_output, example)
     raise ValueError(f"Unsupported eval target: {target!r}")
