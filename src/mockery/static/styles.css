@@ -8538,6 +8538,207 @@ label.addon-row {
   white-space: nowrap;
 }
 
+/* ---- Round 3 micro-polish: alignment, hierarchy, and two-voice type --------- */
+
+/* Privacy banner: the shield hangs from the title line, the title never wraps,
+   and the action keeps its own width instead of squeezing the copy. */
+.rampart-banner {
+  align-items: flex-start;
+  padding: 12px 14px 12px 15px;
+}
+
+.rampart-banner-glyph {
+  margin-top: 1px;
+}
+
+.rampart-banner-title > span:first-child {
+  white-space: nowrap;
+}
+
+.rampart-banner > .btn {
+  flex-shrink: 0;
+  align-self: center;
+  white-space: nowrap;
+}
+
+/* Resume controls sit a little closer, so more of the preview clears the fold. */
+.profile-tab-panel {
+  gap: 13px;
+}
+
+.resume-header-bar {
+  padding-bottom: 10px;
+}
+
+.redaction-controls {
+  gap: 8px 22px;
+  padding: 0;
+}
+
+.redaction-section-label {
+  margin-top: 6px;
+}
+
+/* Question banks: title leads, pills support, the prompt reads as detail. */
+.bank-item {
+  padding: 16px 0;
+}
+
+.bank-item-title {
+  font-size: 15.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.006em;
+}
+
+.bank-item-prompt {
+  margin-top: 8px;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+/* Settings: "Installed · Remove" ends on the same edge as the Install buttons. */
+.addon-remove-btn {
+  margin-right: -8px;
+}
+
+/* Dialogs: a longer, eased fade, so a half-scrolled row dissolves into the footer
+   rule. The overlap keeps the resting bottom padding exactly where it was. */
+#settingsModal .modal-body::after,
+#profileModal .modal-body::after,
+#onboardingModal .modal-body::after {
+  height: 42px;
+  margin-top: -16px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--raised) 30%, transparent) 38%,
+    color-mix(in srgb, var(--raised) 78%, transparent) 70%,
+    var(--raised)
+  );
+}
+
+/* Onboarding footer: both actions end on the body column's edges. A ghost button
+   has no visible box, so its label — not its padding — meets the left edge. */
+.onboard-footer {
+  padding-right: 26px;
+}
+
+.onboard-footer-left > .btn-ghost {
+  margin-left: -10px;
+}
+
+/* Score in flight: the last reading steps back until the new one lands. */
+.practice-carl-score {
+  transition: color 0.2s ease;
+}
+
+.practice-meter-card .carl-meter-grid {
+  transition: opacity 0.2s ease;
+}
+
+.practice-meter-card.is-updating .practice-carl-score {
+  color: var(--ink-3);
+}
+
+.practice-meter-card.is-updating .carl-meter-grid {
+  opacity: 0.58;
+}
+
+/* Split studio: the conversation column gets a readable measure. Coding can
+   spare more width than the whiteboard, whose canvas scales with its pane. */
+.practice-workspace[data-studio] .practice-main {
+  grid-template-columns: minmax(300px, 30%) minmax(0, 1fr);
+}
+
+.practice-workspace[data-studio="coding"] .practice-main {
+  grid-template-columns: minmax(320px, 34%) minmax(0, 1fr);
+}
+
+/* The fade matches the top padding exactly, so a scrolled prompt dissolves under
+   the bar while nothing is dimmed at rest. */
+.practice-workspace[data-studio] .practice-feed {
+  gap: 18px;
+  padding: 26px 18px 20px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.5) 11px, #000 26px);
+  mask-image: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.5) 11px, #000 26px);
+}
+
+.practice-workspace[data-studio] .pturn-head {
+  margin-bottom: 5px;
+}
+
+.practice-workspace[data-studio] .pturn-serif {
+  font-size: 15.5px;
+  line-height: 1.55;
+}
+
+.practice-workspace[data-studio] .pturn-candidate {
+  padding: 11px 14px 12px;
+}
+
+.practice-workspace[data-studio] .pturn-candidate .pturn-body {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* Whiteboard: the artboard keeps its exact drawable shape; when the pane is
+   taller than it needs, tools + board + hint sit framed in the middle instead of
+   leaving one void underneath. Auto margins collapse to nothing when space is tight. */
+.practice-studio-slot > .sd-studio > .sd-toolbar {
+  margin-top: auto;
+}
+
+.practice-studio-slot > .sd-studio > .sd-inspector {
+  margin-bottom: auto;
+}
+
+.practice-studio-slot > .sd-studio > .sd-canvas-wrap {
+  margin-inline: auto;
+  width: 100%;
+}
+
+/* Debrief: a compact opening, sentence-case headings, and one voice per speaker —
+   the candidate's own words are always sans, the coach's are serif. */
+.debrief-hero {
+  padding-bottom: 26px;
+}
+
+.debrief-encouragement {
+  max-width: 36em;
+  margin-top: 10px;
+  font-size: 21px;
+  line-height: 1.38;
+}
+
+.debrief-primer {
+  margin-top: 10px;
+}
+
+.debrief-hero-actions {
+  margin-top: 18px;
+}
+
+.practice-debrief-content {
+  gap: 30px;
+}
+
+.retry-quote {
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+  line-height: 1.62;
+  letter-spacing: 0;
+}
+
+/* After a scored retry, another rep is an invitation, not an open task. */
+.retry-again-hint {
+  margin: 2px 0 -6px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
 /* ---- Narrow windows (re-stated: the rules above changed the base grid) ------ */
 
 @media (max-width: 1180px) {

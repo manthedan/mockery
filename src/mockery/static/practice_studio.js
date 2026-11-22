@@ -1717,6 +1717,13 @@ export function createPracticeStudioController({
     const msgEl = el("practiceCoachMessage");
     const card = toneEl?.closest(".practice-coach-card") || msgEl?.closest(".practice-coach-card");
     if (card) card.classList.toggle("is-thinking", Boolean(active));
+    // While a new evaluation is in flight, the score on screen is the previous reading.
+    const meterCard = el("practiceMeterCard");
+    if (meterCard) {
+      meterCard.classList.toggle("is-updating", Boolean(active));
+      if (active) meterCard.setAttribute("aria-busy", "true");
+      else meterCard.removeAttribute("aria-busy");
+    }
     if (active) {
       if (toneEl) toneEl.textContent = toneText;
       if (msgEl && messageText) msgEl.textContent = messageText;
@@ -1745,7 +1752,7 @@ export function createPracticeStudioController({
       setButtonLoading("practiceDebriefBtn", false, null, "End & Debrief");
       setCoachRailThinking(false);
     }
-    setButtonLoading("practiceRetrySubmitBtn", false, null, "Evaluate Retry");
+    setButtonLoading("practiceRetrySubmitBtn", false, null, "Evaluate retry");
   }
 
   function startPendingTimer(onTick, startedAtMs = Date.now()) {
@@ -2621,7 +2628,7 @@ export function createPracticeStudioController({
             drill.prompt
               ? retries.length > 0
                 ? `<button type="button" class="btn btn-outline btn-sm" data-jump-retry>View your retry ↓</button>`
-                : `<button type="button" class="btn btn-primary btn-sm" data-jump-retry>Jump to 45s Retry Drill ↓</button>`
+                : `<button type="button" class="btn btn-primary btn-sm" data-jump-retry>Jump to 45s retry drill ↓</button>`
               : ""
           }
           <span class="debrief-hero-score">
@@ -2634,7 +2641,7 @@ export function createPracticeStudioController({
       ${
         strengths.length > 0
           ? `<section class="debrief-section">
-              <h3 class="debrief-section-title">What You Did Well</h3>
+              <h3 class="debrief-section-title">What you did well</h3>
               <ul class="debrief-strengths">
                 ${strengths.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}
               </ul>
@@ -2645,7 +2652,7 @@ export function createPracticeStudioController({
       ${
         reviews.length > 0
           ? `<section class="debrief-section">
-              <h3 class="debrief-section-title">Question-by-Question Breakdown</h3>
+              <h3 class="debrief-section-title">Question-by-question breakdown</h3>
               <div class="debrief-q-list">
                 ${reviews
                   .map((qr, idx) => {
@@ -2700,6 +2707,9 @@ export function createPracticeStudioController({
       if (el("practiceRetryPrompt")) {
         el("practiceRetryPrompt").textContent = drill.prompt;
       }
+      // Once a retry is scored, the composer above it becomes an optional next rep.
+      retryCard.classList.toggle("has-retries", retries.length > 0);
+      el("practiceRetryAgainHint")?.classList.toggle("hidden", retries.length === 0);
       const histEl = el("practiceRetryHistory");
       if (histEl) {
         let before = originalQuestionSignals(sess, drillIdx);

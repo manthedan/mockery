@@ -656,6 +656,7 @@
                   </div>
                 </div>
                 <p id="practiceRetryPrompt" class="practice-retry-prompt"></p>
+                <p id="practiceRetryAgainHint" class="retry-again-hint hidden">Want another rep? Speak or type below</p>
                 <div class="practice-composer-input-row composer-dock retry-dock">
                   <button id="practiceRetryMicBtn" class="practice-mic-btn mic-hero" type="button" title="Speak your retry — the countdown starts when you do">
                     <span class="mic-orb" aria-hidden="true">
@@ -673,7 +674,7 @@
                     rows="2"
                     placeholder="Say the stronger version, or type it here…"
                   ></textarea>
-                  <button id="practiceRetrySubmitBtn" class="btn btn-primary practice-send-btn retry-submit-btn" type="button">Evaluate Retry</button>
+                  <button id="practiceRetrySubmitBtn" class="btn btn-primary practice-send-btn retry-submit-btn" type="button">Evaluate retry</button>
                 </div>
                 <div class="practice-composer-tools">
                   <span id="practiceRetryMicStatus" class="practice-mic-status">One focused rep — the clock starts when you speak</span>
@@ -684,7 +685,7 @@
               <div class="practice-debrief-footer">
                 <button id="practiceToggleTranscriptBtn" class="btn btn-ghost transcript-toggle" type="button" aria-expanded="false">Show full transcript</button>
                 <span class="debrief-footer-spacer" aria-hidden="true"></span>
-                <button id="practiceExportMdBtn" class="btn btn-outline" type="button" title="Download this coaching report as Markdown">Export Report</button>
+                <button id="practiceExportMdBtn" class="btn btn-outline" type="button" title="Download this coaching report as Markdown">Export report</button>
                 <button id="practiceNewFromDebriefBtn" class="btn btn-primary" type="button">Start another practice</button>
               </div>
               <div id="practiceDebriefTranscript" class="practice-debrief-transcript hidden"></div>
@@ -1050,7 +1051,7 @@
                 </div>
                 <span class="set-note">Personal details are hidden here first. Only the preview below is ever shared with a cloud AI.</span>
               </div>
-              <button id="installRampartQuickBtn" class="btn btn-outline btn-sm hidden" type="button">Add Resume Privacy Scrubber</button>
+              <button id="installRampartQuickBtn" class="btn btn-outline btn-sm hidden" type="button" title="Resume Privacy Scrubber — finds names and employers on this Mac">Add scrubber · 15 MB</button>
             </div>
 
             <input id="resumeFileInput" type="file" accept=".pdf,.docx,.txt,.md,.rtf" class="hidden" />
