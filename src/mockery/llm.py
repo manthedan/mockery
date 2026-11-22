@@ -271,6 +271,33 @@ def _parse_agy_model_spec(model_spec: str) -> tuple[str, str | None]:
     return stripped, None
 
 
+def _cli_sandbox_cwd() -> Path:
+    """
+    Return an empty private working directory for one-shot CLI LLM calls so agentic CLIs
+    (`agy`, `claude`, `codex`, `gemini`, `pi`) do not scan repo files or inject AGENTS.md/CLAUDE.md.
+    """
+    sandbox = Path(tempfile.gettempdir()) / f"mockery_cli_sandbox_{os.getuid()}"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(sandbox, 0o700)
+    except OSError:
+        pass
+    return sandbox
+
+
+def _build_cached_user_blocks(user: str, cache_prefix_len: int) -> str | list[dict[str, Any]]:
+    """Split a prompt into a cached stable prefix block + uncached mutable suffix block."""
+    if 0 < cache_prefix_len < len(user):
+        prefix = user[:cache_prefix_len]
+        suffix = user[cache_prefix_len:]
+        if prefix.strip() and suffix.strip():
+            return [
+                {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": suffix},
+            ]
+    return user
+
+
 class InterviewCopilotLLM:
     def __init__(self, config: LLMRuntimeConfig) -> None:
         self.config = config
@@ -327,6 +354,7 @@ class InterviewCopilotLLM:
 
         proc = await asyncio.create_subprocess_exec(
             *args,
+            cwd=str(_cli_sandbox_cwd()),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -432,6 +460,7 @@ class InterviewCopilotLLM:
         ]
         proc = await asyncio.create_subprocess_exec(
             *args,
+            cwd=str(_cli_sandbox_cwd()),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -478,6 +507,7 @@ class InterviewCopilotLLM:
 
         proc = await asyncio.create_subprocess_exec(
             *args,
+            cwd=str(_cli_sandbox_cwd()),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -528,6 +558,7 @@ class InterviewCopilotLLM:
 
             proc = await asyncio.create_subprocess_exec(
                 *args,
+                cwd=str(_cli_sandbox_cwd()),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -574,6 +605,7 @@ class InterviewCopilotLLM:
 
         proc = await asyncio.create_subprocess_exec(
             *args,
+            cwd=str(_cli_sandbox_cwd()),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -659,6 +691,7 @@ class InterviewCopilotLLM:
         temperature: float,
         max_tokens: int,
         timeout: float,
+        cache_prefix_len: int = 0,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         base = self.config.base_url.rstrip("/")
@@ -672,10 +705,14 @@ class InterviewCopilotLLM:
             "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": [{"role": "user", "content": user}],
+            "messages": [
+                {"role": "user", "content": _build_cached_user_blocks(user, cache_prefix_len)}
+            ],
         }
         if system.strip():
-            payload["system"] = system
+            payload["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
 
         async with httpx.AsyncClient(timeout=timeout) as http:
             if on_delta is not None:
@@ -771,6 +808,8 @@ class InterviewCopilotLLM:
         timeout: float = 30.0,
         expect_json: bool = False,
         disable_fast_thinking: bool = True,
+        cache_prefix_len: int = 0,
+        cache_key: str | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         cli = self.config.cli_backend
@@ -805,15 +844,32 @@ class InterviewCopilotLLM:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
+                cache_prefix_len=cache_prefix_len,
                 on_delta=on_delta,
             )
 
         client = self._client()
         is_reasoning = _is_reasoning_model(model)
-        messages: list[dict[str, str]] = []
+        is_openrouter_claude = self.config.provider == "openrouter" and (
+            "anthropic/" in model.lower() or "claude" in model.lower()
+        )
+        messages: list[dict[str, Any]] = []
         if system.strip():
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": user})
+            if is_openrouter_claude:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": [
+                            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+                        ],
+                    }
+                )
+            else:
+                messages.append({"role": "system", "content": system})
+        user_content: str | list[dict[str, Any]] = (
+            _build_cached_user_blocks(user, cache_prefix_len) if is_openrouter_claude else user
+        )
+        messages.append({"role": "user", "content": user_content})
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -822,10 +878,18 @@ class InterviewCopilotLLM:
         }
         if not is_reasoning:
             kwargs["temperature"] = temperature
+        extra_body: dict[str, Any] = {}
         if disable_fast_thinking:
             extra = _fast_extra_body(model)
             if extra:
-                kwargs["extra_body"] = extra
+                extra_body.update(extra)
+        is_openai_direct = (
+            self.config.provider == "openai" or "api.openai.com" in self.config.base_url.lower()
+        )
+        if is_openai_direct and cache_key:
+            extra_body["prompt_cache_key"] = cache_key[:64]
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         if on_delta is not None:
             stream = await client.chat.completions.create(**kwargs, stream=True, timeout=timeout)
@@ -849,10 +913,18 @@ class InterviewCopilotLLM:
         if not self.config.is_configured:
             return self._heuristic_fallback_probes(session, qa, len(utts), rev_sum)
 
-        transcript_text = "\n".join(
-            f"[{fmt_ms(u.start_ms)} {u.speaker.upper()}{'' if u.final else ' (speaking live)'}]: {u.text}"
+        # Keep finalized turns in an append-only prefix so KV/prefix caches hit across turns on this card;
+        # live mutating drafts and prior-suggestion avoid lists sit strictly in the suffix.
+        final_lines = [
+            f"[{fmt_ms(u.start_ms)} {u.speaker.upper()}]: {u.text}"
             for u in utts
-        )
+            if u.final
+        ]
+        draft_lines = [
+            f"[{fmt_ms(u.start_ms)} {u.speaker.upper()} (speaking live)]: {u.text}"
+            for u in utts
+            if not u.final
+        ]
 
         # Pass BOTH questions the interviewer already asked AND prior AI suggestions so none repeat!
         already_asked = [u.text for u in utts if u.speaker == "interviewer"]
@@ -868,12 +940,17 @@ class InterviewCopilotLLM:
         probe_guidance = _probe_guidance_for(session.config.interview_type)
         system_prompt = render_prompt("suggest_probes", probe_guidance=probe_guidance)
 
-        user_prompt = (
+        stable_prefix = (
             f"Target Role: {session.config.role_title} | Focus: {session.config.interview_type}\n"
             f"Rubric Context: {session.config.rubric_notes or 'Standard pragmatic engineering bar'}\n\n"
-            f"Active Card ({qa.badge_prefix()}{qa.index}: {qa.title}):\n{transcript_text}"
-            f"{avoid_block}"
+            f"Active Card ({qa.badge_prefix()}{qa.index}: {qa.title}):\n"
+            + ("\n".join(final_lines) if final_lines else "(Waiting for first finalized turn)")
         )
+        mutable_suffix = (
+            ("\n" + "\n".join(draft_lines) if draft_lines else "")
+            + avoid_block
+        )
+        user_prompt = stable_prefix + mutable_suffix
 
         try:
             raw = await self._complete_text(
@@ -884,6 +961,8 @@ class InterviewCopilotLLM:
                 max_tokens=420,
                 timeout=35.0,
                 expect_json=True,
+                cache_prefix_len=len(stable_prefix) if mutable_suffix else 0,
+                cache_key=f"mockery:copilot:{session.id}:{qa.id}",
             )
             parsed = _extract_json_object(raw)
             probes = [
@@ -1546,6 +1625,7 @@ class InterviewCopilotLLM:
         follow_up_count: int,
         existing_carl: dict[str, str],
         workspace_context: dict[str, Any] | None = None,
+        cache_key: str | None = None,
     ) -> dict[str, Any]:
         """
         Generate the AI interviewer's natural next turn + live CARL status + supportive coach nudge.
@@ -1584,7 +1664,7 @@ class InterviewCopilotLLM:
 
         history_lines = [
             f"{'INTERVIEWER' if t.get('role') == 'interviewer' else 'CANDIDATE'}: {t.get('text', '')}"
-            for t in recent_turns[-8:]
+            for t in recent_turns[-24:]
             if t.get("role") in ("interviewer", "candidate")
         ]
         ws_block = ""
@@ -1613,16 +1693,22 @@ class InterviewCopilotLLM:
             target_level=target_level,
             tone_instruction=tone_instruction,
         )
-        user_prompt = (
+        # Place static question framing + append-only conversation history FIRST so prompt/KV
+        # caches stay warm across turns; place turn-mutable counters, live workspace, and latest answer LAST.
+        stable_prefix = (
             f"Current Question: {current_question.get('prompt')}\n"
             f"CARL / Rubric Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
-            f"Follow-ups already asked on this question: {follow_up_count} (advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal).\n"
             f"Suggested follow-up angles: {follow_ups}\n"
-            f"{next_q_block}\n"
-            f"{ws_block}\n"
-            f"Recent conversation:\n" + "\n".join(history_lines) + "\n\n"
+            f"{next_q_block}\n\n"
+            f"Recent conversation:\n" + ("\n".join(history_lines) if history_lines else "(Opening turn)")
+        )
+        mutable_suffix = (
+            f"\n\nFollow-ups already asked on this question: {follow_up_count} "
+            f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
+            f"{ws_block}\n\n"
             f"Candidate's latest answer:\n{candidate_answer}"
         )
+        user_prompt = stable_prefix + mutable_suffix
 
         try:
             raw = await self._complete_text(
@@ -1633,6 +1719,8 @@ class InterviewCopilotLLM:
                 max_tokens=480,
                 timeout=30.0,
                 expect_json=True,
+                cache_prefix_len=len(stable_prefix),
+                cache_key=cache_key,
             )
             parsed = _extract_json_object(raw)
             reply = str(parsed.get("interviewer_reply") or "").strip()

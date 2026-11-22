@@ -8,6 +8,7 @@ import re
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -502,3 +503,309 @@ def test_question_bank_cache_jd_score_parity_and_invalidation(tmp_path: Path) ->
     st = custom_pack.stat()
     os.utime(custom_pack, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000))
     assert store.get_question("cust_q1")["title"] == "Updated Distributed Queue"
+
+
+def test_speculative_probe_budget_throttling_and_session_reset(tmp_path: Path) -> None:
+    """Automatic Live Copilot speculative probes must respect cooldown, word delta, and per-card caps."""
+    from mockery.models import InterviewSession, QAGroup, Utterance
+    from mockery.server import (
+        AppRuntime,
+        SPECULATIVE_PROBE_CLI_COOLDOWN_SEC,
+        SPECULATIVE_PROBE_COOLDOWN_SEC,
+        SPECULATIVE_PROBE_MAX_PER_CARD,
+        SPECULATIVE_PROBE_MIN_NEW_WORDS,
+    )
+
+    rt = AppRuntime(tmp_path)
+    rt.llm_config.provider = "openai"
+    rt.llm_config.api_key = "sk-test-budget"
+    rt.llm_config.base_url = "https://api.openai.com/v1"
+
+    session = InterviewSession()
+    u1 = Utterance(id="u1", speaker="candidate", text=" ".join(["word"] * 40), start_ms=0, end_ms=5000, final=True)
+    session.utterances.append(u1)
+    qa = QAGroup(id="qa_1", index=1, title="Ledger Design", utterance_ids=["u1"])
+    session.qa_groups.append(qa)
+    rt.active_session = session
+
+    # First pre-warm on card is allowed immediately
+    assert rt.should_run_speculative_probe(session, qa, now=100.0) is True
+    rt.record_speculative_probe(session, qa, now=100.0)
+
+    # Blocked during cooldown even if candidate adds plenty of words
+    u2 = Utterance(
+        id="u2",
+        speaker="candidate",
+        text=" ".join(["detail"] * (SPECULATIVE_PROBE_MIN_NEW_WORDS + 10)),
+        start_ms=6000,
+        end_ms=15000,
+        final=True,
+    )
+    session.utterances.append(u2)
+    qa.utterance_ids.append("u2")
+    assert rt.should_run_speculative_probe(session, qa, now=100.0 + SPECULATIVE_PROBE_COOLDOWN_SEC - 1.0) is False
+
+    # Allowed once cooldown elapsed AND enough new finalized candidate words arrived
+    assert rt.should_run_speculative_probe(session, qa, now=100.0 + SPECULATIVE_PROBE_COOLDOWN_SEC + 1.0) is True
+    rt.record_speculative_probe(session, qa, now=100.0 + SPECULATIVE_PROBE_COOLDOWN_SEC + 1.0)
+
+    # Blocked after cooldown if candidate only spoke a short utterance (< min new words)
+    u3 = Utterance(
+        id="u3",
+        speaker="candidate",
+        text="just ten short words here right now yes indeed okay",
+        start_ms=20000,
+        end_ms=23000,
+        final=True,
+    )
+    session.utterances.append(u3)
+    qa.utterance_ids.append("u3")
+    assert rt.should_run_speculative_probe(session, qa, now=200.0) is False
+
+    # Add enough words to hit the per-card cap
+    u4 = Utterance(
+        id="u4",
+        speaker="candidate",
+        text=" ".join(["more"] * (SPECULATIVE_PROBE_MIN_NEW_WORDS + 5)),
+        start_ms=25000,
+        end_ms=35000,
+        final=True,
+    )
+    session.utterances.append(u4)
+    qa.utterance_ids.append("u4")
+    assert rt.should_run_speculative_probe(session, qa, now=200.0) is True
+    rt.record_speculative_probe(session, qa, now=200.0)
+    assert rt.speculative_probe_budget["qa_1"]["count"] == SPECULATIVE_PROBE_MAX_PER_CARD
+
+    # Once per-card cap is reached, no further automatic background calls fire
+    u5 = Utterance(id="u5", speaker="candidate", text=" ".join(["extra"] * 100), start_ms=40000, end_ms=55000, final=True)
+    session.utterances.append(u5)
+    qa.utterance_ids.append("u5")
+    assert rt.should_run_speculative_probe(session, qa, now=500.0) is False
+
+    # Local/CLI backends enforce the stricter cooldown & cap
+    rt.switch_session(InterviewSession())
+    assert rt.speculative_probe_budget == {}
+    rt.llm_config.provider = "omlx"
+    rt.llm_config.base_url = "http://localhost:8000/v1"
+    rt.llm_config.api_key = ""
+    s2 = rt.active_session
+    s2.utterances.append(Utterance(id="c1", speaker="candidate", text=" ".join(["local"] * 50), start_ms=0, end_ms=8000, final=True))
+    qa2 = QAGroup(id="qa_local", index=1, title="Local GPU Test", utterance_ids=["c1"])
+    s2.qa_groups.append(qa2)
+    assert rt.should_run_speculative_probe(s2, qa2, now=10.0) is True
+    rt.record_speculative_probe(s2, qa2, now=10.0)
+    s2.utterances.append(Utterance(id="c2", speaker="candidate", text=" ".join(["local"] * 60), start_ms=9000, end_ms=19000, final=True))
+    qa2.utterance_ids.append("c2")
+    assert rt.should_run_speculative_probe(s2, qa2, now=10.0 + SPECULATIVE_PROBE_CLI_COOLDOWN_SEC - 1.0) is False
+    assert rt.should_run_speculative_probe(s2, qa2, now=10.0 + SPECULATIVE_PROBE_CLI_COOLDOWN_SEC + 1.0) is True
+
+
+def test_prompt_caching_wire_formats_prefix_stability_and_cli_sandbox_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify Anthropic/OpenRouter cache_control, OpenAI prompt_cache_key, prefix stability, and isolated CLI cwd."""
+    from mockery.llm import InterviewCopilotLLM, LLMRuntimeConfig, _cli_sandbox_cwd
+    from mockery.models import InterviewSession, QAGroup, SessionConfig, Utterance
+
+    # 1. Practice interviewer prompt keeps byte-identical stable prefix across turns & live workspace edits
+    cfg = LLMRuntimeConfig(tmp_path)
+    cfg.provider = "openai"
+    cfg.base_url = "https://api.openai.com/v1"
+    cfg.api_key = "sk-test"
+    llm = InterviewCopilotLLM(cfg)
+
+    captured_calls: list[dict[str, Any]] = []
+
+    async def fake_complete(**kwargs: Any) -> str:
+        captured_calls.append(kwargs)
+        return json.dumps(
+            {
+                "interviewer_reply": "Tell me more about the failure mode.",
+                "should_advance": False,
+                "carl_signals": {"context": "strong", "action": "partial", "result": "missing", "learning": "missing"},
+                "coach_nudge": {"tone": "tip", "message": "Great framing; quantify the impact next."},
+            }
+        )
+
+    monkeypatch.setattr(llm, "_complete_text", fake_complete)
+    q = {"prompt": "Design a multi-region ledger.", "carl_focus": "Consistency & latency", "follow_ups": ["Idempotency?"]}
+    t1 = [{"role": "interviewer", "text": "Design a multi-region ledger."}, {"role": "candidate", "text": "I'd start with Spanner."}]
+    t2 = t1 + [{"role": "interviewer", "text": "How do you handle retries?"}, {"role": "candidate", "text": "Idempotency keys."}]
+
+    asyncio.run(
+        llm.generate_practice_interviewer_reply(
+            role_title="Staff Engineer",
+            company="Acme",
+            interview_type="system_design",
+            target_level="L6",
+            coach_style="supportive",
+            current_question=q,
+            next_question=None,
+            recent_turns=t1,
+            candidate_answer="I'd start with Spanner.",
+            follow_up_count=0,
+            existing_carl={"context": "missing", "action": "missing", "result": "missing", "learning": "missing"},
+            workspace_context={"diagram_summary": "v1 diagram"},
+            cache_key="mockery:practice:prac_1",
+        )
+    )
+    asyncio.run(
+        llm.generate_practice_interviewer_reply(
+            role_title="Staff Engineer",
+            company="Acme",
+            interview_type="system_design",
+            target_level="L6",
+            coach_style="supportive",
+            current_question=q,
+            next_question=None,
+            recent_turns=t2,
+            candidate_answer="Idempotency keys in outbox.",
+            follow_up_count=1,
+            existing_carl={"context": "strong", "action": "partial", "result": "missing", "learning": "missing"},
+            workspace_context={"diagram_summary": "v2 completely edited diagram"},
+            cache_key="mockery:practice:prac_1",
+        )
+    )
+    assert len(captured_calls) == 2
+    p1 = captured_calls[0]["user"][: captured_calls[0]["cache_prefix_len"]]
+    p2 = captured_calls[1]["user"][: captured_calls[1]["cache_prefix_len"]]
+    # Turn 2's cached prefix MUST strictly start with Turn 1's cached prefix (append-only!)
+    assert p2.startswith(p1)
+    assert "Follow-ups already asked" not in p1
+    assert "v1 diagram" not in p1
+    assert captured_calls[0]["cache_key"] == "mockery:practice:prac_1"
+
+    # 2. Live Copilot suggest_probes keeps finalized turns in stable prefix and drafts in mutable suffix
+    captured_calls.clear()
+    session = InterviewSession(id="sess_1", config=SessionConfig(role_title="Staff Engineer", interview_type="system_design"))
+    session.utterances.extend(
+        [
+            Utterance(id="u1", speaker="interviewer", text="Design a ledger.", start_ms=0, end_ms=2000, final=True),
+            Utterance(id="u2", speaker="candidate", text="We shard by account id.", start_ms=3000, end_ms=7000, final=True),
+            Utterance(id="u3", speaker="candidate", text="Still speaking draft one", start_ms=8000, end_ms=10000, final=False),
+        ]
+    )
+    qa = QAGroup(id="qa_1", index=1, title="Ledger", utterance_ids=["u1", "u2", "u3"])
+    session.qa_groups.append(qa)
+    asyncio.run(llm.suggest_probes(session, qa))
+    session.utterances[-1].text = "Still speaking draft two with more words"
+    asyncio.run(llm.suggest_probes(session, qa))
+    sp1 = captured_calls[0]["user"][: captured_calls[0]["cache_prefix_len"]]
+    sp2 = captured_calls[1]["user"][: captured_calls[1]["cache_prefix_len"]]
+    assert sp1 == sp2
+    assert "speaking live" not in sp1
+    assert captured_calls[0]["cache_key"] == "mockery:copilot:sess_1:qa_1"
+
+    # 3. Anthropic native payload attaches ephemeral cache_control on system + user prefix block
+    anth_cfg = LLMRuntimeConfig(tmp_path)
+    anth_cfg.provider = "anthropic"
+    anth_cfg.base_url = "https://api.anthropic.com/v1"
+    anth_cfg.api_key = "sk-ant-test"
+    anth_llm = InterviewCopilotLLM(anth_cfg)
+    sent_payloads: list[dict[str, Any]] = []
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": "OK"}]}
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any]):
+            sent_payloads.append(json)
+            return _FakeResp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+    asyncio.run(
+        anth_llm._complete_text(
+            model="claude-haiku-4-5-20251001",
+            system="Static interviewer instructions.",
+            user="STABLE PREFIX CONTENT\n\nMUTABLE SUFFIX",
+            cache_prefix_len=len("STABLE PREFIX CONTENT"),
+        )
+    )
+    assert len(sent_payloads) == 1
+    p_anth = sent_payloads[0]
+    assert p_anth["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert p_anth["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert p_anth["messages"][0]["content"][0]["text"] == "STABLE PREFIX CONTENT"
+    assert p_anth["messages"][0]["content"][1]["text"] == "\n\nMUTABLE SUFFIX"
+
+    # 4. OpenRouter + Claude attaches cache_control; OpenAI direct attaches prompt_cache_key
+    oai_calls: list[dict[str, Any]] = []
+
+    class _FakeCompletions:
+        async def create(self, **kwargs: Any):
+            oai_calls.append(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))])
+
+    fake_oai_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+
+    or_cfg = LLMRuntimeConfig(tmp_path)
+    or_cfg.provider = "openrouter"
+    or_cfg.base_url = "https://openrouter.ai/api/v1"
+    or_cfg.api_key = "sk-or-test"
+    or_llm = InterviewCopilotLLM(or_cfg)
+    monkeypatch.setattr(or_llm, "_client", lambda: fake_oai_client)
+    asyncio.run(
+        or_llm._complete_text(
+            model="anthropic/claude-sonnet-4",
+            system="Static system.",
+            user="PREFIX\n\nSUFFIX",
+            cache_prefix_len=len("PREFIX"),
+        )
+    )
+    assert oai_calls[-1]["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert oai_calls[-1]["messages"][1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    oai_direct_llm = InterviewCopilotLLM(cfg)
+    monkeypatch.setattr(oai_direct_llm, "_client", lambda: fake_oai_client)
+    asyncio.run(
+        oai_direct_llm._complete_text(
+            model="gpt-4.1-mini",
+            system="Static system.",
+            user="PREFIX\n\nSUFFIX",
+            cache_prefix_len=len("PREFIX"),
+            cache_key="mockery:practice:prac_99",
+        )
+    )
+    assert oai_calls[-1]["extra_body"]["prompt_cache_key"] == "mockery:practice:prac_99"
+
+    # 5. CLI subprocesses execute in an isolated empty sandbox directory (never the user's git repo)
+    sandbox = _cli_sandbox_cwd()
+    assert sandbox.is_dir()
+    seen_cwds: list[str | None] = []
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self, _stdin: bytes | None = None):
+            return (b'{"status":"SUCCESS","response":"OK"}', b"")
+
+    async def fake_subproc(*_args: Any, **kwargs: Any):
+        seen_cwds.append(kwargs.get("cwd"))
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subproc)
+    agy_cfg = LLMRuntimeConfig(tmp_path)
+    agy_cfg.provider = "agy"
+    agy_cfg.base_url = "cli://agy"
+    agy_llm = InterviewCopilotLLM(agy_cfg)
+    out = asyncio.run(
+        agy_llm._complete_text(model="gemini-4-hydrogen:low", system="Sys", user="Hi", expect_json=False)
+    )
+    assert out == "OK"
+    assert seen_cwds == [str(sandbox)]
