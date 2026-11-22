@@ -1,36 +1,138 @@
-# Mockery
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark-on-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/wordmark-on-light.svg">
+    <img alt="Mockery" src="docs/assets/wordmark-on-light.svg" width="260">
+  </picture>
+</p>
 
-**A calm, local-first mock interview studio for Apple Silicon Macs.**
+<p align="center">
+  <b>A calm, local-first mock interview studio for Apple Silicon.</b><br>
+  Practice the interview out loud. Then run one for someone else.
+</p>
 
-Mockery listens to your mock interview in real time — running **100% offline speech recognition and speaker separation directly on your Mac** — organizes the conversation into clean question/phase cards, surfaces sharp follow-up probes while the candidate is still talking, and runs a **blind post-interview calibration audit** against your own gut verdict.
+<p align="center">
+  <code>v0.2.0</code> · macOS · Apple Silicon · <a href="LICENSE">MIT</a>
+</p>
 
-- **Private by default:** Speech-to-text ([Parakeet TDT 0.6B v2](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2) on MLX) and voice separation ([WeSpeaker](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) on CoreML) run locally on your Mac. Audio never leaves your machine.
-- **Zero-friction setup:** Works out of the box in **Transcript-Only mode** with no API key, or connects in one click to a provider you already have — **Claude Code CLI**, **Codex CLI**, **Gemini CLI**, **oMLX / Ollama / LM Studio**, or a **Google Gemini (free tier)**, **Anthropic**, **OpenAI**, **DeepSeek**, or **OpenRouter** API key.
-- **Two capture modes:**
-  - **Google Meet / Remote:** Captures your mic (`You`) and your Chrome Meet tab (`Candidate`) on a shared audio clock with automatic echo-bleed suppression.
-  - **In-Person (Single Mic):** Acoustic two-speaker diarization separates voices automatically in the same room.
-
----
-
-## Quick Start (macOS Apple Silicon)
-
-> **Requirements:** A Mac with Apple Silicon (M1, M2, M3, or M4) and Google Chrome (recommended for Google Meet tab audio).
-
-### Option 1 — One-Line Installer (Installs `Mockery.app` in Applications)
-
-Open **Terminal** and run:
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.png">
+    <img alt="Two Mockery windows: an AI Mock Practice behavioral session behind, and the Live Interviewer Copilot calibration audit in front." src="docs/assets/hero-light.png" width="100%">
+  </picture>
+</p>
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/manthedan/mockery/main/install.sh | sh
 ```
 
-Then open **Mockery** from **Applications** or **Spotlight** (⌘ Space → `Mockery`).
+Mockery has two modes that share one studio. Speech recognition, speaker separation, the interviewer's voice, resume redaction and code execution all run on your Mac. The only thing that can leave is text, and only to a model you chose.
 
-- Mockery sits quietly in your menu bar and opens the local studio at `http://127.0.0.1:8765`.
-- On your very first launch, Mockery downloads the offline speech engine (~600 MB) once — after that, transcription works 100% offline.
-- A guided welcome screen helps you connect an AI assistant in seconds (or skip straight to Transcript-Only mode).
+## Two modes
 
-### Option 2 — Run with `uv` (Developers)
+### AI Mock Practice: you're the candidate
+
+A solo interviewer that asks, listens and follows up, shaped by your resume and the job you're aiming for.
+
+- **Voice-first behavioral.** Answer out loud. A live CARL meter tracks Context, Action, Result and Learning as you speak.
+- **Debrief and 45-second retry.** A question-by-question breakdown with a suggested reframe, then one timed redo of the answer that needs it most.
+- **System design whiteboard.** Sketch clients, gateways, services, stores and queues on an SVG canvas. The interviewer asks about what you actually drew.
+- **Coding studio.** Run real tests in an isolated Web Worker. JavaScript is built in; Python runs offline through a local Pyodide pack.
+- **Resume privacy redaction.** Names, emails, phone numbers and links are found on-device and swapped for placeholders. The preview is the only version a cloud model can read.
+
+### Live Interviewer Copilot: you're the interviewer
+
+A quiet second pair of ears for the mock you run for a friend or teammate.
+
+- **Offline speech-to-text.** [Parakeet TDT 0.6B v2](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2) on MLX. Drafts appear in about 50 ms and lock in with full context.
+- **Two voices, kept apart.** On Google Meet, your mic (`You`) and the Chrome tab (`Candidate`) are captured on a shared audio clock with echo-bleed suppression. In person, [WeSpeaker](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) acoustic diarization on CoreML separates two speakers on one microphone.
+- **Live follow-up probes.** Press <kbd>D</kbd> for three follow-ups grounded in what the candidate just said. <kbd>1</kbd>–<kbd>3</kbd> marks them asked, <kbd>N</kbd> starts a new card.
+- **Blind calibration.** Lock in your own hire signal, level and rationale first. Then read an audit of that call against the transcript, with every claim cited to its `[MM:SS]` moment.
+- **Export.** An interviewer debrief or a scrubbed candidate copy, in Markdown.
+
+## Screens
+
+Real screens from v0.2, captured from the running app with synthetic demo data. They follow your GitHub theme.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/04_behavioral_dark.png">
+        <source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/04_behavioral_light.png">
+        <img alt="Behavioral practice session with the interviewer's question, a spoken answer and a CARL meter." src="docs/assets/screenshots/04_behavioral_light.png">
+      </picture>
+      <br><b>Behavioral.</b> Answer out loud while the CARL meter fills in.
+    </td>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/07_debrief_dark.png">
+        <source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/07_debrief_light.png">
+        <img alt="Coaching debrief with per-question CARL review and a 45-second retry drill." src="docs/assets/screenshots/07_debrief_light.png">
+      </picture>
+      <br><b>Debrief and retry.</b> One timed redo while the feedback is fresh.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/05_whiteboard_dark.png">
+        <source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/05_whiteboard_light.png">
+        <img alt="System design whiteboard with connected service, database and queue nodes beside the conversation." src="docs/assets/screenshots/05_whiteboard_light.png">
+      </picture>
+      <br><b>System design whiteboard.</b> Draw the system while you talk.
+    </td>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/06_coding_dark.png">
+        <source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/06_coding_light.png">
+        <img alt="Coding studio with an editor, language tabs and passing test output." src="docs/assets/screenshots/06_coding_light.png">
+      </picture>
+      <br><b>Coding studio.</b> Write it, run it, explain it.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/02_profile_dark.png">
+        <source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/02_profile_light.png">
+        <img alt="Profile with a resume whose personal details are replaced by placeholders." src="docs/assets/screenshots/02_profile_light.png">
+      </picture>
+      <br><b>Resume privacy redaction.</b> See exactly what leaves your Mac.
+    </td>
+    <td width="50%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/09_copilot_calibration_dark.png">
+        <source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/09_copilot_calibration_light.png">
+        <img alt="Live Interviewer Copilot with a transcript on the left and a cited calibration audit on the right." src="docs/assets/screenshots/09_copilot_calibration_light.png">
+      </picture>
+      <br><b>Live Copilot.</b> Your blind call, audited against the transcript.
+    </td>
+  </tr>
+</table>
+
+## Install
+
+> **Requirements:** a Mac with Apple Silicon. Google Chrome is recommended if you want to capture a Google Meet tab.
+
+### One-line installer
+
+Installs `Mockery.app` into Applications:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/manthedan/mockery/main/install.sh | sh
+```
+
+Then open **Mockery** from Applications or Spotlight (⌘ Space → `Mockery`).
+
+- It sits in your menu bar and opens the studio at `http://127.0.0.1:8765`.
+- On first launch it downloads the offline speech engine once (about 600 MB). After that, transcription works fully offline.
+- A welcome screen helps you connect a model, or skip straight to transcript-only.
+
+### Run from source
+
+With [uv](https://docs.astral.sh/uv/):
 
 ```bash
 git clone https://github.com/manthedan/mockery.git
@@ -45,58 +147,53 @@ uv run python scripts/build_macos_app.py --install   # installs /Applications/Mo
 uv run python scripts/build_macos_app.py --dmg       # creates dist/Mockery-macOS-arm64.dmg
 ```
 
----
+## Bring your own model
 
-## Connecting an AI Assistant (Optional)
+Transcription, speaker separation, cards, talk ratios and Markdown export need no key at all. Add a model when you want the practice interviewer, follow-up probes, coaching and calibration.
 
-Speech transcription, speaker separation, cards, talk ratios, and Markdown exports all run **100% locally with zero API key**.
-
-To enable **live follow-up probes** and **blind calibration**, Mockery's onboarding wizard & **Settings** support:
-
-| Option | Cost / Auth | Best For |
+| Option | Cost and sign-in | Best for |
 | --- | --- | --- |
-| **Detected Local CLIs** (`claude`, `codex`, `gemini`, `agy`, `pi`) | Existing subscription — **no API key** | Auto-detected if installed on your Mac (one click) |
-| **Google Gemini API** | Generous free tier via [Google AI Studio](https://aistudio.google.com/apikey) | Easiest cloud setup without a credit card |
-| **Anthropic Claude / OpenAI / DeepSeek / OpenRouter** | Bring your own API key | Favorite frontier or budget cloud models |
-| **[oMLX](https://github.com/jundot/omlx) / Ollama / LM Studio** | **100% offline & free** | Private local LLMs on Apple Silicon (auto-lists your loaded models; 16 GB+ Mac recommended) |
-| **Transcript-Only** | Free, zero setup | Pure local transcription, notes, and Markdown export |
+| **Local CLIs** (`claude`, `codex`, `gemini`, `agy`, `pi`) | Your existing subscription. No API key. | One click. Detected automatically if installed. |
+| **Google Gemini API** | Free tier through [Google AI Studio](https://aistudio.google.com/apikey). | The easiest cloud setup without a credit card. |
+| **Anthropic, OpenAI, DeepSeek, OpenRouter** | Bring your own API key. | Your favourite frontier or budget model. |
+| **[oMLX](https://github.com/jundot/omlx), Ollama, LM Studio** | Free and fully offline. | Private local models. Lists what you have loaded. A 16 GB Mac or larger is recommended. |
+| **Transcript-only** | Free. Zero setup. | Pure local transcription, notes and export. |
 
-Use **Settings → Test connection** at any time to verify your setup before an interview.
+Use **Settings → Test connection** to check your setup before an interview.
 
----
+## What runs where
 
-## How a Session Works
+| On your Mac, always | What it is |
+| --- | --- |
+| Speech-to-text | Parakeet TDT 0.6B on MLX. Downloaded once, then offline. |
+| Speaker separation | WeSpeaker on CoreML. Two speakers from one microphone. |
+| Interviewer voice | Optional Kokoro or Phonon neural voice packs. The built-in macOS voice works with nothing installed. |
+| Resume redaction | Optional Rampart on-device model (about 15 MB). Basic detection is built in. |
+| Code runner | Web Worker sandboxes. JavaScript built in, Python through a local Pyodide pack. |
+| Your sessions | Plain files in `~/Library/Application Support/Mockery` (or the checkout, when run from source). |
 
-1. **Pick role, format, and audio mode** (*Behavioral*, *System design*, *Coding*, or *General*; *Google Meet* or *One microphone*).
-2. **Start interview:** Live draft transcripts stream at ~50 ms latency while final turns lock in with full-context accuracy.
-3. **Live follow-ups (`D`):** Mockery speculatively pre-warms 3 tailored follow-up probes after substantive candidate answers so pressing <kbd>D</kbd> reveals them instantaneously. Press <kbd>1</kbd>–<kbd>3</kbd> to check off probes as you ask them, or <kbd>N</kbd> to start a new card.
-4. **Blind calibration:** Before revealing the AI debrief, Mockery asks you to lock in your own **Hire Signal**, **Level**, and **Gut Rationale**. Then it streams a timestamp-cited audit (`[MM:SS]`) comparing your call against what was actually said.
-5. **Export:** Download an **Interviewer Debrief** or a scrubbed **Candidate Copy** in clean Markdown, or click **Settings → Reveal in Finder** to open your saved sessions folder.
+The model you bring only ever receives text: what was said, what you typed or drew, and the redacted resume preview you approved. Audio never leaves your machine. With oMLX, Ollama or LM Studio, nothing leaves at all.
 
----
+## Security and privacy
 
-## Speech Language Settings
+- Mockery binds to `127.0.0.1` by default and verifies same-origin requests.
+- If you expose it on a local network on purpose (`mockery --host 0.0.0.0`), it requires a cryptographically random access token, or one you pass with `--lan-token <secret>`.
+- API keys are saved locally in `.env.local` with `0600` permissions and are sent only to the provider you chose.
+- Saved transcripts live in `~/Library/Application Support/Mockery/sessions` (or `./sessions` inside a git checkout). **Settings → Reveal in Finder** opens the folder.
 
-Mockery defaults to **`parakeet-tdt-0.6b-v2`** for the fastest, cleanest English transcription. Need another language? Open **Settings → Speech model** and switch to **`parakeet-tdt-0.6b-v3`** (25 European languages).
+## Speech language
 
----
+Mockery defaults to `parakeet-tdt-0.6b-v2` for the fastest, cleanest English transcription. For another language, open **Settings → Speech model** and switch to `parakeet-tdt-0.6b-v3` (25 European languages).
 
-## Security & Privacy
-
-- Mockery binds strictly to `127.0.0.1` by default and verifies same-origin requests.
-- If you intentionally expose it on a local network (`mockery --host 0.0.0.0`), Mockery automatically requires a cryptographically random access token (or `--lan-token <secret>`).
-- API keys are saved locally with `0600` file permissions in `.env.local` (never transmitted anywhere except to your chosen provider).
-- Saved transcripts live in `~/Library/Application Support/Mockery/sessions` (or `./sessions` when running inside a local git checkout).
-
----
-
-## Development & Testing
+## Development
 
 ```bash
+uv run python scripts/check.py        # ruff, architecture lint, JS syntax, unit + FSM + fuzz tests
+uv run python scripts/check.py --ui   # adds browser UAT and the property-based UI explorer
 uv run pytest -v
 ```
 
-State machine introspection (CLI, HTTP, and browser):
+State machine introspection:
 
 ```bash
 uv run mockery --dump-machines   # JSON + Mermaid diagrams
@@ -104,7 +201,21 @@ uv run mockery --dump-machines   # JSON + Mermaid diagrams
 # Browser console: window.__MOCKERY_STATE__
 ```
 
----
+- [`docs/feature-map.md`](docs/feature-map.md) maps every surface to its DOM landmarks, modules and routes.
+- [`docs/state-charts.md`](docs/state-charts.md) holds the generated state charts.
+
+### Release site and marketing assets
+
+[`site/`](site/) is the release landing page: static, zero build, self-contained for GitHub Pages. Shared brand and screenshot assets live in [`docs/assets/`](docs/assets/). Everything is regenerated from the running app with synthetic demo data:
+
+```bash
+uv run python scripts/verify_ui.py snapshots --out-dir docs/assets/screenshots
+uv run --with pillow python docs/marketing/render_assets.py all   # Copilot screens, PNG renders, site/assets
+uv run python docs/marketing/verify_site.py                       # headless Chrome: desktop + mobile, dark + light
+python3 -m http.server --bind 127.0.0.1 --directory site 8080     # preview at http://127.0.0.1:8080
+```
+
+The launch video blueprint is in [`docs/marketing/video-brief.md`](docs/marketing/video-brief.md).
 
 ## License
 
