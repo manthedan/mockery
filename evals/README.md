@@ -2,12 +2,15 @@
 
 > **Dev-only boundary:** Nothing under `evals/` or the optional `gepa` dependency is ever imported by runtime code in `src/mockery/`. All runtime prompts live cleanly in [`src/mockery/prompts.py`](../src/mockery/prompts.py).
 
-## Tier 1 Optimization Targets
+## Optimization Targets (Tier 1 & Tier 2)
 
 | Target (`--target`) | Prompt Registry Key | Why Optimize Offline with GEPA |
 | --- | --- | --- |
 | `triage_window` | `triage_window` | Latency-critical JSON structured output running on small/local models: speaker diarization, `<700ms` mixed-speaker handoff splitting, STT typo cleanup without paraphrasing, and card boundary accuracy without over-splitting. |
 | `practice_interviewer` | `practice_interviewer_reply` | Live AI practice interviewer JSON contract: concise spoken replies (1–3 sentences), workspace grounding (whiteboard/code/tests), `should_advance` pacing, monotonic CARL signals, supportive tone, and zero coding spoilers. |
+| `suggest_probes` | `suggest_probes` | Live Copilot "Dive Deeper" probes: 1 crisp `quick_read`, 3 distinct grounded `<24`-word spoken questions, zero repetition of prior probes, and zero pronoun-policing or arithmetic pedantry. |
+| `practice_retry_eval` | `practice_retry_eval` | 45-second Retry Drill evaluator: honest evidence-based `carl_after` scoring (anti-sycophancy guard against inflating missing dims), concrete before-vs-after diff grounding, and concise encouraging tone. |
+| `practice_hint` | `practice_hint` | Plain-text 1–2 sentence whisper hint during live practice: grounded in workspace/attempt, strict `<50`-word brevity, and zero leaks of target algorithms, data structures, or code fixes. |
 
 ## 1. Offline Smoke Check (`--dry-run`, zero API keys / zero `gepa` needed)
 

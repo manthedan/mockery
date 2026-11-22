@@ -257,7 +257,7 @@ def test_llm_runtime_prompt_parity_all_12_prompts(tmp_path: Path, monkeypatch: p
     assert '"tailored_prompt"' in captured[7][0]
     assert "[PERSON_NAME_1]" in captured[8][0]
     assert "You are proctoring a live system design mock interview for Senior Engineer (Senior (L5))." in captured[9][0]
-    assert "whispering a helpful 2-sentence hint" in captured[10][0]
+    assert "whispering a quick hint" in captured[10][0]
     assert "teaching the CARL framework" in captured[11][0]
     assert "evaluating a candidate's 45-second retry drill" in captured[12][0]
 
@@ -498,10 +498,19 @@ def test_deterministic_metrics_hardened_against_gaming_and_spoilers() -> None:
 
 def test_runtime_task_settings_endpoint_key_isolation_and_error_sanitization() -> None:
     # Runtime settings parity with src/mockery/llm.py
-    assert TARGET_TEMPERATURES == {"triage_window": 0.0, "practice_interviewer": 0.4}
+    assert TARGET_TEMPERATURES == {
+        "triage_window": 0.0,
+        "practice_interviewer": 0.4,
+        "suggest_probes": 0.35,
+        "practice_retry_eval": 0.35,
+        "practice_hint": 0.4,
+    }
     assert compute_max_tokens("triage_window", {"incoming_utterances": [{}]}) == 450
     assert compute_max_tokens("triage_window", {"incoming_utterances": [{}, {}, {}]}) == 660
     assert compute_max_tokens("practice_interviewer", {}) == 480
+    assert compute_max_tokens("suggest_probes", {}) == 420
+    assert compute_max_tokens("practice_retry_eval", {}) == 380
+    assert compute_max_tokens("practice_hint", {}) == 160
 
     # Overriding --task-base-url must NEVER leak unrelated OMLX_API_KEY or LLM_API_KEY
     fake_env = {
