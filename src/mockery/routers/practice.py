@@ -669,6 +669,17 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
             _require_practice_event(runtime, session, "generate_debrief")
             if session.phase == PracticePhase.COMPLETED.value and session.debrief is not None:
+                if body and body.final_answer and body.final_answer.strip():
+                    phase = derive_practice_phase(session)
+                    allowed, _ = compute_allowed_practice_events(session, phase=phase)
+                    err = InvalidStateTransitionError(
+                        machine="practice_phase",
+                        current_state=phase.value,
+                        event="generate_debrief",
+                        allowed_events=allowed,
+                        remediation="This practice session was already debriefed in another tab; refresh before continuing.",
+                    )
+                    raise HTTPException(status_code=409, detail=err.to_dict())
                 return {
                     "session": serialize_practice_session(runtime, session),
                     "debrief": session.debrief,

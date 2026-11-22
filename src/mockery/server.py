@@ -13,6 +13,7 @@ import sys
 import time
 import wave
 from contextlib import asynccontextmanager
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -612,7 +613,12 @@ def create_app(
                         headers = [(k, v) for k, v in headers if k.lower() != b"cache-control"]
                         headers.append((b"cache-control", b"no-store"))
                     if needs_token_cookie and auth_token:
-                        cookie_val = f"mockery_token={auth_token}; HttpOnly; Path=/; SameSite=Strict"
+                        cookie: SimpleCookie[str] = SimpleCookie()
+                        cookie["mockery_token"] = auth_token
+                        cookie["mockery_token"]["path"] = "/"
+                        cookie["mockery_token"]["httponly"] = True
+                        cookie["mockery_token"]["samesite"] = "strict"
+                        cookie_val = cookie.output(header="").strip()
                         headers.append((b"set-cookie", cookie_val.encode("latin-1")))
                     message = {**message, "headers": headers}
                 await send(message)

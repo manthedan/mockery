@@ -510,7 +510,7 @@ export function createProfileAddonsController({
             body: JSON.stringify(payload),
           });
         } else if (op.type === "toggle") {
-          const docId = local.profile?.resume?.doc_id;
+          const docId = op.docId ?? local.profile?.resume?.doc_id;
           const qs = docId ? `?doc_id=${encodeURIComponent(docId)}` : "";
           res = await fetch(`/api/profile/resume/toggle/${encodeURIComponent(op.spanId)}${qs}`, {
             method: "POST",
@@ -523,6 +523,8 @@ export function createProfileAddonsController({
         if (!res.ok) {
           showToast(formatApiDetail(data.detail, "Could not update redaction."));
           if (res.status === 409) {
+            // Drop any remaining queued toggles targeting the superseded resume before refreshing
+            redactionCoord.invalidate();
             await refreshProfile();
           }
           return;
@@ -552,7 +554,11 @@ export function createProfileAddonsController({
 
   async function toggleSpanRedaction(spanId) {
     if (!local.profile?.resume || !spanId || local.busyResumeMutation) return;
-    redactionCoord.enqueue({ type: "toggle", spanId });
+    redactionCoord.enqueue({
+      type: "toggle",
+      spanId,
+      docId: local.profile.resume.doc_id || "",
+    });
     await drainRedactionQueue();
   }
 
