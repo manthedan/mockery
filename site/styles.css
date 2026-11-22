@@ -589,7 +589,6 @@ mark {
   width: 100%;
   aspect-ratio: 16 / 10;
   object-fit: cover;
-  object-position: var(--focus, 50% 0%);
 }
 
 /* Tab panels: every panel is readable without JavaScript; with it, one shows. */
@@ -1132,12 +1131,6 @@ mark {
   .panel-head {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  /* A 1440px-wide UI is unreadable at phone width, so each screen is cropped
-     to its focal region instead of being shrunk. Tapping opens it in full. */
-  .shot img {
-    aspect-ratio: 4 / 5;
   }
 
   .rows > div {
