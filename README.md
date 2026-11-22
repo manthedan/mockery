@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <code>v0.2.0</code> · macOS · Apple Silicon · <a href="LICENSE">MIT</a>
+  <a href="https://mockery.studio"><b>mockery.studio</b></a> · <code>v0.2.0</code> · macOS · Apple Silicon · <a href="LICENSE">MIT</a>
 </p>
 
 <p align="center">
