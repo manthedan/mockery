@@ -214,10 +214,19 @@ class CandidateProfileStore:
             self._save_locked()
             return profile
 
-    def _update_redaction_prefs_serialized(self, prefs: ResumeRedactionPrefs) -> ResumeProfile | None:
+    def _update_redaction_prefs_serialized(
+        self,
+        prefs: ResumeRedactionPrefs,
+        *,
+        expected_doc_token: str | None = None,
+    ) -> ResumeProfile | None:
         with self._lock:
             if self._state.resume is None or self._active_doc_token is None:
                 return None
+            if expected_doc_token is not None and self._active_doc_token != expected_doc_token:
+                raise StaleResumeDocumentError(
+                    "Resume was updated in another tab — refresh before toggling redaction."
+                )
             rev = self._resume_revision
             doc_token = self._active_doc_token
             filename = self._state.resume.filename
@@ -249,6 +258,10 @@ class CandidateProfileStore:
                 or self._active_doc_token != doc_token
                 or self._state.resume is None
             ):
+                if expected_doc_token is not None:
+                    raise StaleResumeDocumentError(
+                        "Resume was updated while toggling redaction — refresh and try again."
+                    )
                 return self._state.resume
             self._state.resume = profile
             self._save_locked()
@@ -268,12 +281,13 @@ class CandidateProfileStore:
         with self._prefs_lock:
             with self._lock:
                 r = self._state.resume
-                if r is None:
+                if r is None or self._active_doc_token is None:
                     return None
                 if expected_doc_id and expected_doc_id != self._active_doc_token:
                     raise StaleResumeDocumentError(
                         "Resume was updated in another tab — refresh before toggling redaction."
                     )
+                doc_token = self._active_doc_token
                 target_span = next((sp for sp in r.spans if sp.get("id") == span_id), None)
                 if target_span is None:
                     return None
@@ -289,7 +303,7 @@ class CandidateProfileStore:
                 else:
                     cur_unredacted.append(orig)
                 next_prefs = r.prefs.model_copy(update={"unredacted_values": cur_unredacted})
-            return self._update_redaction_prefs_serialized(next_prefs)
+            return self._update_redaction_prefs_serialized(next_prefs, expected_doc_token=doc_token)
 
     def clear_resume(self) -> None:
         with self._lock:

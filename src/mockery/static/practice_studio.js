@@ -1160,8 +1160,12 @@ export function createPracticeStudioController({
         status.textContent = "Every question answered — your debrief is ready when you are";
         status.dataset.lockNote = "1";
       } else if (status.dataset.lockNote) {
-        status.textContent = "Transcribed privately on this Mac";
         delete status.dataset.lockNote;
+        if (local.lastFailedClip?.target === "answer") {
+          renderMicRetryButton("answer", local.lastFailedClip.error || "Transcription failed");
+        } else {
+          status.textContent = "Transcribed privately on this Mac";
+        }
       }
     }
   }
@@ -1279,11 +1283,12 @@ export function createPracticeStudioController({
     } catch (err) {
       if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return false;
       local.micTarget = null;
-      local.lastFailedClip = { target, questionId: myQuestionId, int16 };
+      const errText = String(err.message || err);
+      local.lastFailedClip = { target, questionId: myQuestionId, int16, error: errText };
       micMachine.transition("idle", { event: "transcribe_error" });
-      updateMicUI(target, "idle", `Local transcription error: ${err.message || err}`);
-      renderMicRetryButton(target, err.message || err);
-      showToast(`${err.message || err} — click Retry transcription to try again.`, 3800);
+      updateMicUI(target, "idle", `Local transcription error: ${errText}`);
+      renderMicRetryButton(target, errText);
+      showToast(`${errText} — click Retry transcription to try again.`, 3800);
       return false;
     }
   }
@@ -2704,10 +2709,10 @@ export function createPracticeStudioController({
         const transcribedOk = await stopMicAndTranscribe();
         if (mySessionGen !== local.sessionGen || !local.session || opMachine.state === "exiting") return;
         if (!transcribedOk) {
-          showToast(
-            "Your last spoken answer could not be transcribed yet — retry transcription or edit before ending.",
-            4200
-          );
+          const msg = local.lastFailedClip
+            ? "Your last spoken answer could not be transcribed yet — click Retry transcription or type below before ending."
+            : "That recording was too short — speak or type your final answer, or click End & Debrief again.";
+          showToast(msg, 4200);
           return;
         }
       }
@@ -2855,6 +2860,7 @@ export function createPracticeStudioController({
     const mySessionGen = local.sessionGen;
     if (!opMachine.transition("submitting_retry", { event: "submit_retry" })) return;
     setBusy(true);
+    let retryOpCtrl = null;
     try {
       if (micMachine.state === "recording" && local.recordingTarget === "retry") {
         await stopMicAndTranscribe();
@@ -2868,7 +2874,7 @@ export function createPracticeStudioController({
         return;
       }
       setButtonLoading("practiceRetrySubmitBtn", true, "Evaluating retry…");
-      const retryOpCtrl = beginOpAbort();
+      retryOpCtrl = beginOpAbort();
       showPendingTurnCard({
         container: el("practiceRetryHistory"),
         roleClass: "pturn-coach",
@@ -2904,7 +2910,7 @@ export function createPracticeStudioController({
         showToast(err?.name === "AbortError" ? "Retry evaluation cancelled." : String(err.message || err), 3200);
       }
     } finally {
-      if (local.opAbortController === retryOpCtrl) local.opAbortController = null;
+      if (retryOpCtrl && local.opAbortController === retryOpCtrl) local.opAbortController = null;
       clearPendingOpUI();
       if (opMachine.state === "submitting_retry") {
         opMachine.transition("idle", { event: "submit_retry_done" });

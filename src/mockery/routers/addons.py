@@ -206,16 +206,17 @@ def build_addons_router(
                 return
             cleaned_up = True
             try:
-                aclose = getattr(chunk_iter, "aclose", None)
-                if callable(aclose):
-                    await aclose()
+                close_fn = getattr(chunk_iter, "close", None)
+                if callable(close_fn):
+                    close_fn()
                 else:
-                    close_fn = getattr(chunk_iter, "close", None)
-                    if callable(close_fn):
-                        close_fn()
-            except Exception:
+                    aclose = getattr(chunk_iter, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
+            except BaseException:
                 pass
-            runtime._tts_sem.release()
+            finally:
+                runtime._tts_sem.release()
 
         async def _guarded_stream():
             try:

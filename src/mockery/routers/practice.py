@@ -94,14 +94,15 @@ async def _await_with_disconnect(request: Request, coro: Any) -> Any:
     """
     work_task = asyncio.create_task(coro)
 
-    async def _watch_disconnect() -> None:
+    async def _watch_disconnect() -> bool:
         while not work_task.done():
             try:
                 if await request.is_disconnected():
-                    return
+                    return True
             except Exception:
-                return
-            await asyncio.sleep(0.15)
+                return False
+            await asyncio.sleep(0.1)
+        return False
 
     watch_task = asyncio.create_task(_watch_disconnect())
     try:
@@ -109,15 +110,23 @@ async def _await_with_disconnect(request: Request, coro: Any) -> Any:
             {work_task, watch_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if work_task in done:
-            return work_task.result()
-        # Client disconnected before work finished — cancel and drain cleanly
-        work_task.cancel()
+        if watch_task in done and watch_task.result() is True and not work_task.done():
+            work_task.cancel()
+            try:
+                await work_task
+            except BaseException:
+                pass
+            raise _ClientDisconnectedError()
+        result = await work_task
+        # Final disconnect check right before committing so a cancel within the last poll tick is honored
         try:
-            await work_task
-        except BaseException:
+            if await request.is_disconnected():
+                raise _ClientDisconnectedError()
+        except _ClientDisconnectedError:
+            raise
+        except Exception:
             pass
-        raise _ClientDisconnectedError()
+        return result
     finally:
         if not watch_task.done():
             watch_task.cancel()
@@ -670,26 +679,34 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
             # If the candidate had an unsent final answer when clicking End & Debrief,
-            # record it directly before grading (avoids burning an extra interviewer-reply LLM call).
+            # include it in-memory before grading (only persisted if debrief succeeds,
+            # so a transient 503 never duplicates the turn on retry).
             final_answer = (body.final_answer or "").strip() if body and body.final_answer else ""
             if final_answer:
                 if len(final_answer) > MAX_PRACTICE_TURN_CHARS:
                     raise HTTPException(status_code=413, detail="Final answer exceeds maximum allowed length.")
                 cur_q = session.current_question()
-                if cur_q is not None and (
-                    not body.expected_question_id or body.expected_question_id == cur_q.id
-                ):
-                    est_carl = estimate_carl_heuristic(final_answer, cur_q.carl_signals)
-                    cur_q.carl_signals = dict(est_carl)
-                    session.turns.append(
-                        PracticeTurn(
-                            role="candidate",
-                            question_id=cur_q.id,
-                            text=final_answer,
-                            carl_signals=dict(est_carl),
-                        )
+                if cur_q is None or (body.expected_question_id and body.expected_question_id != cur_q.id):
+                    phase = derive_practice_phase(session)
+                    allowed, _ = compute_allowed_practice_events(session, phase=phase)
+                    err = InvalidStateTransitionError(
+                        machine="practice_phase",
+                        current_state=phase.value,
+                        event="generate_debrief",
+                        allowed_events=allowed,
+                        remediation="Active question changed before your final answer was recorded; refresh and review before ending.",
                     )
-                    await asyncio.to_thread(runtime.practice_store.save, session)
+                    raise HTTPException(status_code=409, detail=err.to_dict())
+                est_carl = estimate_carl_heuristic(final_answer, cur_q.carl_signals)
+                cur_q.carl_signals = dict(est_carl)
+                session.turns.append(
+                    PracticeTurn(
+                        role="candidate",
+                        question_id=cur_q.id,
+                        text=final_answer,
+                        carl_signals=dict(est_carl),
+                    )
+                )
             await _safe_close_practice_worker(runtime, session.id)
             questions_snapshot = [
                 {**q.model_dump(), "status": "completed" if q.status == "active" else q.status}

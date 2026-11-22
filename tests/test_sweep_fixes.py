@@ -461,9 +461,6 @@ def test_tts_stream_releases_semaphore_on_header_disconnect(tmp_path: Path) -> N
         async def _send_fail(message: dict[str, Any]) -> None:
             raise RuntimeError("client disconnected before response headers")
 
-        async def _receive() -> dict[str, Any]:
-            return {"type": "http.request", "body": b'{"text":"hello"}', "more_body": False}
-
         scope = {
             "type": "http",
             "asgi": {"version": "3.0"},
@@ -481,6 +478,15 @@ def test_tts_stream_releases_semaphore_on_header_disconnect(tmp_path: Path) -> N
             "server": ("127.0.0.1", 8765),
         }
         for _ in range(3):
+            sent_body = False
+
+            async def _receive() -> dict[str, Any]:
+                nonlocal sent_body
+                if not sent_body:
+                    sent_body = True
+                    return {"type": "http.request", "body": b'{"text":"hello"}', "more_body": False}
+                return {"type": "http.disconnect"}
+
             with pytest.raises(RuntimeError):
                 await app(scope, _receive, _send_fail)
         assert rt._tts_sem._value == 2
@@ -608,5 +614,256 @@ def test_practice_debrief_records_final_answer_directly_without_turn_call(tmp_pa
     assert resp.status_code == 200
     assert any("shared SLO latency budgets" in t["text"] for t in seen_turns)
     assert resp.json()["session"]["phase"] == "completed"
+
+
+def test_rules_redactor_detects_decomposed_nfd_unicode_header_name() -> None:
+    import unicodedata
+
+    redactor = RampartRedactor()
+    nfd_name = unicodedata.normalize("NFD", "María Núñez")
+    res = redactor.redact(
+        f"{nfd_name}\nStaff Infrastructure Engineer\nDesigned multi-region failover.",
+        use_rampart=False,
+    )
+    assert nfd_name not in res.redacted_text
+    assert any(sp.get("label") == "PERSON_NAME" for sp in res.spans)
+
+
+def test_practice_turn_real_asgi_disconnect_cancels_and_does_not_commit(tmp_path: Path) -> None:
+    import json as _json
+
+    from mockery.practice import PracticeConfig, PracticeQuestionItem, PracticeSession
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    sess = PracticeSession(
+        role_title="Senior Engineer",
+        config=PracticeConfig(interview_type="behavioral"),
+        questions=[
+            PracticeQuestionItem(
+                id="q_1",
+                title="Ownership",
+                prompt="Tell me about an outage.",
+                status="active",
+            )
+        ],
+    )
+    rt.practice_store.save(sess)
+
+    llm_started = asyncio.Event()
+    llm_cancelled = False
+
+    async def _slow_reply(**kwargs: Any) -> dict[str, Any]:
+        nonlocal llm_cancelled
+        llm_started.set()
+        try:
+            await asyncio.sleep(5.0)
+            return {"interviewer_reply": "Should never commit", "should_advance": False}
+        except asyncio.CancelledError:
+            llm_cancelled = True
+            raise
+
+    rt.llm.generate_practice_interviewer_reply = _slow_reply  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        body_bytes = _json.dumps({"text": "Cancelled answer", "expected_question_id": "q_1"}).encode("utf-8")
+        body_sent = False
+        disconnect_ev = asyncio.Event()
+        sent_statuses: list[int] = []
+
+        async def _receive() -> dict[str, Any]:
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": body_bytes, "more_body": False}
+            await disconnect_ev.wait()
+            return {"type": "http.disconnect"}
+
+        async def _send(msg: dict[str, Any]) -> None:
+            if msg.get("type") == "http.response.start":
+                sent_statuses.append(int(msg["status"]))
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": f"/api/practice/{sess.id}/turn",
+            "raw_path": f"/api/practice/{sess.id}/turn".encode(),
+            "query_string": b"",
+            "headers": [
+                (b"host", b"127.0.0.1:8765"),
+                (b"content-type", b"application/json"),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8765),
+        }
+
+        req_task = asyncio.create_task(app(scope, _receive, _send))
+        await asyncio.wait_for(llm_started.wait(), timeout=2.0)
+        disconnect_ev.set()
+        await asyncio.wait_for(req_task, timeout=2.0)
+
+        assert llm_cancelled is True
+        assert sent_statuses == [499]
+        reloaded = rt.practice_store.get(sess.id)
+        assert reloaded is not None
+        assert reloaded.turns == []
+
+    asyncio.run(_run())
+
+
+def test_practice_debrief_final_answer_rejects_stale_q_and_avoids_503_duplication(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.practice import PracticeConfig, PracticeQuestionItem, PracticeSession
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    sess = PracticeSession(
+        role_title="Senior Engineer",
+        config=PracticeConfig(interview_type="behavioral"),
+        questions=[
+            PracticeQuestionItem(id="q_1", title="Q1", prompt="Prompt 1", status="active"),
+        ],
+    )
+    rt.practice_store.save(sess)
+
+    client = TestClient(app)
+
+    # Mismatched expected_question_id must 409 instead of silently dropping final_answer
+    stale = client.post(
+        f"/api/practice/{sess.id}/debrief",
+        json={"final_answer": "My final answer", "expected_question_id": "q_wrong"},
+    )
+    assert stale.status_code == 409
+
+    # First debrief call fails with 503; retry succeeds -> final_answer must appear EXACTLY ONCE
+    attempts = 0
+
+    async def _flaky_debrief(**kwargs: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient provider 503")
+        return {
+            "overall_summary": "Good.",
+            "strengths": ["Clear"],
+            "focus_areas": ["Metrics"],
+            "question_reviews": [
+                {
+                    "question_id": "q_1",
+                    "carl": {"context": "strong", "action": "strong", "result": "partial", "learning": "partial"},
+                    "what_worked": "Solid",
+                    "upgrade_tip": "Add numbers",
+                }
+            ],
+            "retry_drill": None,
+        }
+
+    rt.llm.generate_practice_debrief = _flaky_debrief  # type: ignore[method-assign]
+    r1 = client.post(
+        f"/api/practice/{sess.id}/debrief",
+        json={"final_answer": "My final answer", "expected_question_id": "q_1"},
+    )
+    assert r1.status_code == 503
+
+    r2 = client.post(
+        f"/api/practice/{sess.id}/debrief",
+        json={"final_answer": "My final answer", "expected_question_id": "q_1"},
+    )
+    assert r2.status_code == 200
+    reloaded = rt.practice_store.get(sess.id)
+    assert reloaded is not None
+    matching = [t for t in reloaded.turns if t.text == "My final answer"]
+    assert len(matching) == 1
+
+
+def test_non_owner_tab_cannot_flush_and_end_active_capture(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    rt.vad_runtime._session = object()  # type: ignore[assignment]
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/session") as ws1, client.websocket_connect("/ws/session") as ws2:
+        ws1.receive_json()
+        ws1.receive_json()
+        ws2.receive_json()
+        ws2.receive_json()
+
+        ws1.send_json({"type": "start_capture"})
+        _ = ws1.receive_json()
+        _ = ws2.receive_json()
+
+        ws2.send_json({"type": "flush_and_end"})
+        rej = ws2.receive_json()
+        assert rej["type"] == "transition_rejected"
+        assert rt.is_capturing is True
+
+
+def test_tts_stream_releases_semaphore_even_when_aclose_raises_cancelled(tmp_path: Path) -> None:
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+
+    class _CancelOnCloseStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            return b"\x00\x00" * 64
+
+        async def aclose(self) -> None:
+            raise asyncio.CancelledError()
+
+    async def _fake_open_stream(*args: Any, **kwargs: Any):
+        return ("phonon", 24000, _CancelOnCloseStream())
+
+    rt.tts.open_pcm_stream = _fake_open_stream  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        async def _send_fail(message: dict[str, Any]) -> None:
+            raise RuntimeError("early disconnect")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/tts/stream",
+            "raw_path": b"/api/tts/stream",
+            "query_string": b"",
+            "headers": [
+                (b"host", b"127.0.0.1:8765"),
+                (b"content-type", b"application/json"),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8765),
+        }
+        for _ in range(3):
+            sent_body = False
+
+            async def _receive() -> dict[str, Any]:
+                nonlocal sent_body
+                if not sent_body:
+                    sent_body = True
+                    return {"type": "http.request", "body": b'{"text":"hello"}', "more_body": False}
+                return {"type": "http.disconnect"}
+
+            with pytest.raises(RuntimeError):
+                await app(scope, _receive, _send_fail)
+        assert rt._tts_sem._value == 2
+
+    asyncio.run(_run())
+
 
 
