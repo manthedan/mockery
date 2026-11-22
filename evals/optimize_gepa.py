@@ -9,12 +9,15 @@ silently mutating ``src/mockery/prompts.py``.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import difflib
 import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +38,14 @@ from evals.metrics import (  # noqa: E402
     validate_candidate_prompt,
     validate_dataset,
 )
-from mockery.llm import _fast_extra_body, _is_reasoning_model  # noqa: E402
+from mockery.llm import (  # noqa: E402
+    CLI_BACKEND_MAP,
+    InterviewCopilotLLM,
+    LLMRuntimeConfig,
+    _fast_extra_body,
+    _is_reasoning_model,
+)
+from mockery.models import LLM_PRESETS  # noqa: E402
 from mockery.prompts import get_prompt_spec  # noqa: E402
 
 DEFAULT_DATASETS: dict[str, Path] = {
@@ -161,6 +171,46 @@ def resolve_task_endpoint_and_key(
     return base_url, "local-no-key"
 
 
+CLI_BIN_TO_PROVIDER: dict[str, str] = {v: k for k, v in CLI_BACKEND_MAP.items()}
+
+
+def parse_cli_transport(spec: str) -> tuple[str, str] | None:
+    """
+    Parse a Mockery `cli://` transport spec into `(cli_bin, model_override)`.
+    Examples:
+      - `cli://claude` -> `("claude", "")`
+      - `cli://claude/sonnet` -> `("claude", "sonnet")`
+      - `cli://agy/gemini-4-neon:high` -> `("agy", "gemini-4-neon:high")`
+      - `cli://codex/gpt-6.1-sol` -> `("codex", "gpt-6.1-sol")`
+    Returns None if `spec` does not start with `cli://`.
+    """
+    raw = (spec or "").strip()
+    if not raw.startswith("cli://"):
+        return None
+    rest = raw[len("cli://") :].strip().strip("/")
+    if not rest:
+        raise ValueError(f"Empty CLI transport spec: {spec!r}")
+    parts = rest.split("/", 1)
+    cli_bin = parts[0].strip()
+    model_override = parts[1].strip() if len(parts) > 1 else ""
+    if cli_bin not in CLI_BIN_TO_PROVIDER:
+        supported = ", ".join(sorted(CLI_BIN_TO_PROVIDER.keys()))
+        raise ValueError(f"Unsupported CLI backend {cli_bin!r} in {spec!r}. Supported: {supported}")
+    return cli_bin, model_override
+
+
+def _build_cli_llm(cli_bin: str, model: str) -> tuple[InterviewCopilotLLM, str]:
+    provider = CLI_BIN_TO_PROVIDER[cli_bin]
+    preset = LLM_PRESETS.get(provider, {})
+    effective_model = (model or "").strip() or str(preset.get("fast_model") or "")
+    cfg = LLMRuntimeConfig(Path(tempfile.gettempdir()))
+    cfg.provider = provider
+    cfg.base_url = f"cli://{cli_bin}"
+    cfg.fast_model = effective_model
+    cfg.calibration_model = effective_model
+    return InterviewCopilotLLM(cfg), effective_model
+
+
 def preflight_gepa_dependencies(reflection_model: Any) -> None:
     """Verify optional GEPA + reflection dependencies before issuing any task LM requests."""
     missing: list[str] = []
@@ -180,7 +230,14 @@ def preflight_gepa_dependencies(reflection_model: Any) -> None:
                 "Upgrade with: uv sync --extra gepa"
             ) from exc
 
-    if isinstance(reflection_model, str) and importlib.util.find_spec("litellm") is None:
+    cli_parsed = parse_cli_transport(reflection_model) if isinstance(reflection_model, str) else None
+    if cli_parsed is not None:
+        cli_bin, _ = cli_parsed
+        if shutil.which(cli_bin) is None:
+            raise RuntimeError(
+                f"Reflection CLI backend `{cli_bin}` not found on PATH for {reflection_model!r}."
+            )
+    elif isinstance(reflection_model, str) and importlib.util.find_spec("litellm") is None:
         missing.append("litellm")
 
     if missing:
@@ -188,6 +245,96 @@ def preflight_gepa_dependencies(reflection_model: Any) -> None:
             f"Missing optional GEPA reflection dependencies: {', '.join(missing)}. "
             "Install them in your dev environment with: uv sync --extra gepa"
         )
+
+
+def make_cli_task_runner(
+    *,
+    target: str,
+    model: str,
+    base_url: str,
+    temperature: float,
+    timeout: float = 60.0,
+) -> Callable[[str, str, dict[str, Any]], str]:
+    """Build a synchronous task runner backed by Mockery's `cli://` transports (agy, claude, codex, gemini, pi)."""
+    parsed = parse_cli_transport(base_url)
+    if parsed is None:
+        raise ValueError(f"Expected cli:// base_url, got {base_url!r}")
+    cli_bin, url_model = parsed
+    if shutil.which(cli_bin) is None:
+        raise RuntimeError(f"Task CLI backend `{cli_bin}` not found on PATH for {base_url!r}.")
+    effective_model = (model or "").strip() or url_model
+    llm, resolved_model = _build_cli_llm(cli_bin, effective_model)
+
+    def _run(system_prompt: str, user_prompt: str, example: dict[str, Any]) -> str:
+        return asyncio.run(
+            llm._complete_text(
+                model=resolved_model,
+                system=system_prompt,
+                user=user_prompt,
+                temperature=temperature,
+                max_tokens=compute_max_tokens(target, example),
+                timeout=timeout,
+                expect_json=True,
+            )
+        )
+
+    return _run
+
+
+def make_cli_reflection_lm(
+    reflection_spec: str,
+    *,
+    timeout: float = 120.0,
+) -> Callable[[str | list[dict[str, Any]]], str]:
+    """Build a GEPA-compatible callable `reflection_lm` backed by a local Mockery `cli://` transport."""
+    parsed = parse_cli_transport(reflection_spec)
+    if parsed is None:
+        raise ValueError(f"Expected cli:// reflection spec, got {reflection_spec!r}")
+    cli_bin, model_override = parsed
+    if shutil.which(cli_bin) is None:
+        raise RuntimeError(f"Reflection CLI backend `{cli_bin}` not found on PATH for {reflection_spec!r}.")
+    provider = CLI_BIN_TO_PROVIDER[cli_bin]
+    default_model = str(LLM_PRESETS.get(provider, {}).get("calibration_model") or "")
+    llm, resolved_model = _build_cli_llm(cli_bin, model_override or default_model)
+    default_sys = (
+        "You are an expert prompt engineer optimizing a system prompt for a production interview copilot. "
+        "Analyze all evaluation traces carefully, avoid overfitting to individual examples, preserve every "
+        "required runtime `{placeholder}` verbatim, and return the proposed prompt inside a fenced ``` block."
+    )
+
+    def _reflect(prompt: str | list[dict[str, Any]]) -> str:
+        if isinstance(prompt, list):
+            sys_parts: list[str] = []
+            user_parts: list[str] = []
+            for msg in prompt:
+                if not isinstance(msg, dict):
+                    user_parts.append(str(msg))
+                    continue
+                role = str(msg.get("role") or "user").lower()
+                content = str(msg.get("content") or "")
+                if role == "system":
+                    sys_parts.append(content)
+                else:
+                    user_parts.append(content)
+            sys_text = "\n\n".join(p for p in sys_parts if p.strip()) or default_sys
+            user_text = "\n\n".join(p for p in user_parts if p.strip())
+        else:
+            sys_text = default_sys
+            user_text = str(prompt)
+
+        return asyncio.run(
+            llm._complete_text(
+                model=resolved_model,
+                system=sys_text,
+                user=user_text,
+                temperature=0.4,
+                max_tokens=2400,
+                timeout=timeout,
+                expect_json=False,
+            )
+        )
+
+    return _reflect
 
 
 def make_openai_compatible_task_runner(
@@ -452,9 +599,13 @@ def run_gepa_optimization(
         "Target runtime executes on fast local Apple Silicon (oMLX) or low-latency cloud models."
     )
 
+    resolved_reflection_lm: Any = reflection_model
+    if isinstance(reflection_model, str) and reflection_model.strip().startswith("cli://"):
+        resolved_reflection_lm = make_cli_reflection_lm(reflection_model)
+
     config = GEPAConfig(
         engine=EngineConfig(max_metric_calls=max_metric_calls),
-        reflection=ReflectionConfig(reflection_lm=reflection_model),
+        reflection=ReflectionConfig(reflection_lm=resolved_reflection_lm),
     )
 
     result = optimize_anything(
@@ -582,13 +733,21 @@ def main(argv: list[str] | None = None) -> int:
             args.task_base_url,
             args.task_api_key,
         )
-        runner = make_openai_compatible_task_runner(
-            target=target,
-            model=args.task_model,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            temperature=TARGET_TEMPERATURES[target],
-        )
+        if resolved_base_url.strip().startswith("cli://"):
+            runner = make_cli_task_runner(
+                target=target,
+                model=args.task_model,
+                base_url=resolved_base_url,
+                temperature=TARGET_TEMPERATURES[target],
+            )
+        else:
+            runner = make_openai_compatible_task_runner(
+                target=target,
+                model=args.task_model,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                temperature=TARGET_TEMPERATURES[target],
+            )
 
     baseline_train = evaluate_candidate_on_examples(
         target=target,

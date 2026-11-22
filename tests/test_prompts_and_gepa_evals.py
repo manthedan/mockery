@@ -30,6 +30,9 @@ from evals.optimize_gepa import (
     compute_max_tokens,
     evaluate_candidate_on_examples,
     main as gepa_cli_main,
+    make_cli_reflection_lm,
+    make_cli_task_runner,
+    parse_cli_transport,
     preflight_gepa_dependencies,
     resolve_task_endpoint_and_key,
 )
@@ -657,3 +660,66 @@ def test_optimize_gepa_dry_run_eval_outage_and_stubbed_gepa_orchestration(
 
     # Verify prompts.py was NEVER mutated
     assert (SRC_DIR / "prompts.py").read_text(encoding="utf-8") == prompts_before
+
+
+def test_gepa_cli_transport_parsing_preflight_and_runners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert parse_cli_transport("http://localhost:8000/v1") is None
+    assert parse_cli_transport("cli://claude") == ("claude", "")
+    assert parse_cli_transport("cli://claude/sonnet") == ("claude", "sonnet")
+    assert parse_cli_transport("cli://agy/gemini-4-neon:high") == ("agy", "gemini-4-neon:high")
+    assert parse_cli_transport("cli://codex/gpt-6.1-sol") == ("codex", "gpt-6.1-sol")
+    with pytest.raises(ValueError, match="Unsupported CLI backend"):
+        parse_cli_transport("cli://unknown_cli/model")
+
+    # cli:// reflection does NOT require litellm (only gepa + CLI binary on PATH)
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **kw: None if name == "litellm" else (object() if name == "gepa" else real_find_spec(name, *a, **kw)),
+    )
+    monkeypatch.setattr("evals.optimize_gepa.shutil.which", lambda name: f"/usr/local/bin/{name}")
+
+    fake_oa = types.ModuleType("gepa.optimize_anything")
+    fake_oa.EngineConfig = object  # type: ignore[attr-defined]
+    fake_oa.ReflectionConfig = object  # type: ignore[attr-defined]
+    fake_oa.GEPAConfig = object  # type: ignore[attr-defined]
+    fake_oa.optimize_anything = lambda **_kw: None  # type: ignore[attr-defined]
+    fake_gepa_pkg = types.ModuleType("gepa")
+    fake_gepa_pkg.optimize_anything = fake_oa  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gepa", fake_gepa_pkg)
+    monkeypatch.setitem(sys.modules, "gepa.optimize_anything", fake_oa)
+
+    preflight_gepa_dependencies("cli://claude/sonnet")
+
+    # Stub InterviewCopilotLLM._complete_text to verify task runner & callable reflection LM wiring
+    seen: list[dict[str, Any]] = []
+
+    async def fake_complete(self: Any, **kwargs: Any) -> str:
+        seen.append({"cli": self.config.cli_backend, **kwargs})
+        return '{"ok": true}'
+
+    monkeypatch.setattr(InterviewCopilotLLM, "_complete_text", fake_complete)
+
+    runner = make_cli_task_runner(
+        target="triage_window",
+        model="haiku",
+        base_url="cli://claude",
+        temperature=0.0,
+    )
+    assert runner("sys prompt", "user prompt", {"incoming_utterances": [{}]}) == '{"ok": true}'
+    assert seen[-1]["cli"] == "claude"
+    assert seen[-1]["model"] == "haiku"
+    assert seen[-1]["expect_json"] is True
+
+    reflect_fn = make_cli_reflection_lm("cli://agy/gemini-4-neon:high")
+    assert reflect_fn("Improve this prompt") == '{"ok": true}'
+    assert seen[-1]["cli"] == "agy"
+    assert seen[-1]["model"] == "gemini-4-neon:high"
+    assert seen[-1]["expect_json"] is False
+
+    assert reflect_fn([{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]) == '{"ok": true}'
+    assert seen[-1]["system"] == "S"
+    assert seen[-1]["user"] == "U"
