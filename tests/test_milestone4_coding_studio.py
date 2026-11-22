@@ -301,6 +301,9 @@ if (wsPy.language !== 'python' || !isPyodidePackInstalled({ packs: [{ id: 'pyodi
 }
 const formatted = formatTestRunSummary({ language: 'javascript', ok: true, stdout: 'ALL TESTS PASSED', error: '', durationMs: 9 });
 if (!formatted.includes('[PASSED]')) throw new Error('Expected [PASSED] header');
+if (!formatted.includes('(9 ms)')) throw new Error('Expected whole-millisecond timing');
+const instant = formatTestRunSummary({ language: 'javascript', ok: true, stdout: '', error: '', durationMs: 0 });
+if (!instant.includes('(<1 ms)') || instant.includes('0 ms')) throw new Error('Sub-millisecond run should read <1 ms');
 
 // 2. Run real js_sandbox_worker.js inside isolated VM context
 const workerSource = fs.readFileSync('./src/mockery/static/js_sandbox_worker.js', 'utf8');

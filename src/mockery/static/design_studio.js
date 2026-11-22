@@ -305,19 +305,271 @@ export function createStarterGraph(question = null) {
   });
 }
 
-function edgeBorderPoint(fromCenter, toCenter, boxW, boxH) {
-  const dx = toCenter.x - fromCenter.x;
-  const dy = toCenter.y - fromCenter.y;
-  if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return { ...toCenter };
-  const hw = boxW / 2 + 4;
-  const hh = boxH / 2 + 4;
-  const tx = Math.abs(dx) > 0.001 ? hw / Math.abs(dx) : Infinity;
-  const ty = Math.abs(dy) > 0.001 ? hh / Math.abs(dy) : Infinity;
-  const t = Math.min(tx, ty);
+/* ---------------- Edge routing & label placement ----------------
+
+   Every flow leaves the perimeter of its source box and ends — arrowhead and all —
+   at the perimeter of its target box. Aligned boxes get one straight line. Diagonal
+   neighbours get a single rounded elbow, so two boxes that almost touch corner to
+   corner are still joined by legs long enough to read (a centre-to-centre line
+   between them is a stub that its own label swallows). Labels are placed last: on
+   the line where a leg can carry them, beside it where it cannot, and never over a
+   box, another label, or somebody else's line when a clear spot exists. */
+
+const EDGE_TIP_OVERSHOOT = 3.1; // the arrowhead reaches this far past the end of its path
+const EDGE_TIP_GAP = EDGE_TIP_OVERSHOOT + 1.4; // path end → box edge: tip rests just off the stroke
+const EDGE_ARROW_ROOM = 8; // straight run the arrowhead needs before its path ends
+const EDGE_MIN_LEG = 20; // an elbow leg shorter than this reads as a kink, not a route
+const EDGE_CORNER_R = 8;
+const EDGE_LANE = 7; // a flow and its reverse run this far either side of the shared axis
+const EDGE_LABEL_H = 17;
+const EDGE_LABEL_PAD_X = 7;
+const EDGE_LABEL_FONT = '500 10px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif';
+
+function nodeRect(n) {
   return {
-    x: toCenter.x - dx * t,
-    y: toCenter.y - dy * t,
+    x1: n.x,
+    y1: n.y,
+    x2: n.x + NODE_W,
+    y2: n.y + NODE_H,
+    cx: n.x + NODE_W / 2,
+    cy: n.y + NODE_H / 2,
   };
+}
+
+function rectsOverlap(r, o, pad = 0) {
+  return r.x1 < o.x2 + pad && r.x2 > o.x1 - pad && r.y1 < o.y2 + pad && r.y2 > o.y1 - pad;
+}
+
+// Liang–Barsky: does the segment p→q pass through rect r?
+function segmentHitsRect(p, q, r) {
+  let t0 = 0;
+  let t1 = 1;
+  const clip = (den, num) => {
+    if (den === 0) return num >= 0;
+    const t = num / den;
+    if (den < 0) {
+      if (t > t1) return false;
+      if (t > t0) t0 = t;
+    } else {
+      if (t < t0) return false;
+      if (t < t1) t1 = t;
+    }
+    return true;
+  };
+  const dx = q.x - p.x;
+  const dy = q.y - p.y;
+  return (
+    clip(-dx, p.x - r.x1) && clip(dx, r.x2 - p.x) && clip(-dy, p.y - r.y1) && clip(dy, r.y2 - p.y)
+  );
+}
+
+/**
+ * Route one flow between two components.
+ * Returns the polyline it follows: two points for a straight run, three for an elbow.
+ * `paired` means the reverse flow also exists, so the two must not sit on top of each other.
+ * `obstacles` are the rects of the other components, used only to pick the clearer elbow.
+ */
+export function routeEdge(a, b, { paired = false, obstacles = [] } = {}) {
+  const A = nodeRect(a);
+  const B = nodeRect(b);
+  const dx = B.cx - A.cx;
+  const dy = B.cy - A.cy;
+  const right = dx >= 0;
+  const down = dy >= 0;
+  const gapX = Math.abs(dx) - NODE_W; // clear space between the boxes; negative = overlap
+  const gapY = Math.abs(dy) - NODE_H;
+  const lane = paired ? EDGE_LANE : 0;
+
+  const straightH = () => {
+    const y =
+      (Math.max(A.y1, B.y1) + Math.min(A.y2, B.y2)) / 2 +
+      (right ? -1 : 1) * Math.min(lane, Math.max(0, -gapY / 2 - 4));
+    return [
+      { x: right ? A.x2 : A.x1, y },
+      { x: right ? B.x1 - EDGE_TIP_GAP : B.x2 + EDGE_TIP_GAP, y },
+    ];
+  };
+  const straightV = () => {
+    const x =
+      (Math.max(A.x1, B.x1) + Math.min(A.x2, B.x2)) / 2 +
+      (down ? 1 : -1) * Math.min(lane, Math.max(0, -gapX / 2 - 4));
+    return [
+      { x, y: down ? A.y2 : A.y1 },
+      { x, y: down ? B.y1 - EDGE_TIP_GAP : B.y2 + EDGE_TIP_GAP },
+    ];
+  };
+
+  // Same row or same column: one straight line through the band the boxes share.
+  if (gapX > 0 && -gapY >= NODE_H / 2) return straightH();
+  if (gapY > 0 && -gapX >= NODE_W / 2) return straightV();
+
+  // Diagonal: one elbow. Both orientations have the same leg lengths, so they are
+  // either both drawable or neither is.
+  const legX = Math.abs(dx) - NODE_W / 2;
+  const legY = Math.abs(dy) - NODE_H / 2;
+  if (legX - EDGE_TIP_GAP >= EDGE_MIN_LEG && legY - EDGE_TIP_GAP >= EDGE_MIN_LEG) {
+    // Out through the top/bottom, in through the side.
+    const viaSide = [
+      { x: A.cx, y: down ? A.y2 : A.y1 },
+      { x: A.cx, y: B.cy },
+      { x: right ? B.x1 - EDGE_TIP_GAP : B.x2 + EDGE_TIP_GAP, y: B.cy },
+    ];
+    // A flow and its reverse both take this shape, which puts them on opposite corners.
+    if (paired) return viaSide;
+    // Out through the side, in through the top/bottom.
+    const viaTop = [
+      { x: right ? A.x2 : A.x1, y: A.cy },
+      { x: B.cx, y: A.cy },
+      { x: B.cx, y: down ? B.y1 - EDGE_TIP_GAP : B.y2 + EDGE_TIP_GAP },
+    ];
+    const others = obstacles.filter(
+      (o) => !(o.x1 === A.x1 && o.y1 === A.y1) && !(o.x1 === B.x1 && o.y1 === B.y1)
+    );
+    // Count the boxes each elbow would run through (or graze: a little air counts too).
+    const crossings = (pts) =>
+      others.reduce((n, o) => {
+        const air = { x1: o.x1 - 6, y1: o.y1 - 6, x2: o.x2 + 6, y2: o.y2 + 6 };
+        return n + (segmentHitsRect(pts[0], pts[1], air) || segmentHitsRect(pts[1], pts[2], air) ? 1 : 0);
+      }, 0);
+    return crossings(viaTop) < crossings(viaSide) ? viaTop : viaSide;
+  }
+
+  // Too offset for the aligned case, too close for an elbow: use the sliver they share.
+  if (gapY > 0 && -gapX >= 16) return straightV();
+  if (gapX > 0 && -gapY >= 10) return straightH();
+
+  // Last resort (boxes overlapping, or barely offset): clip the centre line to both perimeters.
+  const clip = (from, box, pad) => {
+    const ddx = box.cx - from.cx;
+    const ddy = box.cy - from.cy;
+    if (Math.abs(ddx) < 0.001 && Math.abs(ddy) < 0.001) return { x: box.cx, y: box.cy };
+    const t = Math.min(
+      1,
+      Math.abs(ddx) > 0.001 ? (NODE_W / 2 + pad) / Math.abs(ddx) : Infinity,
+      Math.abs(ddy) > 0.001 ? (NODE_H / 2 + pad) / Math.abs(ddy) : Infinity
+    );
+    return { x: box.cx - ddx * t, y: box.cy - ddy * t };
+  };
+  const dist = Math.hypot(dx, dy) || 1;
+  const shift = { x: (dy / dist) * lane, y: (-dx / dist) * lane };
+  const start = clip(B, A, 0);
+  const end = clip(A, B, EDGE_TIP_GAP);
+  return [
+    { x: start.x + shift.x, y: start.y + shift.y },
+    { x: end.x + shift.x, y: end.y + shift.y },
+  ];
+}
+
+/** SVG path for a routed polyline, with elbows rounded and room left for the arrowhead. */
+export function edgePathD(pts) {
+  const f = (n) => n.toFixed(1);
+  let d = `M ${f(pts[0].x)} ${f(pts[0].y)}`;
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i];
+    const prev = pts[i - 1];
+    const next = pts[i + 1];
+    if (!next) {
+      d += ` L ${f(p.x)} ${f(p.y)}`;
+      break;
+    }
+    const inLen = Math.hypot(p.x - prev.x, p.y - prev.y) || 1;
+    const outLen = Math.hypot(next.x - p.x, next.y - p.y) || 1;
+    const outRoom = i === pts.length - 2 ? outLen - EDGE_ARROW_ROOM : outLen / 2;
+    const r = Math.max(0, Math.min(EDGE_CORNER_R, inLen / 2, outRoom));
+    const before = { x: p.x - ((p.x - prev.x) / inLen) * r, y: p.y - ((p.y - prev.y) / inLen) * r };
+    const after = { x: p.x + ((next.x - p.x) / outLen) * r, y: p.y + ((next.y - p.y) / outLen) * r };
+    d += ` L ${f(before.x)} ${f(before.y)} Q ${f(p.x)} ${f(p.y)} ${f(after.x)} ${f(after.y)}`;
+  }
+  return d;
+}
+
+/**
+ * Choose where a w×h label pill sits for a routed flow. Returns the pill's centre.
+ * `boxes` are all component rects, `labels` the pills already placed, and `lines`
+ * the [p, q] segments of every other flow.
+ */
+export function placeEdgeLabel(pts, w, h, { boxes = [], labels = [], lines = [] } = {}) {
+  const legs = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p = pts[i];
+    const q = pts[i + 1];
+    const len = Math.hypot(q.x - p.x, q.y - p.y);
+    if (len < 1) continue;
+    const ux = (q.x - p.x) / len;
+    const uy = (q.y - p.y) / len;
+    // Length of line a pill hides when centred on this leg.
+    const cover = Math.min(
+      Math.abs(ux) > 0.01 ? w / Math.abs(ux) : Infinity,
+      Math.abs(uy) > 0.01 ? h / Math.abs(uy) : Infinity
+    );
+    // Keep a visible stub at each end — and the whole arrowhead on the final leg.
+    const tail = i === pts.length - 2 ? EDGE_ARROW_ROOM + 5 : 5;
+    const lo = cover / 2 + 5;
+    legs.push({ p, ux, uy, len, lo, room: len - cover / 2 - tail - lo });
+  }
+  if (legs.length === 0) {
+    const last = pts[pts.length - 1];
+    return { x: (pts[0].x + last.x) / 2, y: (pts[0].y + last.y) / 2 };
+  }
+  legs.sort((s, t) => t.room - s.room);
+  const at = (leg, along, off = 0) => ({
+    x: leg.p.x + leg.ux * along - leg.uy * off,
+    y: leg.p.y + leg.uy * along + leg.ux * off,
+  });
+
+  const candidates = [];
+  // 1. On the line: centred between the leg's start and its arrowhead, then nudged along it.
+  for (const leg of legs) {
+    if (leg.room < 0) continue;
+    for (const frac of [0.5, 0.15, 0.85]) candidates.push({ ...at(leg, leg.lo + leg.room * frac), away: 0 });
+  }
+  // 2. Beside the line, when no leg can carry the pill without swallowing the arrow —
+  //    stepping further out when the gap the line runs through is narrower than the pill.
+  for (let step = 0; step <= 6; step++) {
+    for (const leg of legs) {
+      const off = (Math.abs(leg.uy) * w) / 2 + (Math.abs(leg.ux) * h) / 2 + 5 + step * 6;
+      const sides = [at(leg, leg.len / 2, -off), at(leg, leg.len / 2, off)];
+      sides.sort((m, n) => m.y - n.y || n.x - m.x); // above first, then to the right
+      for (const side of sides) candidates.push({ ...side, away: step });
+    }
+  }
+
+  let best = candidates[0];
+  let bestCost = Infinity;
+  candidates.forEach((c, idx) => {
+    const r = { x1: c.x - w / 2, y1: c.y - h / 2, x2: c.x + w / 2, y2: c.y + h / 2 };
+    const near = { x1: r.x1 - 2, y1: r.y1 - 2, x2: r.x2 + 2, y2: r.y2 + 2 };
+    // Earlier candidates win ties; drifting away from the line costs more than a snug fit,
+    // but far less than covering a box, a label, or another flow.
+    let cost = idx * 0.01 + c.away * 2;
+    if (r.x1 < 2 || r.y1 < 2 || r.x2 > CANVAS_W - 2 || r.y2 > CANVAS_H - 2) cost += 100;
+    for (const box of boxes) cost += rectsOverlap(r, box, 1) ? 100 : rectsOverlap(r, box, 4) ? 1 : 0;
+    for (const lbl of labels) if (rectsOverlap(r, lbl, 2)) cost += 60;
+    for (const [p, q] of lines) if (segmentHitsRect(p, q, near)) cost += 25;
+    if (cost < bestCost) {
+      best = c;
+      bestCost = cost;
+    }
+  });
+  return { x: best.x, y: best.y };
+}
+
+let edgeLabelMeasureCtx;
+
+/** Width of a label pill: the real rendered text width plus padding. */
+function edgeLabelWidth(text) {
+  if (edgeLabelMeasureCtx === undefined) {
+    try {
+      edgeLabelMeasureCtx = document.createElement("canvas").getContext("2d");
+      if (edgeLabelMeasureCtx) edgeLabelMeasureCtx.font = EDGE_LABEL_FONT;
+    } catch {
+      edgeLabelMeasureCtx = null;
+    }
+  }
+  const textW = edgeLabelMeasureCtx
+    ? edgeLabelMeasureCtx.measureText(text).width
+    : Array.from(text).length * 5.9;
+  return Math.ceil(textW) + EDGE_LABEL_PAD_X * 2;
 }
 
 /* ---------------- Explicit Discriminated Interaction State Machine ---------------- */
@@ -614,10 +866,10 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
                 <pattern id="${gridId}" width="24" height="24" patternUnits="userSpaceOnUse">
                   <circle cx="1.5" cy="1.5" r="1" class="sd-grid-dot"></circle>
                 </pattern>
-                <marker id="${markerId}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <marker id="${markerId}" viewBox="0 0 10 10" refX="7" refY="5" markerUnits="userSpaceOnUse" markerWidth="10.4" markerHeight="10.4" orient="auto-start-reverse">
                   <path d="M 0 1.2 L 10 5 L 0 8.8 z" class="sd-arrow-fill"></path>
                 </marker>
-                <marker id="${markerSelId}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <marker id="${markerSelId}" viewBox="0 0 10 10" refX="7" refY="5" markerUnits="userSpaceOnUse" markerWidth="10.4" markerHeight="10.4" orient="auto-start-reverse">
                   <path d="M 0 1.2 L 10 5 L 0 8.8 z" class="sd-arrow-fill-sel"></path>
                 </marker>
               </defs>
@@ -725,61 +977,56 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       if (undoBtn) undoBtn.disabled = isDragging || state.history.length === 0;
       if (redoBtn) redoBtn.disabled = isDragging || state.future.length === 0;
 
-      // Render edges
-      const edgeMarkup = [];
+      // Render edges: route every flow first, then place labels around all boxes and lines.
+      const boxes = nodes.map(nodeRect);
+      const routed = [];
       for (const e of edges) {
         const a = nodeMap.get(e.from);
         const b = nodeMap.get(e.to);
         if (!a || !b) continue;
-        const cA = { x: a.x + NODE_W / 2, y: a.y + NODE_H / 2 };
-        const cB = { x: b.x + NODE_W / 2, y: b.y + NODE_H / 2 };
-        const hasReverse = edges.some((o) => o.from === e.to && o.to === e.from);
+        const paired = edges.some((o) => o.from === e.to && o.to === e.from);
+        routed.push({ edge: e, pts: routeEdge(a, b, { paired, obstacles: boxes }) });
+      }
 
+      const lineMarkup = [];
+      const labelMarkup = [];
+      const placedLabels = [];
+      for (const r of routed) {
+        const e = r.edge;
         const isSel = selected?.kind === "edge" && selected.id === e.id;
-        const mUrl = `url(#${isSel ? markerSelId : markerId})`;
-
-        let pathD = "";
-        let labelX = (cA.x + cB.x) / 2;
-        let labelY = (cA.y + cB.y) / 2 - 8;
-
-        if (hasReverse) {
-          const dx = cB.x - cA.x;
-          const dy = cB.y - cA.y;
-          const dist = Math.hypot(dx, dy) || 1;
-          const nx = -dy / dist;
-          const ny = dx / dist;
-          const ctrlX = (cA.x + cB.x) / 2 + nx * 28;
-          const ctrlY = (cA.y + cB.y) / 2 + ny * 28;
-          const start = edgeBorderPoint({ x: ctrlX, y: ctrlY }, cA, NODE_W, NODE_H);
-          const end = edgeBorderPoint({ x: ctrlX, y: ctrlY }, cB, NODE_W, NODE_H);
-          pathD = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} Q ${ctrlX.toFixed(1)} ${ctrlY.toFixed(1)} ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
-          labelX = 0.25 * start.x + 0.5 * ctrlX + 0.25 * end.x;
-          labelY = 0.25 * start.y + 0.5 * ctrlY + 0.25 * end.y - 6;
-        } else {
-          const start = edgeBorderPoint(cB, cA, NODE_W, NODE_H);
-          const end = edgeBorderPoint(cA, cB, NODE_W, NODE_H);
-          pathD = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
-          labelX = (start.x + end.x) / 2;
-          labelY = (start.y + end.y) / 2 - 8;
-        }
+        const groupCls = `sd-edge-group ${isSel ? "is-selected" : ""}`;
+        const pathD = edgePathD(r.pts);
+        lineMarkup.push(`
+          <g class="${groupCls}" data-sd-edge="${xmlEscape(e.id)}">
+            <path d="${pathD}" class="sd-edge-hit" fill="none"></path>
+            <path d="${pathD}" class="sd-edge-line" fill="none" marker-end="url(#${isSel ? markerSelId : markerId})"></path>
+          </g>
+        `);
 
         const lbl = truncateText(e.label, 24);
-        edgeMarkup.push(`
-          <g class="sd-edge-group ${isSel ? "is-selected" : ""}" data-sd-edge="${xmlEscape(e.id)}">
-            <path d="${pathD}" class="sd-edge-hit" fill="none"></path>
-            <path d="${pathD}" class="sd-edge-line" fill="none" marker-end="${mUrl}"></path>
-            ${
-              lbl
-                ? `<g transform="translate(${labelX.toFixed(1)}, ${labelY.toFixed(1)})">
-                     <rect x="${-(lbl.length * 3.4 + 6)}" y="-9" width="${lbl.length * 6.8 + 12}" height="17" rx="4" class="sd-edge-label-bg"></rect>
-                     <text x="0" y="3" text-anchor="middle" class="sd-edge-label">${xmlEscape(lbl)}</text>
-                   </g>`
-                : ""
-            }
+        if (!lbl) continue;
+        const w = edgeLabelWidth(lbl);
+        const lines = [];
+        for (const other of routed) {
+          if (other === r) continue;
+          for (let i = 0; i < other.pts.length - 1; i++) lines.push([other.pts[i], other.pts[i + 1]]);
+        }
+        const c = placeEdgeLabel(r.pts, w, EDGE_LABEL_H, { boxes, labels: placedLabels, lines });
+        placedLabels.push({
+          x1: c.x - w / 2,
+          y1: c.y - EDGE_LABEL_H / 2,
+          x2: c.x + w / 2,
+          y2: c.y + EDGE_LABEL_H / 2,
+        });
+        labelMarkup.push(`
+          <g class="${groupCls} sd-edge-label-group" data-sd-edge="${xmlEscape(e.id)}" transform="translate(${c.x.toFixed(1)}, ${c.y.toFixed(1)})">
+            <rect x="${(-w / 2).toFixed(1)}" y="${-EDGE_LABEL_H / 2}" width="${w}" height="${EDGE_LABEL_H}" rx="${EDGE_LABEL_H / 2}" class="sd-edge-label-bg"></rect>
+            <text x="0" y="3.5" text-anchor="middle" class="sd-edge-label">${xmlEscape(lbl)}</text>
           </g>
         `);
       }
-      edgesLayer.innerHTML = edgeMarkup.join("");
+      // Pills are drawn after every line, so no flow ever runs across another flow's label.
+      edgesLayer.innerHTML = lineMarkup.join("") + labelMarkup.join("");
 
       // Render nodes
       const nodeMarkup = [];

@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .models import PARAKEET_CHECKPOINTS
 from .redactor import RAMPART_APPROX_MB, RAMPART_REPO_ID, RampartRedactor
 from .tts import KOKORO_APPROX_MB, KOKORO_REPO_ID, PHONON_APPROX_MB, PHONON_REPO_ID
 from .state_machines import (
@@ -219,6 +218,7 @@ class AddonManager:
             {
                 "id": "rampart_pii",
                 "name": "Resume Privacy Scrubber",
+                "model": "Rampart",
                 "category": "privacy",
                 "size_mb": RAMPART_APPROX_MB,
                 "description": "Finds names, employers, and contact details on this Mac, so they are hidden before anything reaches a cloud AI.",
@@ -228,7 +228,8 @@ class AddonManager:
             },
             {
                 "id": "parakeet_v2",
-                "name": PARAKEET_CHECKPOINTS["mlx-community/parakeet-tdt-0.6b-v2"],
+                "name": "English Speech Recognition",
+                "model": "Parakeet TDT 0.6B v2",
                 "category": "speech",
                 "size_mb": 600,
                 "description": "Offline speech recognition for English. Turns what you say into text without leaving this Mac.",
@@ -238,7 +239,8 @@ class AddonManager:
             },
             {
                 "id": "parakeet_v3",
-                "name": PARAKEET_CHECKPOINTS["mlx-community/parakeet-tdt-0.6b-v3"],
+                "name": "Multilingual Speech Recognition",
+                "model": "Parakeet TDT 0.6B v3",
                 "category": "speech",
                 "size_mb": 620,
                 "description": "Offline speech recognition for 25 European languages.",
@@ -248,7 +250,8 @@ class AddonManager:
             },
             {
                 "id": "phonon_tts",
-                "name": "Phonon · Fast Voice",
+                "name": "Phonon Fast Voice",
+                "model": "Phonon-31M",
                 "category": "voice",
                 "size_mb": PHONON_APPROX_MB,
                 "description": "A lightweight interviewer voice that answers instantly, fully offline.",
@@ -266,7 +269,8 @@ class AddonManager:
             },
             {
                 "id": "kokoro_tts",
-                "name": "Kokoro · Studio Voice",
+                "name": "Kokoro Studio Voice",
+                "model": "Kokoro-82M",
                 "category": "voice",
                 "size_mb": KOKORO_APPROX_MB,
                 "description": "A warm, natural interviewer voice with US and UK accents. Interrupt it any time, just like a real conversation.",
@@ -284,7 +288,8 @@ class AddonManager:
             },
             {
                 "id": "pyodide_python",
-                "name": "Python Test Runner",
+                "name": "Python for Coding Rounds",
+                "model": "Pyodide",
                 "category": "coding",
                 "size_mb": 14,
                 "description": "Runs your Python tests safely on this Mac during coding practice. No internet needed.",

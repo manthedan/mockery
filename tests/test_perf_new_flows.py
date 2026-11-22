@@ -408,6 +408,50 @@ def test_practice_session_store_summary_cache_parity_and_invalidation(tmp_path: 
     assert "prac_perf_01.json" not in store._summary_cache
 
 
+def test_practice_history_score_matches_debrief_after_retry(tmp_path: Path) -> None:
+    """The Home rail must show the same headline score as the Debrief, retries included."""
+
+    def carl(context: str, action: str, result: str, learning: str) -> dict[str, str]:
+        return {"context": context, "action": action, "result": result, "learning": learning}
+
+    store = PracticeSessionStore(tmp_path / "practice")
+    session = PracticeSession(
+        id="prac_retry_score",
+        phase="completed",
+        questions=[
+            PracticeQuestionItem(
+                id="q_strong", title="Strong", prompt="p", status="completed",
+                carl_signals=carl("strong", "strong", "strong", "strong"),
+            ),
+            PracticeQuestionItem(
+                id="q_weak", title="Weak", prompt="p", status="completed",
+                carl_signals=carl("strong", "strong", "missing", "partial"),
+            ),
+        ],
+        debrief={"retry_drill": {"question_id": "q_weak", "prompt": "Retry the result."}},
+    )
+    store.save(session)
+    # Per-signal average across both answers: result lands on "partial" → 3.5 / 4.
+    assert store.list_recent()[0]["score"] == 3.5
+
+    # An unscored attempt changes nothing; the latest scored retry replaces the drilled answer.
+    session.retry_history = [
+        {"candidate_answer": "first", "feedback": {"carl_after": carl("strong", "strong", "partial", "strong")}},
+        {"candidate_answer": "second", "feedback": {"carl_after": carl("strong", "strong", "strong", "strong")}},
+        {"candidate_answer": "third", "feedback": {}},
+    ]
+    store.save(session)
+    warm = store.list_recent()
+    cold = PracticeSessionStore(tmp_path / "practice").list_recent()
+    assert warm == cold
+    assert warm[0]["score"] == 4.0
+
+    # Without an explicit drill target, the retry stands in for the weakest answer.
+    session.debrief = {"overall_encouragement": "Nice."}
+    store.save(session)
+    assert store.list_recent()[0]["score"] == 4.0
+
+
 def test_question_bank_cache_jd_score_parity_and_invalidation(tmp_path: Path) -> None:
     user_dir = tmp_path / "banks"
     user_dir.mkdir(parents=True, exist_ok=True)

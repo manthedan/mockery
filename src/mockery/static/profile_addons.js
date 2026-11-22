@@ -276,11 +276,11 @@ export function createProfileAddonsController({
         engineBadge.classList.add("is-ok");
       } else if (rampart.error) {
         engineBadge.textContent = "Basic detection";
-        engineBadge.title = `Smart detection could not start (${rampart.error}). Pattern rules are still protecting you.`;
+        engineBadge.title = `Resume Privacy Scrubber could not start (${rampart.error}). Pattern rules are still protecting you.`;
         engineBadge.classList.remove("is-ok");
       } else {
         engineBadge.textContent = "Basic detection";
-        engineBadge.title = "Pattern rules catch emails, phones, and links. Add smart detection for names and employers.";
+        engineBadge.title = "Pattern rules catch emails, phones, and links. Add Resume Privacy Scrubber for names and employers.";
         engineBadge.classList.remove("is-ok");
       }
     }
@@ -295,8 +295,8 @@ export function createProfileAddonsController({
         : uninstalling
           ? "Removing…"
           : rampart.installed
-            ? "Retry smart detection"
-            : "Add smart detection · 15 MB";
+            ? "Retry Resume Privacy Scrubber"
+            : "Add Resume Privacy Scrubber · 15 MB";
     }
 
     const emptyWrap = el("resumeEmptyState");
@@ -982,7 +982,10 @@ export function createProfileAddonsController({
           return `
             <div class="addon-row">
               <div class="addon-row-main">
-                <div class="addon-row-title">${escapeHtml(pk.name)}</div>
+                <div class="addon-row-title">
+                  <span>${escapeHtml(pk.name)}</span>
+                  ${pk.model ? `<span class="addon-model-id">${escapeHtml(pk.model)}</span>` : ""}
+                </div>
                 <div class="addon-row-desc">${escapeHtml(pk.description)}</div>
                 ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
               </div>
