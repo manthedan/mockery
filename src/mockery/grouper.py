@@ -596,7 +596,7 @@ class QAGrouper:
         force_apply: bool = False,
     ) -> TurnTriageApplyResult:
         """
-        Deterministic, confidence-gated applier for `TurnTriagePlan` (inspired by scratch/triage-lab).
+        Deterministic, confidence-gated applier for `TurnTriagePlan`.
         - High-confidence (or `force_apply=True`) ops mutate canonical utterances / cards safely.
         - Medium/low-confidence ops that would flip speaker, split a mixed turn, or split a card
           are queued into `session.pending_reviews` for 1-click user confirmation without mutating.

@@ -1,4 +1,4 @@
-/* Sandboxed JavaScript Execution Worker for Coding Interview Studio (Milestone 4)
+/* Sandboxed JavaScript Execution Worker for Coding Interview Studio
  * Served with strict Worker CSP (`default-src 'none'; script-src 'unsafe-eval'; connect-src 'none';
  * worker-src 'none'; child-src 'none'`). Spawned fresh per submission; host terminates on completion
  * or timeout. Tracks thrown values independently of truthiness and bounds output allocation.

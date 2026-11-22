@@ -1,6 +1,6 @@
 /* AI Mock Practice Studio — Solo AI Interviewer, Local Voice (TTS + Parakeet Mic),
  * Live CARL Coaching Meter, Supportive CARL Debrief, 45-Second Retry Drill,
- * and extensible Studio Slot for Milestone 3 (System Design) & Milestone 4 (Coding).
+ * and extensible Studio Slot for System Design & Coding studios.
  */
 
 import {
@@ -1116,15 +1116,15 @@ export function createPracticeStudioController({
     if (isRetry) syncRetrySubmit();
   }
 
-  /* The answer dock steps back whenever something else has the floor: an in-flight
-     AI reply (waiting) or the end of the interview (locked). One function owns that
-     state so the mic, the input and the status line can never disagree. */
   /* True from the moment End & Debrief is clicked (the request is in flight) until the
      session leaves the debriefing phase — including a reload that resumes mid-debrief. */
   function isDebriefInFlight() {
     return local.session?.phase === "debriefing" || opMachine.state === "debriefing";
   }
 
+  /* The answer dock steps back whenever something else has the floor: an in-flight
+     AI reply (waiting) or the end of the interview (locked). One function owns that
+     state so the mic, the input and the status line can never disagree. */
   function syncComposerLock() {
     const phase = local.session?.phase || "active";
     const isDebriefing = isDebriefInFlight();
@@ -3283,13 +3283,6 @@ export function createPracticeStudioController({
       const btn = ev.target.closest("[data-home-mode]");
       if (!btn) return;
       setHomeMode(btn.getAttribute("data-home-mode"));
-    });
-
-    el("setupTypePills")?.addEventListener("click", () => {
-      if (local.homeMode === "practice") {
-        // Wait a tick for active class update
-        setTimeout(() => refreshQuestionPicker(), 0);
-      }
     });
 
     el("practiceSourcePills")?.addEventListener("click", (ev) => {

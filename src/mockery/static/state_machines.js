@@ -395,8 +395,10 @@ export function createPackOpTracker(registry = null) {
     for (const fn of listeners) {
       try {
         fn(packId, op);
-      } catch {
-        /* ignore */
+      } catch (err) {
+        if (typeof console !== "undefined" && console.error) {
+          console.error(`[pack_ops] Listener error for ${packId}:`, err);
+        }
       }
     }
   }

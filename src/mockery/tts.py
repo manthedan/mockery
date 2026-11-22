@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import importlib.util
 import io
 import logging
 import os
@@ -342,20 +343,10 @@ class LocalTTSEngine:
                     self._pcm_cache_bytes -= len(old[0])
 
     def _has_kokoro_runtime(self) -> bool:
-        try:
-            import kokoro_onnx  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("kokoro_onnx") is not None
 
     def _has_phonon_runtime(self) -> bool:
-        try:
-            import ptts  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("ptts") is not None
 
     def _resolve_model_path(self) -> Path | None:
         for fname in KOKORO_MODEL_CANDIDATES:
@@ -373,7 +364,6 @@ class LocalTTSEngine:
         )
 
     def is_kokoro_available(self) -> bool:
-        # Pack is installable whenever kokoro-onnx runtime is present
         return self._has_kokoro_runtime()
 
     def is_phonon_installed(self) -> bool:

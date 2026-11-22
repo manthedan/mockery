@@ -279,7 +279,7 @@ class TurnSegment(BaseModel):
 
 class TurnTriagePlan(BaseModel):
     """
-    Typed operation plan emitted by fast LLM triage (inspired by scratch/triage-lab).
+    Typed operation plan emitted by fast LLM triage.
     High-confidence ops apply automatically; medium/low confidence ops queue in `pending_reviews`.
     """
 

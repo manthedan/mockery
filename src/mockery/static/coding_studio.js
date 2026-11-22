@@ -1,4 +1,4 @@
-/* Coding Interview Studio (Milestone 4)
+/* Coding Interview Studio
  * Offline-first code editor + sandboxed JS/Python test runner plugin for Practice Studio.
  * Zero external CDN dependencies: both JS and Python execute in isolated single-use Web Workers
  * served with strict Worker CSP headers, and Python loads strictly from `/api/addons/pyodide/`.

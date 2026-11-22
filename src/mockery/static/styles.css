@@ -3531,7 +3531,7 @@ kbd {
 }
 
 /* ----------------------------------------------------------------------------
-   Milestone 2: AI Mock Practice Mode & Supportive CARL Coach
+   AI Mock Practice Mode & Supportive CARL Coach
    ---------------------------------------------------------------------------- */
 
 .app-shell.practice-mode .session-only {
@@ -4291,7 +4291,7 @@ kbd {
 }
 
 /* ----------------------------------------------------------------------------
-   Milestone 3: System Design Whiteboard Studio
+   System Design Whiteboard Studio
    ---------------------------------------------------------------------------- */
 
 .sd-studio {
@@ -4674,7 +4674,7 @@ kbd {
 }
 
 /* ----------------------------------------------------------------------------
-   Milestone 4: Coding Interview Studio
+   Coding Interview Studio
    ---------------------------------------------------------------------------- */
 
 .cs-studio {
@@ -9161,20 +9161,5 @@ label.addon-row {
   .voice-status-lead,
   .voice-status-sep {
     display: none;
-  }
-}
-
-/* Motion is a courtesy, never a requirement. */
-@media (prefers-reduced-motion: reduce) {
-  .mic-hero.is-recording .mic-orb,
-  .switch,
-  .switch::after,
-  .studio-check::after,
-  .pturn-replay-btn,
-  .practice-split-handle::after,
-  .conv-toggle-pane,
-  .conv-toggle-dot {
-    animation: none !important;
-    transition: none !important;
   }
 }
