@@ -94,7 +94,7 @@ LAUNCHER
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.2</string>
+  <string>0.2.3</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Mockery uses your microphone for local offline mock interview transcription.</string>
 </dict>
