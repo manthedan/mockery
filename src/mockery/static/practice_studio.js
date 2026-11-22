@@ -1207,14 +1207,13 @@ export function createPracticeStudioController({
 
   function abortMicRecording() {
     local.recGen += 1;
-    const prevTarget = local.micTarget || local.recordingTarget;
     local.recordingTarget = null;
     local.micTarget = null;
     micMachine.reset("idle", { event: "abort_mic" });
     cleanupMicResources();
-    if (prevTarget) {
-      updateMicUI(prevTarget, "idle", "Transcribed privately on this Mac");
-    }
+    // Always restore both status lines on session switch/reset so a prior mic-denied note never lingers.
+    updateMicUI("answer", "idle", "Transcribed privately on this Mac");
+    updateMicUI("retry", "idle", "One focused 45-second rep");
   }
 
   async function toggleMicRecording(target = "answer") {

@@ -1729,7 +1729,19 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
         return;
       }
 
-      if (inEditable) return;
+      if (inEditable) {
+        // Pressing Enter or Escape in the inline inspector commits the edit and returns
+        // focus to the whiteboard canvas so keyboard shortcuts (like Backspace) work immediately.
+        if (
+          (ev.key === "Enter" || ev.key === "Escape") &&
+          active.matches?.("[data-sd-edit-label], [data-sd-edit-note], [data-sd-edit-edge-label]")
+        ) {
+          ev.preventDefault();
+          active.blur?.();
+          focusCanvas();
+        }
+        return;
+      }
 
       if (ev.key === "Escape" && state.interaction.mode === "selected") {
         ev.preventDefault();
