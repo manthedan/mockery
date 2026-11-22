@@ -375,7 +375,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 await _safe_close_practice_worker(runtime, session.id)
                 raise HTTPException(
                     status_code=503,
-                    detail=f"AI interviewer could not reply right now: {exc}",
+                    detail=f"AI interviewer could not reply right now ({type(exc).__name__}).",
                 ) from exc
 
             conv_commit = reply.pop("_conversation_commit", None)
@@ -429,7 +429,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     reset_conversation=bool(conv_commit["reset_conversation"]),
                 )
             try:
-                await asyncio.to_thread(runtime.practice_store.save, session)
+                await AddonManager._await_uninterruptible(asyncio.to_thread(runtime.practice_store.save, session))
             except Exception:
                 await _safe_close_practice_worker(runtime, session.id)
                 raise
@@ -607,10 +607,17 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         status_code=503,
                         detail=f"Could not generate coaching debrief right now: {exc}",
                     ) from exc
+                answered_ids = {
+                    str(t.question_id)
+                    for t in session.turns
+                    if t.role == "candidate" and not t.is_retry and t.question_id
+                }
                 review_carl_by_qid: dict[str, dict[str, str]] = {}
                 for qr in debrief.get("question_reviews") or []:
                     if isinstance(qr, dict) and qr.get("question_id") and isinstance(qr.get("carl"), dict):
-                        review_carl_by_qid[str(qr["question_id"])] = dict(qr["carl"])
+                        qid = str(qr["question_id"])
+                        if qid not in review_carl_by_qid and (not answered_ids or qid in answered_ids):
+                            review_carl_by_qid[qid] = dict(qr["carl"])
                 for q in session.questions:
                     if q.status == "active":
                         q.status = "completed"

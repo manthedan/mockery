@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import time
@@ -356,16 +357,81 @@ def _cli_sandbox_cwd() -> Path:
     return sandbox
 
 
-def _gemini_deny_policy_path() -> Path:
-    """Materialize a 0600 deny-all Gemini CLI Policy Engine TOML inside the private CLI sandbox."""
-    policy_path = _cli_sandbox_cwd() / "gemini_deny_all_tools.toml"
+_CODEX_ISOLATED_CONFIG_TOML = (
+    "[mcp_servers]\n\n"
+    "[features]\n"
+    "shell_tool = false\n"
+    "unified_exec = false\n"
+    "apps = false\n"
+    "browser_use = false\n"
+    "plugins = false\n"
+)
+
+
+def _write_private_file_atomic(target: Path, content: str) -> None:
+    """Atomically write a private 0600 file; fails closed on OS errors."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_file():
+        try:
+            if target.read_text(encoding="utf-8") == content:
+                os.chmod(target, 0o600)
+                return
+        except OSError:
+            pass
+    tmp = target.parent / f".{target.name}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        if not policy_path.is_file() or policy_path.read_text(encoding="utf-8") != _GEMINI_DENY_ALL_POLICY_TOML:
-            policy_path.write_text(_GEMINI_DENY_ALL_POLICY_TOML, encoding="utf-8")
-            os.chmod(policy_path, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+        os.replace(str(tmp), str(target))
+    except BaseException:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+        raise
+
+
+def _gemini_deny_policy_path() -> Path:
+    """Materialize a private 0600 deny-all Gemini CLI Policy Engine TOML (fails closed if unwritable)."""
+    policy_path = _cli_sandbox_cwd() / "gemini_deny_all_tools.toml"
+    _write_private_file_atomic(policy_path, _GEMINI_DENY_ALL_POLICY_TOML)
     return policy_path
+
+
+def _sanitize_gemini_cli_prompt(text: str) -> str:
+    """Neutralize leading `@path` attachment tokens so Gemini CLI's atCommandProcessor cannot read local files."""
+    return re.sub(r"(?<!\S)@(?=\S)", "@ ", text)
+
+
+def _codex_isolated_env() -> dict[str, str]:
+    """
+    Build an isolated CODEX_HOME containing a locked-down config.toml (zero inherited MCP servers/plugins)
+    while preserving auth.json via read-only symlink so Codex subscription/OAuth keeps working.
+    """
+    iso_home = _cli_sandbox_cwd() / "codex_home"
+    iso_home.mkdir(parents=True, exist_ok=True)
+    os.chmod(iso_home, 0o700)
+    _write_private_file_atomic(iso_home / "config.toml", _CODEX_ISOLATED_CONFIG_TOML)
+
+    real_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    real_auth = real_home / "auth.json"
+    iso_auth = iso_home / "auth.json"
+    if real_auth.is_file():
+        try:
+            if iso_auth.is_symlink():
+                if iso_auth.resolve() != real_auth.resolve():
+                    iso_auth.unlink()
+                    iso_auth.symlink_to(real_auth)
+            elif not iso_auth.exists():
+                iso_auth.symlink_to(real_auth)
+        except OSError:
+            pass
+
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(iso_home)
+    return env
 
 
 def _build_cached_user_blocks(user: str, cache_prefix_len: int) -> str | list[dict[str, Any]]:
@@ -443,6 +509,32 @@ async def _close_worker(worker: _CLISessionWorker) -> None:
         worker.stderr_task = None
 
 
+async def _close_workers_shielded(workers: list[_CLISessionWorker]) -> None:
+    """Close every worker to completion even if the caller is cancelled mid-cleanup."""
+    if not workers:
+        return
+    cancelled: asyncio.CancelledError | None = None
+    for w in workers:
+        while True:
+            try:
+                await asyncio.shield(_close_worker(w))
+                break
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+                # Keep draining the close loop so no detached worker is ever stranded
+                try:
+                    await _terminate_proc(w.proc)
+                except BaseException:
+                    pass
+                if w.stderr_task is not None and not w.stderr_task.done():
+                    w.stderr_task.cancel()
+                break
+            except Exception:
+                break
+    if cancelled is not None:
+        raise cancelled
+
+
 class InterviewCopilotLLM:
     def __init__(self, config: LLMRuntimeConfig) -> None:
         self.config = config
@@ -453,6 +545,7 @@ class InterviewCopilotLLM:
         self._warm_spare_lock = asyncio.Lock()
         self._warm_spare_tasks: set[asyncio.Task[Any]] = set()
         self._session_prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._worker_generation: int = 0
 
     def _client(self) -> AsyncOpenAI:
         key = self.config.api_key.strip() or "ollama-local"
@@ -634,6 +727,7 @@ class InterviewCopilotLLM:
         now = time.monotonic()
         stale: _CLISessionWorker | None = None
         async with self._warm_spare_lock:
+            gen = self._worker_generation
             cur = self._warm_spare
             if cur is not None:
                 alive = cur.proc.returncode is None and (now - cur.created_at) < _WARM_SPARE_TTL_SEC
@@ -642,7 +736,7 @@ class InterviewCopilotLLM:
                 stale = cur
                 self._warm_spare = None
         if stale is not None:
-            await _close_worker(stale)
+            await _close_workers_shielded([stale])
 
         try:
             worker = await self._spawn_cli_worker(backend, model_key, max_turns=1)
@@ -651,13 +745,17 @@ class InterviewCopilotLLM:
             return
 
         discard: _CLISessionWorker | None = None
-        async with self._warm_spare_lock:
-            if self._warm_spare is not None:
-                discard = worker
-            else:
-                self._warm_spare = worker
+        try:
+            async with self._warm_spare_lock:
+                if self._worker_generation != gen or self._warm_spare is not None:
+                    discard = worker
+                else:
+                    self._warm_spare = worker
+        except BaseException:
+            await _close_workers_shielded([worker])
+            raise
         if discard is not None:
-            await _close_worker(discard)
+            await _close_workers_shielded([discard])
 
     async def _ensure_session_worker(
         self,
@@ -671,6 +769,7 @@ class InterviewCopilotLLM:
         now = time.monotonic()
         stale: list[_CLISessionWorker] = []
         async with self._warm_spare_lock:
+            gen = self._worker_generation
             cur = self._session_workers.get(session_key)
             if cur is not None:
                 alive = cur.proc.returncode is None and (now - cur.last_used) < _CLI_SESSION_TTL_SEC
@@ -680,8 +779,8 @@ class InterviewCopilotLLM:
                     return
                 if not cur.in_use:
                     stale.append(self._session_workers.pop(session_key))
-        for w in stale:
-            await _close_worker(w)
+        if stale:
+            await _close_workers_shielded(stale)
 
         try:
             worker = await self._spawn_cli_worker(
@@ -695,15 +794,19 @@ class InterviewCopilotLLM:
             return
 
         to_close: list[_CLISessionWorker] = []
-        async with self._warm_spare_lock:
-            if session_key in self._session_workers:
-                to_close.append(worker)
-            else:
-                self._session_workers[session_key] = worker
-                self._session_workers.move_to_end(session_key)
-                to_close.extend(self._evict_excess_session_workers_locked())
-        for w in to_close:
-            await _close_worker(w)
+        try:
+            async with self._warm_spare_lock:
+                if self._worker_generation != gen or session_key in self._session_workers:
+                    to_close.append(worker)
+                else:
+                    self._session_workers[session_key] = worker
+                    self._session_workers.move_to_end(session_key)
+                    to_close.extend(self._evict_excess_session_workers_locked())
+        except BaseException:
+            await _close_workers_shielded([worker])
+            raise
+        if to_close:
+            await _close_workers_shielded(to_close)
 
     def _evict_excess_session_workers_locked(self) -> list[_CLISessionWorker]:
         now = time.monotonic()
@@ -747,19 +850,34 @@ class InterviewCopilotLLM:
         task = self._session_prewarm_tasks.pop(session_key, None)
         if task is not None and not task.done():
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         stale: _CLISessionWorker | None = None
         async with self._warm_spare_lock:
             stale = self._session_workers.pop(session_key, None)
         if stale is not None:
-            await _close_worker(stale)
+            await _close_workers_shielded([stale])
 
     async def close_all_workers(self) -> None:
-        for t in list(self._warm_spare_tasks):
+        async with self._warm_spare_lock:
+            self._worker_generation += 1
+            tasks = list(self._warm_spare_tasks)
+            self._warm_spare_tasks.clear()
+            self._session_prewarm_tasks.clear()
+            to_close: list[_CLISessionWorker] = []
+            if self._warm_spare is not None:
+                to_close.append(self._warm_spare)
+                self._warm_spare = None
+            while self._session_workers:
+                _, w = self._session_workers.popitem(last=False)
+                to_close.append(w)
+
+        for t in tasks:
             if not t.done():
                 t.cancel()
-        self._warm_spare_tasks.clear()
-        self._session_prewarm_tasks.clear()
-        to_close: list[_CLISessionWorker] = []
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Drain any worker registered by a task right before cancellation settled
         async with self._warm_spare_lock:
             if self._warm_spare is not None:
                 to_close.append(self._warm_spare)
@@ -767,8 +885,8 @@ class InterviewCopilotLLM:
             while self._session_workers:
                 _, w = self._session_workers.popitem(last=False)
                 to_close.append(w)
-        for w in to_close:
-            await _close_worker(w)
+
+        await _close_workers_shielded(to_close)
 
     async def invalidate_warm_spare(self) -> None:
         await self.close_all_workers()
@@ -803,8 +921,11 @@ class InterviewCopilotLLM:
 
         try:
             try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
                 proc.stdin.write(wire_line)
-                await proc.stdin.drain()
+                await asyncio.wait_for(proc.stdin.drain(), timeout=remaining)
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                 raise _WarmSpareFallbackError(f"{worker.backend} CLI worker stdin failed: {exc}") from exc
             while True:
@@ -862,14 +983,14 @@ class InterviewCopilotLLM:
                         final_text = str(ev.get("result", "")).strip()
                         break
         except asyncio.TimeoutError:
-            await _close_worker(worker)
+            await _close_workers_shielded([worker])
             raise TimeoutError(f"{worker.backend} CLI worker timed out after {timeout:.0f}s")
-        except Exception:
-            await _close_worker(worker)
+        except BaseException:
+            await _close_workers_shielded([worker])
             raise
         finally:
             if single_use:
-                await _close_worker(worker)
+                await _close_workers_shielded([worker])
 
         if final_text is not None and final_text:
             return final_text
@@ -877,7 +998,7 @@ class InterviewCopilotLLM:
         if joined:
             return joined
         stderr = worker.stderr_buf.decode("utf-8", errors="replace").strip()
-        await _close_worker(worker)
+        await _close_workers_shielded([worker])
         raise _WarmSpareFallbackError(f"{worker.backend} CLI worker returned empty response: {stderr[:300]}")
 
     async def _call_persistent_cli_session(
@@ -919,8 +1040,10 @@ class InterviewCopilotLLM:
             worker: _CLISessionWorker | None = None
             stale: list[_CLISessionWorker] = []
             send_delta_only = False
+            registered = False
 
             async with self._warm_spare_lock:
+                gen = self._worker_generation
                 cur = self._session_workers.get(session_key)
                 if cur is not None:
                     alive = cur.proc.returncode is None and (now - cur.last_used) < _CLI_SESSION_TTL_SEC
@@ -930,10 +1053,12 @@ class InterviewCopilotLLM:
                         if cur.turn_count == 0:
                             worker = cur
                             worker.in_use = True
+                            registered = True
                             self._session_workers.move_to_end(session_key)
                         elif cur.prefix_digest == prior_digest:
                             worker = cur
                             worker.in_use = True
+                            registered = True
                             send_delta_only = True
                             self._session_workers.move_to_end(session_key)
                         else:
@@ -941,8 +1066,8 @@ class InterviewCopilotLLM:
                     elif not cur.in_use:
                         stale.append(self._session_workers.pop(session_key))
 
-            for w in stale:
-                await _close_worker(w)
+            if stale:
+                await _close_workers_shielded(stale)
 
             if worker is None:
                 worker = await self._spawn_cli_worker(
@@ -953,15 +1078,25 @@ class InterviewCopilotLLM:
                 )
                 worker.in_use = True
                 evicted: list[_CLISessionWorker] = []
-                async with self._warm_spare_lock:
-                    prev = self._session_workers.pop(session_key, None)
-                    if prev is not None and not prev.in_use:
-                        evicted.append(prev)
-                    self._session_workers[session_key] = worker
-                    self._session_workers.move_to_end(session_key)
-                    evicted.extend(self._evict_excess_session_workers_locked())
-                for w in evicted:
-                    await _close_worker(w)
+                try:
+                    async with self._warm_spare_lock:
+                        if self._worker_generation == gen:
+                            prev = self._session_workers.get(session_key)
+                            if prev is None:
+                                self._session_workers[session_key] = worker
+                                self._session_workers.move_to_end(session_key)
+                                registered = True
+                            elif not prev.in_use:
+                                evicted.append(self._session_workers.pop(session_key))
+                                self._session_workers[session_key] = worker
+                                self._session_workers.move_to_end(session_key)
+                                registered = True
+                            evicted.extend(self._evict_excess_session_workers_locked())
+                except BaseException:
+                    await _close_workers_shielded([worker])
+                    raise
+                if evicted:
+                    await _close_workers_shielded(evicted)
 
             if send_delta_only:
                 prompt_text = str(messages[-1].get("content", ""))
@@ -981,11 +1116,13 @@ class InterviewCopilotLLM:
                     on_delta=on_delta,
                 )
             except _WarmSpareFallbackError as exc:
+                invalidated = False
                 async with self._warm_spare_lock:
                     if self._session_workers.get(session_key) is worker:
                         self._session_workers.pop(session_key, None)
+                    invalidated = self._worker_generation != gen
                 worker.in_use = False
-                if attempt == 0:
+                if attempt == 0 and not invalidated:
                     logger.debug(
                         "%s persistent session worker died before output (%s); rehydrating once",
                         backend,
@@ -993,19 +1130,31 @@ class InterviewCopilotLLM:
                     )
                     continue
                 raise RuntimeError(str(exc)) from exc
-            except Exception:
+            except BaseException:
                 async with self._warm_spare_lock:
                     if self._session_workers.get(session_key) is worker:
                         self._session_workers.pop(session_key, None)
                 worker.in_use = False
+                await _close_workers_shielded([worker])
                 raise
 
-            worker.turn_count += 1
-            worker.last_used = time.monotonic()
-            worker.prefix_digest = messages_prefix_digest(
-                messages + [{"role": "assistant", "content": result}]
-            )
-            worker.in_use = False
+            to_close_after: list[_CLISessionWorker] = []
+            async with self._warm_spare_lock:
+                worker.turn_count += 1
+                worker.last_used = time.monotonic()
+                worker.prefix_digest = messages_prefix_digest(
+                    messages + [{"role": "assistant", "content": result}]
+                )
+                worker.in_use = False
+                if not registered or self._worker_generation != gen or self._session_workers.get(session_key) is not worker:
+                    if self._session_workers.get(session_key) is worker:
+                        self._session_workers.pop(session_key, None)
+                    to_close_after.append(worker)
+                else:
+                    self._session_workers.move_to_end(session_key)
+                to_close_after.extend(self._evict_excess_session_workers_locked())
+            if to_close_after:
+                await _close_workers_shielded(to_close_after)
             return result
 
         raise RuntimeError(f"{backend} persistent session failed after recovery attempt")
@@ -1124,11 +1273,15 @@ class InterviewCopilotLLM:
             await asyncio.wait_for(proc.wait(), timeout=remaining)
             stderr_b = await stderr_task
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await _terminate_proc(proc)
             stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
             raise TimeoutError(f"agy CLI timed out after {timeout:.0f}s")
+        except BaseException:
+            await _terminate_proc(proc)
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+            raise
 
         stderr = stderr_b.decode("utf-8", errors="replace").strip()
         if final_result is not None:
@@ -1160,6 +1313,8 @@ class InterviewCopilotLLM:
             "--no-tools",
             "--no-extensions",
             "--no-mcp",
+            "--no-skills",
+            "--no-prompt-templates",
             "--model",
             clean_model,
             "--system-prompt",
@@ -1300,6 +1455,7 @@ class InterviewCopilotLLM:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 cwd=str(_cli_sandbox_cwd()),
+                env=_codex_isolated_env(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1338,7 +1494,10 @@ class InterviewCopilotLLM:
             if expect_json
             else "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY the requested Markdown response."
         )
-        combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
+        combined = _sanitize_gemini_cli_prompt(
+            f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
+        )
+        deny_policy = str(_gemini_deny_policy_path())
         args = [
             "gemini",
             "--approval-mode",
@@ -1347,8 +1506,10 @@ class InterviewCopilotLLM:
             "none",
             "--allowed-mcp-server-names",
             "",
+            "--policy",
+            deny_policy,
             "--admin-policy",
-            str(_gemini_deny_policy_path()),
+            deny_policy,
             "-o",
             "text",
         ]
@@ -1385,9 +1546,11 @@ class InterviewCopilotLLM:
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout=timeout)
             except TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await _terminate_proc(proc)
                 raise TimeoutError(f"{name} timed out after {timeout:.0f}s")
+            except BaseException:
+                await _terminate_proc(proc)
+                raise
             stdout = stdout_b.decode("utf-8", errors="replace").strip()
             stderr = stderr_b.decode("utf-8", errors="replace").strip()
             if proc.returncode != 0:
@@ -1402,8 +1565,11 @@ class InterviewCopilotLLM:
         try:
             if stdin_bytes is not None:
                 assert proc.stdin is not None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
                 proc.stdin.write(stdin_bytes)
-                await proc.stdin.drain()
+                await asyncio.wait_for(proc.stdin.drain(), timeout=remaining)
                 proc.stdin.close()
             while True:
                 remaining = deadline - time.monotonic()
@@ -1424,10 +1590,15 @@ class InterviewCopilotLLM:
             await asyncio.wait_for(proc.wait(), timeout=remaining)
             stderr_b = await stderr_task
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await _terminate_proc(proc)
             stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
             raise TimeoutError(f"{name} timed out after {timeout:.0f}s")
+        except BaseException:
+            await _terminate_proc(proc)
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+            raise
 
         stdout = "".join(chunks).strip()
         stderr = stderr_b.decode("utf-8", errors="replace").strip()
@@ -1446,6 +1617,7 @@ class InterviewCopilotLLM:
         max_tokens: int,
         timeout: float,
         cache_prefix_len: int = 0,
+        cache_key: str | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         base = self.config.base_url.rstrip("/")
@@ -1459,12 +1631,14 @@ class InterviewCopilotLLM:
         if messages is not None:
             non_sys = [m for m in messages if m.get("role") in ("user", "assistant")]
             if len(non_sys) == 1 and non_sys[0].get("role") == "user":
-                api_messages.append(
-                    {
-                        "role": "user",
-                        "content": _build_cached_user_blocks(str(non_sys[0].get("content", "")), cache_prefix_len),
-                    }
-                )
+                raw_u = str(non_sys[0].get("content", ""))
+                if cache_prefix_len > 0:
+                    u_blocks = _build_cached_user_blocks(raw_u, cache_prefix_len)
+                elif cache_key and raw_u.strip():
+                    u_blocks = [{"type": "text", "text": raw_u, "cache_control": {"type": "ephemeral"}}]
+                else:
+                    u_blocks = raw_u
+                api_messages.append({"role": "user", "content": u_blocks})
             else:
                 for idx, m in enumerate(non_sys):
                     txt = str(m.get("content", ""))
@@ -1657,6 +1831,7 @@ class InterviewCopilotLLM:
                 max_tokens=max_tokens,
                 timeout=timeout,
                 cache_prefix_len=cache_prefix_len,
+                cache_key=cache_key,
                 on_delta=on_delta,
             )
 
@@ -1681,9 +1856,15 @@ class InterviewCopilotLLM:
 
         if len(non_sys) == 1 and non_sys[0].get("role") == "user":
             raw_u = str(non_sys[0].get("content", ""))
-            user_content: str | list[dict[str, Any]] = (
-                _build_cached_user_blocks(raw_u, cache_prefix_len) if is_openrouter_claude else raw_u
-            )
+            if is_openrouter_claude:
+                if cache_prefix_len > 0:
+                    user_content: str | list[dict[str, Any]] = _build_cached_user_blocks(raw_u, cache_prefix_len)
+                elif cache_key and raw_u.strip():
+                    user_content = [{"type": "text", "text": raw_u, "cache_control": {"type": "ephemeral"}}]
+                else:
+                    user_content = raw_u
+            else:
+                user_content = raw_u
             wire_messages.append({"role": "user", "content": user_content})
         else:
             for idx, m in enumerate(non_sys):
@@ -2663,7 +2844,7 @@ class InterviewCopilotLLM:
                 out["_conversation_commit"] = conv_commit
             return out
         except Exception as exc:
-            logger.warning("LLM generate_practice_interviewer_reply failed (%s); using fallback", exc)
+            logger.warning("LLM generate_practice_interviewer_reply failed (%s); using fallback", type(exc).__name__)
             if session_key:
                 await self.close_session_worker(session_key)
             return _fallback()
@@ -2807,7 +2988,6 @@ class InterviewCopilotLLM:
             if t.get("role") == "candidate" and t.get("question_id")
         }
         answered_questions = [q for q in questions if str(q.get("id")) in answered_ids] or questions[:1]
-        q_by_id = {str(q.get("id")): q for q in questions if q.get("id")}
         per_q_budget = max(1200, 10_000 // max(1, len(answered_questions)))
 
         transcript_sections: list[str] = []
@@ -2890,17 +3070,21 @@ class InterviewCopilotLLM:
             if not overall or not isinstance(raw_reviews, list):
                 return fallback_debrief
 
+            all_q_ids = {str(q.get("id")) for q in questions if q.get("id")}
+            answered_q_by_id = {str(q.get("id")): q for q in answered_questions if q.get("id")}
+            seen_review_qids: set[str] = set()
             clean_reviews: list[dict[str, Any]] = []
             for qr in raw_reviews:
                 if not isinstance(qr, dict):
                     continue
                 qid = str(qr.get("question_id") or "").strip()
-                matched_q = q_by_id.get(qid)
-                if matched_q is None and len(answered_questions) == 1:
+                matched_q = answered_q_by_id.get(qid)
+                if matched_q is None and len(answered_questions) == 1 and qid not in all_q_ids:
                     matched_q = answered_questions[0]
                     qid = str(matched_q.get("id") or "")
-                if matched_q is None:
+                if matched_q is None or qid in seen_review_qids:
                     continue
+                seen_review_qids.add(qid)
                 default_carl = dict(matched_q.get("carl_signals") or {})
                 clean_reviews.append(
                     {
@@ -2924,7 +3108,7 @@ class InterviewCopilotLLM:
             raw_drill = parsed.get("retry_drill") if isinstance(parsed.get("retry_drill"), dict) else {}
             drill_qid = str(raw_drill.get("question_id") or "").strip()
             drill_prompt = str(raw_drill.get("prompt") or "").strip()
-            if not drill_prompt or drill_qid not in q_by_id:
+            if not drill_prompt or drill_qid not in answered_q_by_id:
                 clean_drill = dict(fallback_debrief["retry_drill"])
             else:
                 clean_drill = {

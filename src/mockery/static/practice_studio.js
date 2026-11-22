@@ -2738,24 +2738,31 @@ export function createPracticeStudioController({
 
   /* Post-session scoring: the debrief reflects the latest retry, not a stale snapshot. */
 
-  function latestRetrySignals(sess) {
+  function latestRetryEntry(sess) {
     const hist = Array.isArray(sess?.retry_history) ? sess.retry_history : [];
     for (let i = hist.length - 1; i >= 0; i--) {
       const after = hist[i]?.feedback?.carl_after;
-      if (after && typeof after === "object") return after;
+      if (after && typeof after === "object") {
+        const questionId = hist[i]?.question_id || null;
+        return { after, questionId };
+      }
     }
     return null;
   }
 
-  function drillQuestionIndex(sess) {
+  function latestRetrySignals(sess) {
+    return latestRetryEntry(sess)?.after || null;
+  }
+
+  function drillQuestionIndex(sess, preferredQuestionId = null) {
     const qs = Array.isArray(sess?.questions) ? sess.questions : [];
     if (qs.length === 0) return -1;
-    const qid = sess?.debrief?.retry_drill?.question_id;
-    const byId = qs.findIndex((q) => q.id === qid);
+    const qid = preferredQuestionId || sess?.debrief?.retry_drill?.question_id;
+    const byId = qid ? qs.findIndex((q) => q.id === qid) : -1;
     if (byId >= 0) return byId;
     let weakest = 0;
     for (let i = 1; i < qs.length; i++) {
-      if (carlScore(qs[i].carl_signals) < carlScore(qs[weakest].carl_signals)) weakest = i;
+      if (carlScore(originalQuestionSignals(sess, i)) < carlScore(originalQuestionSignals(sess, weakest))) weakest = i;
     }
     return weakest;
   }
@@ -2771,9 +2778,9 @@ export function createPracticeStudioController({
 
   function effectiveQuestionSignals(sess) {
     const qs = Array.isArray(sess?.questions) ? sess.questions : [];
-    const after = latestRetrySignals(sess);
-    const drillIdx = after ? drillQuestionIndex(sess) : -1;
-    return qs.map((q, idx) => (idx === drillIdx ? after : originalQuestionSignals(sess, idx)));
+    const entry = latestRetryEntry(sess);
+    const drillIdx = entry ? drillQuestionIndex(sess, entry.questionId) : -1;
+    return qs.map((q, idx) => (idx === drillIdx ? entry.after : originalQuestionSignals(sess, idx)));
   }
 
   function aggregateSignals(list) {
@@ -2872,10 +2879,12 @@ export function createPracticeStudioController({
     const reviews = Array.isArray(debrief.question_reviews) ? debrief.question_reviews : [];
     const drill = debrief.retry_drill || {};
     const retries = Array.isArray(sess.retry_history) ? sess.retry_history : [];
+    const retryEntry = latestRetryEntry(sess);
     const effective = effectiveQuestionSignals(sess);
-    const drillIdx = drillQuestionIndex(sess);
+    const drillIdx = drillQuestionIndex(sess, retryEntry?.questionId || null);
+    const drillQid = (drillIdx >= 0 && sess?.questions?.[drillIdx]?.id) || retryEntry?.questionId || drill.question_id || null;
     const sessionSignals = aggregateSignals(effective);
-    const retried = Boolean(latestRetrySignals(sess));
+    const retried = Boolean(retryEntry);
 
     contentEl.innerHTML = `
       <section class="debrief-hero">
@@ -2919,7 +2928,10 @@ export function createPracticeStudioController({
               <div class="debrief-q-list">
                 ${reviews
                   .map((qr, idx) => {
-                    const improved = retried && idx === drillIdx && effective[idx];
+                    const isDrillCard =
+                      retried &&
+                      (qr.question_id && drillQid ? qr.question_id === drillQid : idx === drillIdx);
+                    const improvedSignals = isDrillCard ? retryEntry?.after || null : null;
                     return `
                   <article class="debrief-q-card">
                     <div class="debrief-q-head">
@@ -2928,8 +2940,8 @@ export function createPracticeStudioController({
                         <span class="debrief-q-title">${escapeHtml(qr.title || "Practice Question")}</span>
                       </div>
                       <span class="debrief-q-score">
-                        ${improved ? `<span class="debrief-q-retried">After retry</span>` : ""}
-                        ${renderCarlBadgesInline(improved ? effective[idx] : qr.carl, { fmt, final: true })}
+                        ${improvedSignals ? `<span class="debrief-q-retried">After retry</span>` : ""}
+                        ${renderCarlBadgesInline(improvedSignals || qr.carl, { fmt, final: true })}
                       </span>
                     </div>
                     ${qr.prompt ? `<p class="debrief-q-prompt">${formatInline(qr.prompt)}</p>` : ""}
@@ -2988,13 +3000,17 @@ export function createPracticeStudioController({
       if (timerEl && timerHome && timerEl.parentElement !== timerHome) timerHome.appendChild(timerEl);
       syncRetrySubmit();
       if (histEl) {
-        let before = originalQuestionSignals(sess, drillIdx);
+        const beforeByQIdx = new Map();
         histEl.innerHTML = retries
           .map((r, idx) => {
             const fb = r.feedback || {};
             const after = fb.carl_after && typeof fb.carl_after === "object" ? fb.carl_after : null;
+            const targetIdx = drillQuestionIndex(sess, r.question_id || null);
+            const before = beforeByQIdx.has(targetIdx)
+              ? beforeByQIdx.get(targetIdx)
+              : originalQuestionSignals(sess, targetIdx);
             const outcome = renderRetryOutcome(before, after, fmt);
-            if (after) before = after;
+            if (after) beforeByQIdx.set(targetIdx, after);
             return `
               <div class="retry-result-card">
                 <div class="retry-result-head">
