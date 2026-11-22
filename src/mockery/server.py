@@ -44,6 +44,7 @@ from .models import (
     short_id,
 )
 from .paths import resolve_data_root
+from .paths import is_loopback_host
 from .practice import PracticeSessionStore
 from .profiles import CandidateProfileStore
 from .pyodide_pack import PyodidePackManager
@@ -96,7 +97,7 @@ def is_trusted_origin(
             return False
         if allow_same_host_lan:
             return True
-    if origin_host not in ALLOWED_LOOPBACK_HOSTS:
+    if not is_loopback_host(origin_host, allow_testserver=True):
         return False
     return True
 
@@ -520,7 +521,7 @@ def create_app(
         if not auth_token:
             # Defend loopback-only server against browser DNS rebinding attacks
             parsed_host = (urlparse(f"http://{host}").hostname or "").lower()
-            if parsed_host not in ("localhost", "127.0.0.1", "::1", "testserver"):
+            if not is_loopback_host(parsed_host, allow_testserver=True):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "Untrusted Host header rejected in local loopback mode."},
@@ -719,17 +720,19 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/load")
     async def load_saved_session(session_id: str) -> dict[str, Any]:
-        _require_historical_load_allowed()
-        loaded = runtime.store.load(session_id)
-        if loaded is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        runtime.switch_session(loaded)
-        serialized = _serialize_session(runtime)
+        async with runtime.capture_lifecycle_lock():
+            _require_historical_load_allowed()
+            loaded = runtime.store.load(session_id)
+            if loaded is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            runtime.switch_session(loaded)
+            serialized = _serialize_session(runtime)
         await runtime.broadcast_all(
             {
                 "type": "session_state",
                 "session": serialized,
                 "asr": runtime.asr.status_dict(),
+                "diarizer": runtime.diarizer.status_dict(),
                 "manual_speaker": runtime.audio_router.manual_speaker,
             }
         )
@@ -800,6 +803,7 @@ def create_app(
                 "type": "session_state",
                 "session": _serialize_session(runtime),
                 "asr": runtime.asr.status_dict(),
+                "diarizer": runtime.diarizer.status_dict(),
                 "manual_speaker": runtime.audio_router.manual_speaker,
             }
             if extra:
@@ -1269,6 +1273,7 @@ def create_app(
                 "type": "session_state",
                 "session": _serialize_session(runtime),
                 "asr": runtime.asr.status_dict(),
+                "diarizer": runtime.diarizer.status_dict(),
                 "manual_speaker": runtime.audio_router.manual_speaker,
             }
         )
@@ -1308,10 +1313,11 @@ def create_app(
                                 try:
                                     await asyncio.to_thread(runtime.vad_runtime.ensure_loaded)
                                 except Exception as vad_exc:
+                                    capture_gate["closed"] = True
                                     runtime.pause_or_end_capture(mark_ended=False)
                                     await send_json(
                                         {
-                                            "type": "error",
+                                            "type": "capture_error",
                                             "message": f"Speech detector (Silero VAD) unavailable: {vad_exc}",
                                         }
                                     )
@@ -1357,10 +1363,11 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
-            was_capture_owner = runtime.capturing_sender is send_json
             runtime.ws_senders.discard(send_json)
-            if was_capture_owner and not capture_gate["closed"]:
-                async with runtime.capture_lifecycle_lock():
+            flushed_triage_on_disconnect = False
+            async with runtime.capture_lifecycle_lock():
+                was_capture_owner = runtime.capturing_sender is send_json
+                if was_capture_owner and not capture_gate["closed"]:
                     capture_gate["closed"] = True
                     cur_session = runtime.active_session
                     cur_router = runtime.audio_router
@@ -1374,6 +1381,8 @@ def create_app(
                         await final_seg_queue.put(None)
                         await seg_worker_task
                         flush_triage_now(target_session=cur_session, job_epoch=cur_epoch)
+                        triage_debounce_state["closed"] = True
+                        flushed_triage_on_disconnect = True
                     finally:
                         runtime.pause_or_end_capture(mark_ended=False)
                         if cur_session.utterances or cur_session.elapsed_capture_ms > 0:
@@ -1384,18 +1393,19 @@ def create_app(
                             pass
                     if runtime.ws_senders:
                         await broadcast_session()
-            else:
-                try:
-                    await final_seg_queue.put(None)
-                    await seg_worker_task
-                finally:
-                    if was_capture_owner or not runtime.ws_senders:
-                        runtime.pause_or_end_capture(mark_ended=False)
-                        try:
-                            await runtime.llm.release_warm_spare()
-                        except BaseException:
-                            pass
-            reset_triage_window(close_scheduling=True)
+                else:
+                    try:
+                        await final_seg_queue.put(None)
+                        await seg_worker_task
+                    finally:
+                        if was_capture_owner or not runtime.ws_senders:
+                            runtime.pause_or_end_capture(mark_ended=False)
+                            try:
+                                await runtime.llm.release_warm_spare()
+                            except BaseException:
+                                pass
+            if not flushed_triage_on_disconnect:
+                reset_triage_window(close_scheduling=True)
 
     @app.get("/static/js_sandbox_worker.js")
     async def serve_js_sandbox_worker() -> FileResponse:
@@ -1481,16 +1491,30 @@ async def _handle_ws_command(
     action = str(cmd.get("type", ""))
 
     if action == "new_session":
-        if reset_triage_window is not None:
-            reset_triage_window(close_scheduling=False)
-        if open_triage_window is not None:
-            open_triage_window()
-        cfg_data = dict(cmd.get("config") or {})
-        base_cfg = runtime.active_session.config.model_dump()
-        cfg = SessionConfig.model_validate({**base_cfg, **cfg_data})
-        runtime.switch_session(InterviewSession(config=cfg))
-        if capture_gate is not None:
-            capture_gate["closed"] = False
+        async with runtime.capture_lifecycle_lock():
+            if (
+                runtime.is_capturing
+                and runtime.capturing_sender is not None
+                and runtime.capturing_sender is not send_json
+            ):
+                phase_str, allowed, _ = runtime.current_phase_and_actions()
+                raise InvalidStateTransitionError(
+                    machine="session_phase",
+                    current_state=phase_str,
+                    event="new_session",
+                    allowed_events=allowed,
+                    remediation="Another tab is actively recording — stop capture there before starting a new interview.",
+                )
+            if reset_triage_window is not None:
+                reset_triage_window(close_scheduling=False)
+            if open_triage_window is not None:
+                open_triage_window()
+            cfg_data = dict(cmd.get("config") or {})
+            base_cfg = runtime.active_session.config.model_dump()
+            cfg = SessionConfig.model_validate({**base_cfg, **cfg_data})
+            runtime.switch_session(InterviewSession(config=cfg))
+            if capture_gate is not None:
+                capture_gate["closed"] = False
         await broadcast_session()
         return
 
@@ -1513,9 +1537,11 @@ async def _handle_ws_command(
                 try:
                     await asyncio.to_thread(runtime.vad_runtime.ensure_loaded)
                 except Exception as exc:
+                    if capture_gate is not None:
+                        capture_gate["closed"] = True
                     await send_json(
                         {
-                            "type": "error",
+                            "type": "capture_error",
                             "message": f"Speech detector (Silero VAD) could not load: {exc}",
                         }
                     )
@@ -1531,6 +1557,19 @@ async def _handle_ws_command(
 
     if action == "cancel_capture":
         async with runtime.capture_lifecycle_lock():
+            if (
+                runtime.is_capturing
+                and runtime.capturing_sender is not None
+                and runtime.capturing_sender is not send_json
+            ):
+                phase_str, allowed, _ = runtime.current_phase_and_actions()
+                raise InvalidStateTransitionError(
+                    machine="session_phase",
+                    current_state=phase_str,
+                    event="cancel_capture",
+                    allowed_events=allowed,
+                    remediation="Only the tab that started live recording can stop or cancel capture.",
+                )
             if capture_gate is not None:
                 capture_gate["closed"] = True
             if reset_triage_window is not None:

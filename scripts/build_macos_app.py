@@ -178,6 +178,22 @@ fi
 """
 
 
+def _has_real_swiftc() -> bool:
+    """Return True only when a working Swift compiler is installed (not the macOS CLT shim)."""
+    swiftc = shutil.which("swiftc")
+    if not swiftc:
+        return False
+    if swiftc != "/usr/bin/swiftc":
+        return True
+    res = subprocess.run(
+        ["xcode-select", "-p"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return res.returncode == 0
+
+
 def build_app(*, force_shell: bool = False) -> Path:
     app_dir = DIST_DIR / "Mockery.app"
     contents = app_dir / "Contents"
@@ -191,7 +207,7 @@ def build_app(*, force_shell: bool = False) -> Path:
 
     exe_path = macos_dir / "Mockery"
     used_swift = False
-    if not force_shell and SWIFT_SRC.exists() and shutil.which("swiftc"):
+    if not force_shell and SWIFT_SRC.exists() and _has_real_swiftc():
         print("Compiling native Swift menu bar launcher...")
         subprocess.run(
             [

@@ -8278,3 +8278,9 @@ label.addon-row {
 .btn-inline-retry {
   margin-left: 6px;
 }
+
+.sd-icon-btn.is-armed {
+  color: var(--bad);
+  border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}

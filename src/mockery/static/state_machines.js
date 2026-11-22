@@ -267,7 +267,7 @@ export function createPracticeMicMachine(registry = null, onTransition = null) {
     registry,
     onTransition,
     transitions: {
-      idle: ["requesting_mic"],
+      idle: ["requesting_mic", "transcribing"],
       requesting_mic: ["recording", "idle"],
       recording: ["transcribing", "idle"],
       transcribing: ["idle"],

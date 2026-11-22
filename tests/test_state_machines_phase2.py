@@ -53,8 +53,11 @@ def test_client_machine_and_registry_transitions():
         const timer = createRetryTimerMachine(reg);
         const save = createWorkspaceSaveMachine(reg);
 
-        // Illegal direct jump rejected cleanly without mutating state
-        const illegalMic = mic.transition("transcribing", {{ event: "bad" }});
+        // Illegal direct jump (skipping mic permission) rejected cleanly without mutating state
+        const illegalMic = mic.transition("recording", {{ event: "bad" }});
+        // Direct idle -> transcribing is allowed for ASR clip retry
+        const okRetryTx = mic.transition("transcribing", {{ event: "retry_transcribe" }});
+        const okRetryIdle = mic.transition("idle", {{ event: "retry_done" }});
         const okReq = mic.transition("requesting_mic", {{ event: "request" }});
         const okRec = mic.transition("recording", {{ event: "granted" }});
         const okTx = mic.transition("transcribing", {{ event: "stop" }});
@@ -105,7 +108,7 @@ def test_client_machine_and_registry_transitions():
         const detailFb = formatApiDetail(null, "fallback");
 
         console.log(JSON.stringify({{
-          illegalMic, okReq, okRec, okTx, okIdle,
+          illegalMic, okRetryTx, okRetryIdle, okReq, okRec, okTx, okIdle,
           strictThrew,
           opStart, opDouble, opExit, opDone,
           tRun, tWarn, tExp, tRestart,
@@ -119,6 +122,8 @@ def test_client_machine_and_registry_transitions():
         """
     )
     assert res["illegalMic"] is False
+    assert res["okRetryTx"] is True
+    assert res["okRetryIdle"] is True
     assert res["okReq"] is True
     assert res["okRec"] is True
     assert res["okTx"] is True

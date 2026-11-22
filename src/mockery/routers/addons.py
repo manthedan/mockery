@@ -198,21 +198,41 @@ def build_addons_router(
             runtime._tts_sem.release()
             raise
 
+        cleaned_up = False
+
+        async def _cleanup_once() -> None:
+            nonlocal cleaned_up
+            if cleaned_up:
+                return
+            cleaned_up = True
+            try:
+                aclose = getattr(chunk_iter, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+                else:
+                    close_fn = getattr(chunk_iter, "close", None)
+                    if callable(close_fn):
+                        close_fn()
+            except Exception:
+                pass
+            runtime._tts_sem.release()
+
         async def _guarded_stream():
             try:
                 async for chunk in chunk_iter:
                     if chunk:
                         yield chunk
             finally:
-                try:
-                    aclose = getattr(chunk_iter, "aclose", None)
-                    if callable(aclose):
-                        await aclose()
-                except Exception:
-                    pass
-                runtime._tts_sem.release()
+                await _cleanup_once()
 
-        return StreamingResponse(
+        class _PermitGuardedStreamingResponse(StreamingResponse):
+            async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+                try:
+                    await super().__call__(scope, receive, send)
+                finally:
+                    await _cleanup_once()
+
+        return _PermitGuardedStreamingResponse(
             _guarded_stream(),
             media_type="application/octet-stream",
             headers={

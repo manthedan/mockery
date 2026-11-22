@@ -107,6 +107,7 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> idle
   idle --> requesting_mic
+  idle --> transcribing
   recording --> idle
   recording --> transcribing
   requesting_mic --> idle

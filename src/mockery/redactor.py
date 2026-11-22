@@ -120,7 +120,17 @@ _CITY_STATE_CAPTURE_RE = re.compile(r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)?),[ \t
 _CITY_STATE_EXACT_RE = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?,\s*[A-Z]{2}$")
 _HEADER_SPLIT_RE = re.compile(r"\s*[|•·—–]\s*")
 _MD_HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
-_NAME_TOKEN_RE = re.compile(r"^[A-Z][a-zA-Z'.\-]{1,24}$")
+_NAME_TOKEN_PUNCT = frozenset("'.-’")
+
+
+def _is_name_token(word: str) -> bool:
+    """Unicode-aware capitalized name token check (handles accented letters like María Núñez)."""
+    if not (2 <= len(word) <= 25):
+        return False
+    first = word[0]
+    if not first.isalpha() or not first.isupper():
+        return False
+    return all(ch.isalpha() or ch in _NAME_TOKEN_PUNCT for ch in word[1:])
 _NAME_PARTICLES = {
     "al", "ben", "bin", "da", "de", "del", "della", "di", "du",
     "el", "ibn", "la", "le", "mac", "mc", "van", "von",
@@ -688,10 +698,15 @@ class RampartRedactor:
     def _run_rampart_onnx(self, text: str) -> list[DetectedSpan]:
         if not text.strip() or not self._ensure_loaded():
             return []
-        assert self._tokenizer is not None and self._session is not None and self._id2label is not None
 
         cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
         with self._lock:
+            sess = self._session
+            tok = self._tokenizer
+            id2label = self._id2label
+            input_names = set(self._input_names) if self._input_names else None
+            if sess is None or tok is None or id2label is None:
+                return []
             cached = self._span_cache.get(cache_key)
             if cached is not None:
                 self._span_cache.move_to_end(cache_key)
@@ -701,8 +716,9 @@ class RampartRedactor:
         if not norm_text:
             return []
 
-        input_names = self._input_names or {inp.name for inp in self._session.get_inputs()}
-        enc = self._tokenizer.encode(norm_text)
+        if not input_names:
+            input_names = {inp.name for inp in sess.get_inputs()}
+        enc = tok.encode(norm_text)
         encodings = [enc] + list(getattr(enc, "overflowing", []) or [])
 
         raw_spans: list[DetectedSpan] = []
@@ -717,7 +733,7 @@ class RampartRedactor:
             if "token_type_ids" in input_names:
                 feeds["token_type_ids"] = np.array([sub_enc.type_ids], dtype=np.int64)
 
-            logits = self._session.run(None, feeds)[0][0]  # [seq_len, num_labels]
+            logits = sess.run(None, feeds)[0][0]  # [seq_len, num_labels]
             pred_ids = np.argmax(logits, axis=-1)
 
             cur_label: str | None = None
@@ -743,7 +759,7 @@ class RampartRedactor:
                 if s >= e:
                     _flush()
                     continue
-                tag = self._id2label.get(int(lid), "O")
+                tag = id2label.get(int(lid), "O")
                 if tag == "O":
                     _flush()
                     continue
@@ -882,7 +898,7 @@ class RampartRedactor:
                 2 <= len(words) <= 4
                 and not _ROLE_WORDS_RE.search(head)
                 and head.lower() not in _TECH_STOPWORDS
-                and all(_NAME_TOKEN_RE.match(w) for w in words)
+                and all(_is_name_token(w) for w in words)
             ):
                 pos = line.find(head)
                 if pos >= 0:
@@ -1000,8 +1016,13 @@ class RampartRedactor:
         rampart_spans: list[DetectedSpan] = []
         used_rampart = False
         if use_rampart and downloaded:
-            rampart_spans = self._run_rampart_onnx(text)
-            used_rampart = self._session is not None
+            try:
+                rampart_spans = self._run_rampart_onnx(text)
+                used_rampart = self._session is not None or bool(rampart_spans)
+            except Exception as exc:
+                logger.warning("Rampart ONNX pass failed (%s); falling back to deterministic rules.", exc)
+                rampart_spans = []
+                used_rampart = False
 
         rule_spans = self._run_deterministic_rules(text)
         # Always run deterministic header-name detection alongside Rampart so a false-positive

@@ -348,3 +348,265 @@ def test_ws_owner_disconnect_flushes_trailing_audio_and_saves(tmp_path: Path) ->
     assert any("Trailing spoken answer" in u.text for u in loaded.utterances)
     assert rt.is_capturing is False
 
+
+def test_rules_redactor_detects_accented_unicode_header_name() -> None:
+    redactor = RampartRedactor()
+    res = redactor.redact(
+        "María Núñez\nSenior Distributed Systems Engineer\nBuilt low-latency RPC gateways.",
+        use_rampart=False,
+    )
+    assert "María Núñez" not in res.redacted_text
+    assert any(sp.get("label") == "PERSON_NAME" for sp in res.spans)
+
+
+def test_stale_tab_resume_toggle_rejected_with_409(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    client = TestClient(app)
+
+    r1 = client.post(
+        "/api/profile/resume/text",
+        json={"filename": "a.txt", "text": "Alex Rivera\nfirst@example.invalid\nEngineer"},
+    )
+    assert r1.status_code == 200
+    doc1 = r1.json()["resume"]["doc_id"]
+    span1 = r1.json()["resume"]["spans"][0]["id"]
+
+    r2 = client.post(
+        "/api/profile/resume/text",
+        json={"filename": "b.txt", "text": "Sam Patel\nsecond@example.invalid\nEngineer"},
+    )
+    assert r2.status_code == 200
+    doc2 = r2.json()["resume"]["doc_id"]
+    assert doc1 != doc2
+
+    # Stale tab sending doc1 must get 409 and NOT unmask Resume B
+    stale = client.post(f"/api/profile/resume/toggle/{span1}?doc_id={doc1}")
+    assert stale.status_code == 409
+    assert "second@example.invalid" not in app.state.runtime.profiles.resume_for_llm()
+
+
+def test_loopback_host_127_0_0_2_allowed_by_server(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    client = TestClient(app)
+    resp = client.get("/api/machines", headers={"Host": "127.0.0.2:8765"})
+    assert resp.status_code == 200
+    bad = client.get("/api/machines", headers={"Host": "evil.example:8765"})
+    assert bad.status_code == 403
+
+
+def test_list_recent_isolates_unreadable_recovery_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    good = InterviewSession(id="20261122_120001_good")
+    store.save(good)
+    bad_journal = tmp_path / "sessions" / "20261122_120002_bad.events.jsonl"
+    bad_journal.write_text('{"type":"utterance_upsert"}\n', encoding="utf-8")
+
+    orig_recover = store._recover_from_jsonl
+
+    def _boom_on_bad(sid: str):
+        if sid == "20261122_120002_bad":
+            raise PermissionError("unreadable journal")
+        return orig_recover(sid)
+
+    monkeypatch.setattr(store, "_recover_from_jsonl", _boom_on_bad)
+    recent = store.list_recent()
+    assert [item["id"] for item in recent] == ["20261122_120001_good"]
+
+
+def test_parakeet_completeness_requires_exact_model_safetensors(tmp_path: Path) -> None:
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}", encoding="utf-8")
+    (snap / "other.safetensors").write_bytes(b"\x01\x02")
+    assert parakeet_snapshot_is_complete(snap) is False
+    (snap / "model.safetensors").write_bytes(b"\x01\x02")
+    assert parakeet_snapshot_is_complete(snap) is True
+
+
+def test_tts_stream_releases_semaphore_on_header_disconnect(tmp_path: Path) -> None:
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+
+    closed_count = 0
+
+    class _FakeStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            return b"\x00\x00" * 100
+
+        async def aclose(self) -> None:
+            nonlocal closed_count
+            closed_count += 1
+
+    async def _fake_open_stream(*args: Any, **kwargs: Any):
+        return ("phonon", 24000, _FakeStream())
+
+    rt.tts.open_pcm_stream = _fake_open_stream  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        async def _send_fail(message: dict[str, Any]) -> None:
+            raise RuntimeError("client disconnected before response headers")
+
+        async def _receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b'{"text":"hello"}', "more_body": False}
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/tts/stream",
+            "raw_path": b"/api/tts/stream",
+            "query_string": b"",
+            "headers": [
+                (b"host", b"127.0.0.1:8765"),
+                (b"content-type", b"application/json"),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8765),
+        }
+        for _ in range(3):
+            with pytest.raises(RuntimeError):
+                await app(scope, _receive, _send_fail)
+        assert rt._tts_sem._value == 2
+        assert closed_count == 3
+
+    asyncio.run(_run())
+
+
+def test_failed_vad_closes_gate_and_stops_packet_spam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.server import create_app
+    from mockery.sources import CHANNEL_INTERVIEWER
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    calls = 0
+
+    def _fail_vad() -> Any:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("offline VAD missing")
+
+    monkeypatch.setattr(rt.vad_runtime, "ensure_loaded", _fail_vad)
+    client = TestClient(app)
+    pcm = np.zeros(1600, dtype=np.int16).tobytes()
+    with client.websocket_connect("/ws/session") as ws:
+        ws.receive_json()
+        ws.receive_json()
+        ws.send_json({"type": "start_capture"})
+        err_msg = ws.receive_json()
+        assert err_msg["type"] == "capture_error"
+        # Subsequent PCM frames while gate is closed must NOT re-attempt VAD load
+        ws.send_bytes(bytes([CHANNEL_INTERVIEWER]) + pcm)
+        ws.send_bytes(bytes([CHANNEL_INTERVIEWER]) + pcm)
+        ws.send_json({"type": "set_manual_speaker", "speaker": "interviewer"})
+        sync = ws.receive_json()
+        assert sync["type"] == "manual_speaker"
+    assert calls == 1
+
+
+def test_non_owner_tab_cannot_hijack_or_cancel_active_capture(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    rt.vad_runtime._session = object()  # type: ignore[assignment]
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/session") as ws1, client.websocket_connect("/ws/session") as ws2:
+        ws1.receive_json()
+        ws1.receive_json()
+        ws2.receive_json()
+        ws2.receive_json()
+
+        ws1.send_json({"type": "start_capture"})
+        s1 = ws1.receive_json()
+        _ = ws2.receive_json()
+        orig_id = s1["session"]["id"]
+
+        # Second tab must be rejected when trying to hijack with new_session or cancel_capture
+        ws2.send_json({"type": "new_session", "config": {}})
+        rej1 = ws2.receive_json()
+        assert rej1["type"] == "transition_rejected"
+        assert rt.active_session.id == orig_id
+        assert rt.is_capturing is True
+
+        ws2.send_json({"type": "cancel_capture"})
+        rej2 = ws2.receive_json()
+        assert rej2["type"] == "transition_rejected"
+        assert rt.is_capturing is True
+
+
+def test_practice_debrief_records_final_answer_directly_without_turn_call(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.practice import PracticeConfig, PracticeQuestionItem, PracticeSession
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    sess = PracticeSession(
+        role_title="Senior Engineer",
+        config=PracticeConfig(interview_type="behavioral"),
+        questions=[
+            PracticeQuestionItem(
+                id="q_1",
+                title="Conflict resolution",
+                prompt="Tell me about a tough disagreement.",
+                status="active",
+            )
+        ],
+    )
+    rt.practice_store.save(sess)
+
+    seen_turns: list[dict[str, Any]] = []
+
+    async def _fake_debrief(**kwargs: Any) -> dict[str, Any]:
+        seen_turns.extend(kwargs.get("turns") or [])
+        return {
+            "overall_summary": "Solid answer.",
+            "strengths": ["Clear outcome"],
+            "focus_areas": ["Add metric"],
+            "question_reviews": [
+                {
+                    "question_id": "q_1",
+                    "carl": {"context": "strong", "action": "strong", "result": "partial", "learning": "partial"},
+                    "what_worked": "Good framing",
+                    "upgrade_tip": "Quantify latency",
+                }
+            ],
+            "retry_drill": None,
+        }
+
+    rt.llm.generate_practice_debrief = _fake_debrief  # type: ignore[method-assign]
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/practice/{sess.id}/debrief",
+        json={"final_answer": "I aligned both teams around shared SLO latency budgets.", "expected_question_id": "q_1"},
+    )
+    assert resp.status_code == 200
+    assert any("shared SLO latency budgets" in t["text"] for t in seen_turns)
+    assert resp.json()["session"]["phase"] == "completed"
+
+

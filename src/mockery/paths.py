@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import sys
 import tomllib
 from pathlib import Path
+
+
+def is_loopback_host(host: str, *, allow_testserver: bool = False) -> bool:
+    """Return True if `host` is a loopback address (`localhost`, `127.0.0.0/8`, or `::1`)."""
+    clean = (host or "").strip().strip("[]").lower()
+    if clean == "localhost":
+        return True
+    if allow_testserver and clean == "testserver":
+        return True
+    try:
+        return ipaddress.ip_address(clean).is_loopback
+    except ValueError:
+        return False
 
 
 def _is_mockery_checkout(directory: Path) -> bool:

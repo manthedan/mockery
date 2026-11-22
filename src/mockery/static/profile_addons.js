@@ -510,7 +510,9 @@ export function createProfileAddonsController({
             body: JSON.stringify(payload),
           });
         } else if (op.type === "toggle") {
-          res = await fetch(`/api/profile/resume/toggle/${encodeURIComponent(op.spanId)}`, {
+          const docId = local.profile?.resume?.doc_id;
+          const qs = docId ? `?doc_id=${encodeURIComponent(docId)}` : "";
+          res = await fetch(`/api/profile/resume/toggle/${encodeURIComponent(op.spanId)}${qs}`, {
             method: "POST",
           });
         }
@@ -520,6 +522,9 @@ export function createProfileAddonsController({
         if (!isCurrent()) return;
         if (!res.ok) {
           showToast(formatApiDetail(data.detail, "Could not update redaction."));
+          if (res.status === 409) {
+            await loadProfile();
+          }
           return;
         }
         local.profile = data;

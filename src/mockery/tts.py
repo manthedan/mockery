@@ -900,9 +900,12 @@ class LocalTTSEngine:
             raise
         if kind == "error":
             stop_event.set()
-            with self._phonon_lock:
-                self._phonon_error = str(payload)
-                self._phonon = None
+            def _record_phonon_error() -> None:
+                with self._phonon_lock:
+                    self._phonon_error = str(payload)
+                    self._phonon = None
+
+            await asyncio.to_thread(_record_phonon_error)
             logger.warning("Phonon-31M stream failed on first chunk; falling back: %s", payload)
             return None
         if kind == "done":
@@ -910,11 +913,16 @@ class LocalTTSEngine:
             return None
 
         first_chunk: bytes = payload
+        engine_ref = self
 
         class _ManagedPhononStream:
+            """Cycle-free async iterator so `__del__` always triggers `stop_event.set()` if abandoned."""
+
             def __init__(self) -> None:
                 self._closed = False
-                self._gen = self._iterate()
+                self._first_pending: bytes | None = first_chunk
+                self._collected: list[bytes] = [first_chunk]
+                self._completed = False
 
             def close(self) -> None:
                 if not self._closed:
@@ -923,43 +931,37 @@ class LocalTTSEngine:
 
             async def aclose(self) -> None:
                 self.close()
-                await self._gen.aclose()
 
             def __aiter__(self) -> AsyncIterator[bytes]:
                 return self
 
             async def __anext__(self) -> bytes:
+                if self._closed:
+                    raise StopAsyncIteration
+                if self._first_pending is not None:
+                    chunk = self._first_pending
+                    self._first_pending = None
+                    return chunk
                 try:
-                    return await self._gen.__anext__()
+                    k, val = await queue.get()
                 except BaseException:
                     self.close()
                     raise
+                if k == "chunk":
+                    self._collected.append(val)
+                    return val
+                if k == "done":
+                    self._completed = True
+                    self.close()
+                    engine_ref._cache_put(cache_key, b"".join(self._collected), sr)
+                    raise StopAsyncIteration
+                logger.warning("Phonon-31M stream errored mid-utterance: %s", val)
+                self.close()
+                raise StopAsyncIteration
 
             def __del__(self) -> None:
                 self.close()
 
-            async def _iterate(self) -> AsyncIterator[bytes]:
-                collected: list[bytes] = [first_chunk]
-                completed = False
-                try:
-                    yield first_chunk
-                    while not self._closed:
-                        k, val = await queue.get()
-                        if k == "chunk":
-                            collected.append(val)
-                            yield val
-                        elif k == "done":
-                            completed = True
-                            break
-                        else:
-                            logger.warning("Phonon-31M stream errored mid-utterance: %s", val)
-                            break
-                finally:
-                    self.close()
-                if completed:
-                    self_engine._cache_put(cache_key, b"".join(collected), sr)
-
-        self_engine = self
         return sr, _ManagedPhononStream()
 
     async def open_pcm_stream(

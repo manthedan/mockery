@@ -55,6 +55,11 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/scripts/build_macos_app.py" ]; then
   info "Building and installing $APP_DEST..."
   if uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/build_macos_app.py" --install; then
     APP_BUILT=1
+  else
+    warn "Native Swift launcher build failed; retrying with shell launcher fallback..."
+    if uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/build_macos_app.py" --shell-fallback --install; then
+      APP_BUILT=1
+    fi
   fi
 else
   info "Creating $APP_DEST..."
@@ -64,11 +69,14 @@ else
   if command -v git >/dev/null 2>&1 && ( [ -x /opt/homebrew/bin/git ] || [ -x /usr/local/bin/git ] || xcode-select -p >/dev/null 2>&1 ); then
     if git clone --depth 1 "$REPO_URL" "$TMP_BUILD/mockery" >/dev/null 2>&1; then
       UV_PY="$(uv python find 3.12 2>/dev/null || true)"
-      if [ -n "$UV_PY" ] && "$UV_PY" "$TMP_BUILD/mockery/scripts/build_macos_app.py" --install; then
-        APP_BUILT=1
+      if [ -n "$UV_PY" ]; then
+        if "$UV_PY" "$TMP_BUILD/mockery/scripts/build_macos_app.py" --install; then
+          APP_BUILT=1
+        fi
       elif uv run --python 3.12 python "$TMP_BUILD/mockery/scripts/build_macos_app.py" --install; then
         APP_BUILT=1
-      else
+      fi
+      if [ "$APP_BUILT" -ne 1 ]; then
         warn "Could not compile native menu bar app; falling back to shell launcher..."
       fi
     fi
@@ -116,10 +124,11 @@ LAUNCHER
 PLIST
     rm -rf "$APP_DEST"
     mv "$STAGING_APP" "$APP_DEST"
+    APP_BUILT=1
   fi
 fi
 
-if [ ! -x "$APP_DEST/Contents/MacOS/Mockery" ]; then
+if [ "$APP_BUILT" -ne 1 ] || [ ! -x "$APP_DEST/Contents/MacOS/Mockery" ]; then
   warn "Failed to install a valid $APP_DEST launcher."
   exit 1
 fi

@@ -79,6 +79,10 @@ class CandidateProfileState(BaseModel):
     active_jd_id: str | None = None
 
 
+class StaleResumeDocumentError(ValueError):
+    """Raised when a span toggle targets a superseded resume document."""
+
+
 class CandidateProfileStore:
     """
     Stores candidate resume (raw kept strictly on disk with exclusive 0600 perms; only redacted text
@@ -254,13 +258,22 @@ class CandidateProfileStore:
         with self._prefs_lock:
             return self._update_redaction_prefs_serialized(prefs)
 
-    def toggle_span_redaction(self, span_id: str) -> ResumeProfile | None:
+    def toggle_span_redaction(
+        self,
+        span_id: str,
+        *,
+        expected_doc_id: str | None = None,
+    ) -> ResumeProfile | None:
         """Toggle redaction on/off for a detected span server-side without exposing hidden PII to HTTP callers."""
         with self._prefs_lock:
             with self._lock:
                 r = self._state.resume
                 if r is None:
                     return None
+                if expected_doc_id and expected_doc_id != self._active_doc_token:
+                    raise StaleResumeDocumentError(
+                        "Resume was updated in another tab — refresh before toggling redaction."
+                    )
                 target_span = next((sp for sp in r.spans if sp.get("id") == span_id), None)
                 if target_span is None:
                     return None
@@ -373,6 +386,7 @@ class CandidateProfileStore:
                         }
                     )
                 resume_dict = {
+                    "doc_id": self._active_doc_token or "",
                     "filename": r.filename,
                     "char_count": len(r.raw_text),
                     "redacted_text": r.redacted_text,

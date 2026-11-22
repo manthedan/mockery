@@ -695,6 +695,9 @@ export function createCodingStudioPlugin({
         renderStatusPill();
         renderConsole();
         showToast("Cancelled running tests.", 2000);
+        if (run.language === "python") {
+          armWarmPySpare();
+        }
       }
     }
 
@@ -1336,7 +1339,11 @@ export function createCodingStudioPlugin({
       if (resetConfirmArmed) {
         resetConfirmArmed = false;
         const btn = q("[data-cs-reset]");
-        if (btn) btn.textContent = "Reset";
+        if (btn) {
+          btn.classList.remove("is-armed");
+          btn.title = "Restore starter code";
+          btn.setAttribute("aria-label", "Restore starter code");
+        }
       }
     }
 
@@ -1386,7 +1393,11 @@ export function createCodingStudioPlugin({
       if (currentText !== targetText && !resetConfirmArmed) {
         resetConfirmArmed = true;
         const btn = q("[data-cs-reset]");
-        if (btn) btn.textContent = "Confirm Reset?";
+        if (btn) {
+          btn.classList.add("is-armed");
+          btn.title = "Click again to confirm reset (undoable with Cmd+Z)";
+          btn.setAttribute("aria-label", "Confirm restore starter code");
+        }
         resetConfirmTimer = setTimeout(() => clearResetConfirmArm(), 4500);
         showToast("Click Reset again to restore starter code (undoable with Cmd+Z).", 3400);
         return;
@@ -1422,6 +1433,9 @@ export function createCodingStudioPlugin({
         const nextLang = langBtn.getAttribute("data-cs-lang");
         if (VALID_LANG_IDS.has(nextLang) && nextLang !== state.language) {
           clearResetConfirmArm();
+          if (state.language === "python" && nextLang !== "python") {
+            disposeWarmPySpare();
+          }
           state.language = nextLang;
           if (nextLang === "pseudocode") state.activeTab = "solution";
           renderAll();
@@ -1435,6 +1449,7 @@ export function createCodingStudioPlugin({
       if (tabBtn) {
         const nextTab = tabBtn.getAttribute("data-cs-tab");
         if ((nextTab === "solution" || nextTab === "tests") && nextTab !== state.activeTab) {
+          clearResetConfirmArm();
           state.activeTab = nextTab;
           renderToolbarAndEditor();
         }
@@ -1479,6 +1494,8 @@ export function createCodingStudioPlugin({
       }
 
       if (ev.target.closest("[data-cs-switch-js]")) {
+        clearResetConfirmArm();
+        disposeWarmPySpare();
         state.language = "javascript";
         renderAll();
         notifyChanged();
