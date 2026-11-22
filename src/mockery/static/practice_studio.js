@@ -2761,16 +2761,19 @@ export function createPracticeStudioController({
   }
 
   function originalQuestionSignals(sess, idx) {
-    const review = Array.isArray(sess?.debrief?.question_reviews) ? sess.debrief.question_reviews[idx] : null;
+    const q = sess?.questions?.[idx] || null;
+    const reviews = Array.isArray(sess?.debrief?.question_reviews) ? sess.debrief.question_reviews : [];
+    const byId = q?.id ? reviews.find((r) => r && r.question_id === q.id) : null;
+    const review = byId || (!q?.id ? reviews[idx] : null);
     if (review?.carl && typeof review.carl === "object") return review.carl;
-    return sess?.questions?.[idx]?.carl_signals || null;
+    return q?.carl_signals || null;
   }
 
   function effectiveQuestionSignals(sess) {
     const qs = Array.isArray(sess?.questions) ? sess.questions : [];
     const after = latestRetrySignals(sess);
     const drillIdx = after ? drillQuestionIndex(sess) : -1;
-    return qs.map((q, idx) => (idx === drillIdx ? after : q.carl_signals || null));
+    return qs.map((q, idx) => (idx === drillIdx ? after : originalQuestionSignals(sess, idx)));
   }
 
   function aggregateSignals(list) {

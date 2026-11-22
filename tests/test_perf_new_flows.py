@@ -1032,3 +1032,471 @@ def test_prompt_caching_wire_formats_prefix_stability_and_cli_sandbox_cwd(
     )
     assert out == "OK"
     assert seen_cwds == [str(sandbox)]
+
+
+def test_practice_conversation_strictly_append_only_workspace_delta_and_roundtrip(tmp_path: Path) -> None:
+    """Canonical PracticeConversation must be strictly append-only across Q advances, hints, skips, and workspace edits."""
+    import random
+
+    from mockery.practice_conversation import (
+        build_practice_turn_messages,
+        commit_practice_conversation_turn,
+    )
+    from mockery.routers.practice import serialize_practice_session
+
+    store = PracticeSessionStore(tmp_path / "practice")
+    q1 = PracticeQuestionItem(id="pq_1", title="Ledger", prompt="Design a distributed ledger.", status="active")
+    q2 = PracticeQuestionItem(id="pq_2", title="Cache", prompt="Design a distributed cache.", status="pending")
+    session = PracticeSession(
+        id="prac_append_only",
+        role_title="Staff Engineer",
+        company="Acme",
+        config=PracticeConfig(interview_type="system_design", target_level="L6"),
+        questions=[q1, q2],
+        turns=[PracticeTurn(role="interviewer", question_id="pq_1", text="Welcome! Design a distributed ledger.")],
+    )
+
+    # Turn 1 with initial diagram
+    msgs1, u1, ws1, sys1, reset1 = build_practice_turn_messages(
+        session,
+        current_question=q1.model_dump(),
+        next_question=q2.model_dump(),
+        candidate_answer="I'd start with a write-ahead log.",
+        follow_up_count=0,
+        max_followups=3,
+        workspace_context={"diagram_summary": "Client -> Gateway -> WAL"},
+    )
+    assert reset1 is True
+    assert len(msgs1) == 2
+    assert "Client -> Gateway -> WAL" in u1
+    a1 = '{"interviewer_reply":"Nice start. How do you replicate the WAL?","should_advance":false}'
+    session.turns.append(PracticeTurn(role="candidate", question_id="pq_1", text="I'd start with a write-ahead log."))
+    session.turns.append(PracticeTurn(role="interviewer", question_id="pq_1", text="Nice start. How do you replicate the WAL?"))
+    commit_practice_conversation_turn(
+        session,
+        system_prompt=sys1,
+        user_content=u1,
+        assistant_raw=a1,
+        workspace_snapshot=ws1,
+        synced_turn_count=len(session.turns),
+        reset_conversation=reset1,
+    )
+
+    # Persist and reload; public serializer MUST strip internal llm_conversation
+    store.save(session)
+    reloaded = store.get(session.id)
+    assert reloaded is not None and reloaded.llm_conversation is not None
+    public_dump = serialize_practice_session(SimpleNamespace(practice_debrief_jobs={}), reloaded)
+    assert "llm_conversation" not in public_dump
+
+    # Turn 2: unchanged workspace omitted, prefix byte-identical to Turn 1 + a1
+    msgs2, u2, ws2, sys2, reset2 = build_practice_turn_messages(
+        reloaded,
+        current_question=q1.model_dump(),
+        next_question=q2.model_dump(),
+        candidate_answer="Raft quorum across 3 zones.",
+        follow_up_count=1,
+        max_followups=3,
+        workspace_context={"diagram_summary": "Client -> Gateway -> WAL"},
+    )
+    assert reset2 is False
+    assert msgs2[:2] == msgs1
+    assert msgs2[2] == {"role": "assistant", "content": a1}
+    assert "LIVE SYSTEM DESIGN DIAGRAM STATE" not in u2
+    a2 = '{"interviewer_reply":"Great! Moving to Q2.","should_advance":true}'
+    reloaded.turns.append(PracticeTurn(role="candidate", question_id="pq_1", text="Raft quorum across 3 zones."))
+    reloaded.turns.append(PracticeTurn(role="interviewer", question_id="pq_2", text="Great! Moving to Q2."))
+    commit_practice_conversation_turn(
+        reloaded,
+        system_prompt=sys2,
+        user_content=u2,
+        assistant_raw=a2,
+        workspace_snapshot=ws2,
+        synced_turn_count=len(reloaded.turns),
+        reset_conversation=reset2,
+    )
+
+    # Intervening coach hint + workspace clear + advance to Q2 -> prefix STILL strictly preserved!
+    reloaded.turns.append(PracticeTurn(role="coach", question_id="pq_2", text="Think about eviction policy."))
+    msgs3, u3, ws3, sys3, reset3 = build_practice_turn_messages(
+        reloaded,
+        current_question=q2.model_dump(),
+        next_question=None,
+        candidate_answer="Consistent hashing ring with LRU nodes.",
+        follow_up_count=0,
+        max_followups=3,
+        workspace_context={"diagram_summary": ""},
+    )
+    assert reset3 is False
+    assert msgs3[:-1] == msgs2 + [{"role": "assistant", "content": a2}]
+    assert "Coach hint shown to candidate: Think about eviction policy." in u3
+    assert "(cleared)" in u3
+
+    # Randomized 20-step fuzz verifying strict prefix preservation under arbitrary events
+    rng = random.Random(1337)
+    prev_msgs = msgs3
+    prev_raw = '{"interviewer_reply":"Tell me more.","should_advance":false}'
+    reloaded.turns.append(PracticeTurn(role="candidate", question_id="pq_2", text="Consistent hashing ring."))
+    reloaded.turns.append(PracticeTurn(role="interviewer", question_id="pq_2", text="Tell me more."))
+    commit_practice_conversation_turn(
+        reloaded,
+        system_prompt=sys3,
+        user_content=u3,
+        assistant_raw=prev_raw,
+        workspace_snapshot=ws3,
+        synced_turn_count=len(reloaded.turns),
+        reset_conversation=reset3,
+    )
+    for step in range(20):
+        if rng.random() < 0.35:
+            reloaded.turns.append(PracticeTurn(role="coach", question_id="pq_2", text=f"Hint {step}"))
+        if rng.random() < 0.25:
+            reloaded.turns.append(PracticeTurn(role="interviewer", question_id="pq_2", text=f"Manual skip {step}"))
+        ws_ctx = {"code": f"def f(): return {step}" if rng.random() < 0.6 else "", "language": "python"}
+        nxt_msgs, nxt_u, nxt_ws, nxt_sys, nxt_reset = build_practice_turn_messages(
+            reloaded,
+            current_question=q2.model_dump(),
+            next_question=None,
+            candidate_answer=f"Answer {step}",
+            follow_up_count=step % 3,
+            max_followups=3,
+            workspace_context=ws_ctx,
+        )
+        assert nxt_reset is False
+        assert nxt_msgs[:-1] == prev_msgs + [{"role": "assistant", "content": prev_raw}]
+        prev_msgs = nxt_msgs
+        prev_raw = json.dumps({"interviewer_reply": f"Reply {step}", "should_advance": False})
+        reloaded.turns.append(PracticeTurn(role="candidate", question_id="pq_2", text=f"Answer {step}"))
+        reloaded.turns.append(PracticeTurn(role="interviewer", question_id="pq_2", text=f"Reply {step}"))
+        commit_practice_conversation_turn(
+            reloaded,
+            system_prompt=nxt_sys,
+            user_content=nxt_u,
+            assistant_raw=prev_raw,
+            workspace_snapshot=nxt_ws,
+            synced_turn_count=len(reloaded.turns),
+            reset_conversation=nxt_reset,
+        )
+
+
+def test_persistent_cli_session_worker_caching_rehydration_and_lru(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persistent `agy` & `claude` session workers reuse 1 process with delta-only stdin, rehydrate on crash, and evict LRU."""
+    from mockery.llm import _MAX_CLI_SESSION_WORKERS, InterviewCopilotLLM, LLMRuntimeConfig
+
+    class _InteractiveStdin:
+        def __init__(self, on_write: Any) -> None:
+            self.written: list[bytes] = []
+            self.closed = False
+            self._on_write = on_write
+            self.fail_next = False
+
+        def is_closing(self) -> bool:
+            return self.closed
+
+        def write(self, data: bytes) -> None:
+            if self.fail_next:
+                raise BrokenPipeError("worker died")
+            self.written.append(data)
+            self._on_write(data)
+
+        async def drain(self) -> None:
+            if self.fail_next:
+                raise BrokenPipeError("worker died")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _QueueStdout:
+        def __init__(self) -> None:
+            self._q: asyncio.Queue[bytes] = asyncio.Queue()
+
+        def push(self, line: bytes) -> None:
+            self._q.put_nowait(line)
+
+        async def readline(self) -> bytes:
+            return await self._q.get()
+
+    class _IdleStderr:
+        def __init__(self) -> None:
+            self._ev = asyncio.Event()
+
+        def finish(self) -> None:
+            self._ev.set()
+
+        async def read(self, _n: int = -1) -> bytes:
+            await self._ev.wait()
+            return b""
+
+    class _FakePersistentProc:
+        def __init__(self, backend: str) -> None:
+            self.backend = backend
+            self.returncode: int | None = None
+            self.stdout = _QueueStdout()
+            self.stderr = _IdleStderr()
+            self.turn_idx = 0
+            self.stdin = _InteractiveStdin(self._handle_write)
+            self.terminated = False
+
+        def _handle_write(self, data: bytes) -> None:
+            self.turn_idx += 1
+            env = json.loads(data.decode("utf-8"))
+            txt = f'{{"reply":"turn_{self.turn_idx}","backend":"{self.backend}"}}'
+            if self.backend == "agy":
+                assert env["event"] == "user"
+                self.stdout.push(
+                    json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": txt}}).encode() + b"\n"
+                )
+            else:
+                assert env["type"] == "user"
+                self.stdout.push(
+                    json.dumps({"type": "result", "is_error": False, "result": txt}).encode() + b"\n"
+                )
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+            self.stderr.finish()
+            self.stdout.push(b"")
+
+        def kill(self) -> None:
+            self.terminate()
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/fake")
+
+    async def _run() -> None:
+        # 1. agy persistent session: prewarm + 3 turns on 1 single process, delta-only on turns 2 & 3, crash recovery on turn 4
+        spawned: list[_FakePersistentProc] = []
+
+        async def fake_exec(*args: Any, **_kwargs: Any):
+            proc = _FakePersistentProc(str(args[0]))
+            spawned.append(proc)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        cfg = LLMRuntimeConfig(tmp_path)
+        cfg.provider = "agy"
+        cfg.base_url = "cli://agy"
+        cfg.fast_model = "gemini-4-hydrogen:low"
+        llm = InterviewCopilotLLM(cfg)
+
+        llm.prewarm_session_worker("practice:s1", system="SYS_PROMPT", expect_json=True)
+        await asyncio.gather(*list(llm._warm_spare_tasks))
+        assert len(spawned) == 1
+        assert spawned[0].stdin.written == []  # Prewarm sends 0 tokens!
+
+        msgs = [
+            {"role": "system", "content": "SYS_PROMPT"},
+            {"role": "user", "content": "TURN_1_PLAN_AND_ANSWER"},
+        ]
+        r1 = await llm._complete_messages(msgs, model=cfg.fast_model, expect_json=True, session_key="practice:s1")
+        assert len(spawned) == 1
+        assert spawned[0].terminated is False
+        sent1 = json.loads(spawned[0].stdin.written[0].decode())["message"]["content"]
+        assert "<INSTRUCTIONS>" in sent1 and "TURN_1_PLAN_AND_ANSWER" in sent1
+
+        # Turn 2: SAME process, sends ONLY delta user message!
+        msgs.extend([{"role": "assistant", "content": r1}, {"role": "user", "content": "TURN_2_DELTA_ONLY"}])
+        r2 = await llm._complete_messages(msgs, model=cfg.fast_model, expect_json=True, session_key="practice:s1")
+        assert len(spawned) == 1
+        sent2 = json.loads(spawned[0].stdin.written[1].decode())["message"]["content"]
+        assert sent2 == "TURN_2_DELTA_ONLY"
+
+        # Turn 3: SAME process, STILL delta-only!
+        msgs.extend([{"role": "assistant", "content": r2}, {"role": "user", "content": "TURN_3_DELTA_ONLY"}])
+        r3 = await llm._complete_messages(msgs, model=cfg.fast_model, expect_json=True, session_key="practice:s1")
+        assert len(spawned) == 1
+        sent3 = json.loads(spawned[0].stdin.written[2].decode())["message"]["content"]
+        assert sent3 == "TURN_3_DELTA_ONLY"
+
+        # Turn 4: simulate silent crash of process 0 -> auto-rehydrates on process 1 with full flat history!
+        spawned[0].stdin.fail_next = True
+        msgs.extend([{"role": "assistant", "content": r3}, {"role": "user", "content": "TURN_4_AFTER_CRASH"}])
+        r4 = await llm._complete_messages(msgs, model=cfg.fast_model, expect_json=True, session_key="practice:s1")
+        assert len(spawned) == 2
+        assert spawned[0].terminated is True
+        sent4 = json.loads(spawned[1].stdin.written[0].decode())["message"]["content"]
+        assert "<CONVERSATION_HISTORY>" in sent4
+        assert "TURN_1_PLAN_AND_ANSWER" in sent4
+        assert "TURN_4_AFTER_CRASH" in sent4
+
+        # Turn 5: new process 1 is now synced and back to delta-only!
+        msgs.extend([{"role": "assistant", "content": r4}, {"role": "user", "content": "TURN_5_DELTA_AGAIN"}])
+        await llm._complete_messages(msgs, model=cfg.fast_model, expect_json=True, session_key="practice:s1")
+        assert len(spawned) == 2
+        sent5 = json.loads(spawned[1].stdin.written[1].decode())["message"]["content"]
+        assert sent5 == "TURN_5_DELTA_AGAIN"
+
+        # LRU eviction: opening more than _MAX_CLI_SESSION_WORKERS evicts oldest idle worker
+        for extra_idx in range(_MAX_CLI_SESSION_WORKERS):
+            llm.prewarm_session_worker(f"practice:extra_{extra_idx}", system="SYS", expect_json=True)
+        await asyncio.gather(*list(llm._warm_spare_tasks))
+        assert len(llm._session_workers) == _MAX_CLI_SESSION_WORKERS
+        assert spawned[1].terminated is True  # oldest worker ("practice:s1") was evicted & reaped
+
+        await llm.aclose()
+        assert all(p.terminated for p in spawned)
+
+        # 2. claude persistent session: passes native --system-prompt once & sends delta-only on Turn 2
+        cl_spawns: list[tuple[tuple[str, ...], _FakePersistentProc]] = []
+
+        async def fake_cl_exec(*args: Any, **_kwargs: Any):
+            proc = _FakePersistentProc("claude")
+            cl_spawns.append((tuple(str(a) for a in args), proc))
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_cl_exec)
+        cl_cfg = LLMRuntimeConfig(tmp_path)
+        cl_cfg.provider = "claude_cli"
+        cl_cfg.base_url = "cli://claude"
+        cl_cfg.fast_model = "claude-haiku-4-5-20251001"
+        cl_llm = InterviewCopilotLLM(cl_cfg)
+        cl_llm.prewarm_session_worker("practice:cl1", system="CLAUDE_SYS", expect_json=True)
+        await asyncio.gather(*list(cl_llm._warm_spare_tasks))
+        assert len(cl_spawns) == 1
+        assert "CLAUDE_SYS" in cl_spawns[0][0][cl_spawns[0][0].index("--system-prompt") + 1]
+
+        cl_msgs = [{"role": "system", "content": "CLAUDE_SYS"}, {"role": "user", "content": "CL_TURN_1"}]
+        cl_r1 = await cl_llm._complete_messages(cl_msgs, model=cl_cfg.fast_model, expect_json=True, session_key="practice:cl1")
+        assert len(cl_spawns) == 1
+        cl_msgs.extend([{"role": "assistant", "content": cl_r1}, {"role": "user", "content": "CL_TURN_2"}])
+        await cl_llm._complete_messages(cl_msgs, model=cl_cfg.fast_model, expect_json=True, session_key="practice:cl1")
+        assert len(cl_spawns) == 1
+        assert json.loads(cl_spawns[0][1].stdin.written[1].decode())["message"]["content"] == "CL_TURN_2"
+        await cl_llm.aclose()
+        assert cl_spawns[0][1].terminated is True
+
+    asyncio.run(_run())
+
+
+def test_multiturn_http_sliding_cache_and_authoritative_debrief_carl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify multi-turn HTTP sliding cache breakpoints and authoritative Debrief CARL write-back by question_id."""
+    import httpx
+
+    from mockery.llm import InterviewCopilotLLM, LLMRuntimeConfig
+
+    # 1. Anthropic multi-turn attaches ephemeral cache_control on system + last message (sliding breakpoint)
+    sent_anth: list[dict[str, Any]] = []
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": "OK"}]}
+
+    class _FakeClient:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any]):
+            sent_anth.append(json)
+            return _FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    anth_cfg = LLMRuntimeConfig(tmp_path)
+    anth_cfg.provider = "anthropic"
+    anth_cfg.base_url = "https://api.anthropic.com/v1"
+    anth_cfg.api_key = "sk-ant-test"
+    anth_llm = InterviewCopilotLLM(anth_cfg)
+    asyncio.run(
+        anth_llm._complete_messages(
+            [
+                {"role": "system", "content": "Frozen system."},
+                {"role": "user", "content": "Turn 1"},
+                {"role": "assistant", "content": "Reply 1"},
+                {"role": "user", "content": "Turn 2"},
+            ],
+            model="claude-haiku-4-5-20251001",
+        )
+    )
+    assert sent_anth[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert sent_anth[0]["messages"][0] == {"role": "user", "content": "Turn 1"}
+    assert sent_anth[0]["messages"][1] == {"role": "assistant", "content": "Reply 1"}
+    assert sent_anth[0]["messages"][2]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    # 2. End-to-end Practice API: skip Q1, answer Q2, Debrief writes CARL back by question_id & matches Home score
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    rt.llm_config.provider = "openai"
+    rt.llm_config.api_key = "sk-test"
+
+    async def fake_plan(**_kw: Any):
+        return (
+            [
+                {"id": "q_skip", "title": "Skipped Q", "prompt": "Q1 prompt"},
+                {"id": "q_ans", "title": "Answered Q", "prompt": "Q2 prompt"},
+            ],
+            "Welcome!",
+        )
+
+    async def fake_reply(**_kw: Any):
+        return {
+            "interviewer_reply": "Thanks, wrapping up!",
+            "should_advance": True,
+            "carl_signals": {"context": "partial", "action": "partial", "result": "missing", "learning": "missing"},
+            "coach_nudge": {"tone": "tip", "message": "Add metrics."},
+        }
+
+    async def fake_debrief(**_kw: Any):
+        return {
+            "overall_encouragement": "Great rep!",
+            "top_strengths": ["Clear framing."],
+            "carl_primer": "CARL works.",
+            "question_reviews": [
+                {
+                    "question_id": "q_ans",
+                    "title": "Answered Q",
+                    "prompt": "Q2 prompt",
+                    "carl": {"context": "strong", "action": "strong", "result": "strong", "learning": "strong"},
+                    "strength": "Strong.",
+                    "coaching_tip": "Keep going.",
+                    "carl_reframe": "Example.",
+                }
+            ],
+            "retry_drill": {"question_id": "q_ans", "focus": "Polish", "prompt": "Retry."},
+        }
+
+    monkeypatch.setattr(rt.llm, "generate_practice_plan", fake_plan)
+    monkeypatch.setattr(rt.llm, "generate_practice_interviewer_reply", fake_reply)
+    monkeypatch.setattr(rt.llm, "generate_practice_debrief", fake_debrief)
+
+    with TestClient(app) as client:
+        start = client.post("/api/practice/start", json={"interview_type": "behavioral", "question_count": 2}).json()
+        sid = start["session"]["id"]
+        assert "llm_conversation" not in start["session"]
+        # Skip Q1 cleanly
+        assert client.post(f"/api/practice/{sid}/next").status_code == 200
+        # Answer Q2
+        turn_res = client.post(f"/api/practice/{sid}/turn", json={"text": "I drove the rollout and cut p99 by 40%."})
+        assert turn_res.status_code == 200
+        assert "llm_conversation" not in turn_res.json()["session"]
+        # Debrief writes authoritative CARL back onto q_ans (NOT q_skip!)
+        deb_res = client.post(f"/api/practice/{sid}/debrief")
+        assert deb_res.status_code == 200
+        qs_by_id = {q["id"]: q for q in deb_res.json()["session"]["questions"]}
+        assert qs_by_id["q_skip"]["carl_signals"]["context"] == "missing"
+        assert qs_by_id["q_ans"]["carl_signals"] == {
+            "context": "strong",
+            "action": "strong",
+            "result": "strong",
+            "learning": "strong",
+        }
+        # Home history rail score agrees with Debrief!
+        listed = client.get("/api/practice/sessions").json()["sessions"]
+        assert listed[0]["id"] == sid
+        assert listed[0]["score"] == 2.0  # avg across q_skip (0) and q_ans (4) -> partial on all 4 dims = 2.0

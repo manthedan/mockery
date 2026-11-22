@@ -9,10 +9,11 @@ import re
 import shutil
 import tempfile
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 from dotenv import dotenv_values
@@ -30,6 +31,11 @@ from .models import (
     Utterance,
     fmt_ms,
 )
+from .practice_conversation import (
+    build_practice_turn_messages,
+    messages_prefix_digest,
+    render_flat_messages,
+)
 from .prompts import (
     calibration_rubric_for,
     practice_tone_instruction,
@@ -37,6 +43,9 @@ from .prompts import (
     render_prompt,
     triage_diarize_rules,
 )
+
+if TYPE_CHECKING:
+    from .practice import PracticeSession
 
 logger = logging.getLogger(__name__)
 
@@ -302,18 +311,35 @@ _WARM_SPARE_SYSTEM_PROMPT = (
     "strictly and reply with ONLY the requested output format."
 )
 _WARM_SPARE_TTL_SEC = 180.0
+_CLI_SESSION_TTL_SEC = 900.0
+_MAX_CLI_SESSION_WORKERS = 3
+_STDERR_TAIL_LIMIT = 4096
 
 
 class _WarmSpareFallbackError(RuntimeError):
-    """Raised when a pre-spawned warm CLI spare dies before producing output; triggers one-shot fallback."""
+    """Raised when a pre-spawned warm CLI worker dies before producing output; triggers fallback/rehydration."""
 
 
 @dataclass
-class _WarmCLISpare:
+class _CLISessionWorker:
+    """
+    Unified hardened CLI `stream-json` worker for `agy` and `claude`.
+    - `max_turns=1`: single-use disposable spare (Live Copilot `D` / one-off calls).
+    - `max_turns=None`: persistent session worker (Practice Studio multi-turn prompt caching).
+    """
+
     backend: str  # "agy" | "claude"
     model_key: tuple[str, str | None]
     proc: asyncio.subprocess.Process
     created_at: float
+    last_used: float
+    max_turns: int | None = None
+    system_prompt: str | None = None
+    prefix_digest: str | None = None
+    turn_count: int = 0
+    stderr_buf: bytearray = field(default_factory=bytearray)
+    stderr_task: asyncio.Task[None] | None = None
+    in_use: bool = False
 
 
 def _cli_sandbox_cwd() -> Path:
@@ -380,14 +406,53 @@ async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
             pass
 
 
+async def _drain_stderr(stream: Any, buf: bytearray) -> None:
+    """Continuously drain a worker's stderr into a bounded tail buffer so multi-turn processes never deadlock."""
+    try:
+        while True:
+            try:
+                chunk = await stream.read(1024)
+            except TypeError:
+                chunk = await stream.read()
+                if chunk:
+                    buf.extend(chunk)
+                    if len(buf) > _STDERR_TAIL_LIMIT:
+                        del buf[:-_STDERR_TAIL_LIMIT]
+                return
+            if not chunk:
+                return
+            buf.extend(chunk)
+            if len(buf) > _STDERR_TAIL_LIMIT:
+                del buf[:-_STDERR_TAIL_LIMIT]
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+
+
+async def _close_worker(worker: _CLISessionWorker) -> None:
+    await _terminate_proc(worker.proc)
+    task = worker.stderr_task
+    if task is not None:
+        if not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+            except Exception:
+                task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        worker.stderr_task = None
+
+
 class InterviewCopilotLLM:
     def __init__(self, config: LLMRuntimeConfig) -> None:
         self.config = config
         self._cached_client: AsyncOpenAI | None = None
         self._cached_client_key: tuple[str, str] | None = None
-        self._warm_spare: _WarmCLISpare | None = None
+        self._warm_spare: _CLISessionWorker | None = None
+        self._session_workers: OrderedDict[str, _CLISessionWorker] = OrderedDict()
         self._warm_spare_lock = asyncio.Lock()
         self._warm_spare_tasks: set[asyncio.Task[Any]] = set()
+        self._session_prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def _client(self) -> AsyncOpenAI:
         key = self.config.api_key.strip() or "ollama-local"
@@ -399,7 +464,7 @@ class InterviewCopilotLLM:
         return self._cached_client
 
     async def aclose(self) -> None:
-        await self.invalidate_warm_spare()
+        await self.close_all_workers()
         if self._cached_client is not None:
             try:
                 await self._cached_client.close()
@@ -433,7 +498,12 @@ class InterviewCopilotLLM:
         return args
 
     @staticmethod
-    def _build_claude_warm_args(model_name: str, effort: str | None) -> list[str]:
+    def _build_claude_warm_args(
+        model_name: str,
+        effort: str | None,
+        *,
+        system_prompt: str | None = None,
+    ) -> list[str]:
         args = [
             "claude",
             "-p",
@@ -445,7 +515,7 @@ class InterviewCopilotLLM:
             "",
             "--disable-slash-commands",
             "--system-prompt",
-            _WARM_SPARE_SYSTEM_PROMPT,
+            system_prompt if system_prompt is not None else _WARM_SPARE_SYSTEM_PROMPT,
             "--input-format",
             "stream-json",
             "--output-format",
@@ -459,10 +529,45 @@ class InterviewCopilotLLM:
             args.extend(["--effort", effort])
         return args
 
+    async def _spawn_cli_worker(
+        self,
+        backend: str,
+        model_key: tuple[str, str | None],
+        *,
+        max_turns: int | None,
+        system_prompt: str | None = None,
+    ) -> _CLISessionWorker:
+        model_name, effort = model_key
+        args = (
+            self._build_agy_warm_args(model_name, effort)
+            if backend == "agy"
+            else self._build_claude_warm_args(model_name, effort, system_prompt=system_prompt)
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=str(_cli_sandbox_cwd()),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        now = time.monotonic()
+        worker = _CLISessionWorker(
+            backend=backend,
+            model_key=model_key,
+            proc=proc,
+            created_at=now,
+            last_used=now,
+            max_turns=max_turns,
+            system_prompt=system_prompt if backend == "claude" else None,
+        )
+        if proc.stderr is not None:
+            worker.stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, worker.stderr_buf))
+        return worker
+
     def prewarm_fast_model(self) -> None:
         """
         Best-effort pre-spawn of a single disposable warm CLI spare (`agy` or `claude`)
-        so the next interactive Practice turn or Live Copilot `D` press skips 2–7s of CLI boot.
+        so the next Live Copilot `D` press skips 2–7s of CLI boot.
         """
         backend = self.config.cli_backend
         if backend not in ("agy", "claude") or not self.config.is_configured:
@@ -478,10 +583,56 @@ class InterviewCopilotLLM:
         self._warm_spare_tasks.add(task)
         task.add_done_callback(self._warm_spare_tasks.discard)
 
+    @staticmethod
+    def _cli_format_rule(expect_json: bool) -> str:
+        if expect_json:
+            return "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY raw valid JSON (no markdown fences)."
+        return "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY the requested response."
+
+    def prewarm_session_worker(
+        self,
+        session_key: str,
+        *,
+        system: str | None = None,
+        expect_json: bool = True,
+    ) -> None:
+        """
+        Best-effort pre-spawn of a persistent locked-down CLI worker (`agy` or `claude`)
+        bound to an active Practice session. Sends nothing until Turn 1 (zero wasted tokens).
+        """
+        backend = self.config.cli_backend
+        if backend not in ("agy", "claude") or not self.config.is_configured:
+            return
+        model = (self.config.fast_model or "").strip()
+        if not model:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        existing_task = self._session_prewarm_tasks.get(session_key)
+        if existing_task is not None and not existing_task.done():
+            return
+        claude_sys = (
+            f"{(system or '').strip()}\n\n{self._cli_format_rule(expect_json)}".strip()
+            if backend == "claude" and system is not None
+            else None
+        )
+        task = loop.create_task(self._ensure_session_worker(session_key, backend, model, system_prompt=claude_sys))
+        self._session_prewarm_tasks[session_key] = task
+        self._warm_spare_tasks.add(task)
+
+        def _cleanup(t: asyncio.Task[Any]) -> None:
+            self._warm_spare_tasks.discard(t)
+            if self._session_prewarm_tasks.get(session_key) is t:
+                self._session_prewarm_tasks.pop(session_key, None)
+
+        task.add_done_callback(_cleanup)
+
     async def _ensure_warm_spare(self, backend: str, model: str) -> None:
         model_key = self._cli_model_key(backend, model)
         now = time.monotonic()
-        stale: _WarmCLISpare | None = None
+        stale: _CLISessionWorker | None = None
         async with self._warm_spare_lock:
             cur = self._warm_spare
             if cur is not None:
@@ -491,45 +642,89 @@ class InterviewCopilotLLM:
                 stale = cur
                 self._warm_spare = None
         if stale is not None:
-            await _terminate_proc(stale.proc)
+            await _close_worker(stale)
 
-        model_name, effort = model_key
-        args = (
-            self._build_agy_warm_args(model_name, effort)
-            if backend == "agy"
-            else self._build_claude_warm_args(model_name, effort)
-        )
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=str(_cli_sandbox_cwd()),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            worker = await self._spawn_cli_worker(backend, model_key, max_turns=1)
         except Exception as exc:
             logger.debug("Warm CLI spare pre-spawn skipped for %s: %s", backend, exc)
             return
 
-        spare = _WarmCLISpare(
-            backend=backend,
-            model_key=model_key,
-            proc=proc,
-            created_at=time.monotonic(),
-        )
-        discard: _WarmCLISpare | None = None
+        discard: _CLISessionWorker | None = None
         async with self._warm_spare_lock:
             if self._warm_spare is not None:
-                discard = spare
+                discard = worker
             else:
-                self._warm_spare = spare
+                self._warm_spare = worker
         if discard is not None:
-            await _terminate_proc(discard.proc)
+            await _close_worker(discard)
 
-    async def _pop_warm_spare(self, backend: str, model: str) -> _WarmCLISpare | None:
+    async def _ensure_session_worker(
+        self,
+        session_key: str,
+        backend: str,
+        model: str,
+        *,
+        system_prompt: str | None = None,
+    ) -> None:
         model_key = self._cli_model_key(backend, model)
         now = time.monotonic()
-        stale: _WarmCLISpare | None = None
+        stale: list[_CLISessionWorker] = []
+        async with self._warm_spare_lock:
+            cur = self._session_workers.get(session_key)
+            if cur is not None:
+                alive = cur.proc.returncode is None and (now - cur.last_used) < _CLI_SESSION_TTL_SEC
+                sys_ok = backend != "claude" or system_prompt is None or cur.system_prompt == system_prompt
+                if alive and cur.backend == backend and cur.model_key == model_key and sys_ok:
+                    self._session_workers.move_to_end(session_key)
+                    return
+                if not cur.in_use:
+                    stale.append(self._session_workers.pop(session_key))
+        for w in stale:
+            await _close_worker(w)
+
+        try:
+            worker = await self._spawn_cli_worker(
+                backend,
+                model_key,
+                max_turns=None,
+                system_prompt=system_prompt if backend == "claude" else None,
+            )
+        except Exception as exc:
+            logger.debug("Practice CLI session pre-spawn skipped for %s: %s", backend, exc)
+            return
+
+        to_close: list[_CLISessionWorker] = []
+        async with self._warm_spare_lock:
+            if session_key in self._session_workers:
+                to_close.append(worker)
+            else:
+                self._session_workers[session_key] = worker
+                self._session_workers.move_to_end(session_key)
+                to_close.extend(self._evict_excess_session_workers_locked())
+        for w in to_close:
+            await _close_worker(w)
+
+    def _evict_excess_session_workers_locked(self) -> list[_CLISessionWorker]:
+        now = time.monotonic()
+        evicted: list[_CLISessionWorker] = []
+        for k in list(self._session_workers.keys()):
+            w = self._session_workers[k]
+            if w.in_use:
+                continue
+            if w.proc.returncode is not None or (now - w.last_used) >= _CLI_SESSION_TTL_SEC:
+                evicted.append(self._session_workers.pop(k))
+        while len(self._session_workers) > _MAX_CLI_SESSION_WORKERS:
+            victim_key = next((k for k, w in self._session_workers.items() if not w.in_use), None)
+            if victim_key is None:
+                break
+            evicted.append(self._session_workers.pop(victim_key))
+        return evicted
+
+    async def _pop_warm_spare(self, backend: str, model: str) -> _CLISessionWorker | None:
+        model_key = self._cli_model_key(backend, model)
+        now = time.monotonic()
+        stale: _CLISessionWorker | None = None
         async with self._warm_spare_lock:
             cur = self._warm_spare
             if cur is None:
@@ -545,54 +740,73 @@ class InterviewCopilotLLM:
             else:
                 return None
         if stale is not None:
-            await _terminate_proc(stale.proc)
+            await _close_worker(stale)
         return None
 
-    async def invalidate_warm_spare(self) -> None:
+    async def close_session_worker(self, session_key: str) -> None:
+        task = self._session_prewarm_tasks.pop(session_key, None)
+        if task is not None and not task.done():
+            task.cancel()
+        stale: _CLISessionWorker | None = None
+        async with self._warm_spare_lock:
+            stale = self._session_workers.pop(session_key, None)
+        if stale is not None:
+            await _close_worker(stale)
+
+    async def close_all_workers(self) -> None:
         for t in list(self._warm_spare_tasks):
             if not t.done():
                 t.cancel()
         self._warm_spare_tasks.clear()
-        stale: _WarmCLISpare | None = None
+        self._session_prewarm_tasks.clear()
+        to_close: list[_CLISessionWorker] = []
         async with self._warm_spare_lock:
-            stale = self._warm_spare
-            self._warm_spare = None
-        if stale is not None:
-            await _terminate_proc(stale.proc)
+            if self._warm_spare is not None:
+                to_close.append(self._warm_spare)
+                self._warm_spare = None
+            while self._session_workers:
+                _, w = self._session_workers.popitem(last=False)
+                to_close.append(w)
+        for w in to_close:
+            await _close_worker(w)
 
-    async def _run_warm_spare_turn(
+    async def invalidate_warm_spare(self) -> None:
+        await self.close_all_workers()
+
+    async def _exchange_cli_worker_turn(
         self,
-        spare: _WarmCLISpare,
+        worker: _CLISessionWorker,
         *,
-        combined_prompt: str,
+        prompt_text: str,
         timeout: float,
         expect_json: bool,
         on_delta: Callable[[str], Awaitable[None]] | None,
     ) -> str:
         """
-        Execute one single turn on a disposable pre-spawned `agy` or `claude` process,
-        then terminate/reap the process so zero state accumulates across calls.
+        Send one user message to a locked-down `agy` or `claude` `stream-json` worker and read
+        back its response. Terminates the worker automatically when `worker.max_turns == 1`;
+        keeps it alive for subsequent cached turns when `worker.max_turns is None`.
         """
-        proc = spare.proc
-        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        proc = worker.proc
+        assert proc.stdin is not None and proc.stdout is not None
         envelope = (
-            {"event": "user", "message": {"role": "user", "content": combined_prompt}}
-            if spare.backend == "agy"
-            else {"type": "user", "message": {"role": "user", "content": combined_prompt}}
+            {"event": "user", "message": {"role": "user", "content": prompt_text}}
+            if worker.backend == "agy"
+            else {"type": "user", "message": {"role": "user", "content": prompt_text}}
         )
         wire_line = (json.dumps(envelope, ensure_ascii=False) + "\n").encode("utf-8")
         deadline = time.monotonic() + timeout
         streamed_chunks: list[str] = []
         final_text: str | None = None
         use_deltas = on_delta is not None and not expect_json
+        single_use = worker.max_turns == 1
 
-        stderr_task = asyncio.create_task(proc.stderr.read())
         try:
             try:
                 proc.stdin.write(wire_line)
                 await proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-                raise _WarmSpareFallbackError(f"{spare.backend} warm spare stdin failed: {exc}") from exc
+                raise _WarmSpareFallbackError(f"{worker.backend} CLI worker stdin failed: {exc}") from exc
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -607,7 +821,7 @@ class InterviewCopilotLLM:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if spare.backend == "agy":
+                if worker.backend == "agy":
                     ev_type = ev.get("event")
                     if ev_type == "step_update":
                         su = ev.get("step_update") or {}
@@ -623,6 +837,9 @@ class InterviewCopilotLLM:
                             status = res_obj.get("status")
                             if status and status != "SUCCESS":
                                 raise RuntimeError(f"agy status={status}: {res_obj.get('error', '')}")
+                            usage = res_obj.get("usage") or res_obj.get("stats")
+                            if isinstance(usage, dict):
+                                logger.debug("agy session turn usage: %s", usage)
                             final_text = str(res_obj.get("response", "")).strip()
                         break
                 else:
@@ -639,26 +856,159 @@ class InterviewCopilotLLM:
                     elif ev_type == "result":
                         if ev.get("is_error"):
                             raise RuntimeError(f"claude CLI error: {str(ev.get('result', ''))[:300]}")
+                        usage = ev.get("usage")
+                        if isinstance(usage, dict):
+                            logger.debug("claude session turn usage: %s", usage)
                         final_text = str(ev.get("result", "")).strip()
                         break
         except asyncio.TimeoutError:
-            raise TimeoutError(f"{spare.backend} warm CLI timed out after {timeout:.0f}s")
+            await _close_worker(worker)
+            raise TimeoutError(f"{worker.backend} CLI worker timed out after {timeout:.0f}s")
+        except Exception:
+            await _close_worker(worker)
+            raise
         finally:
-            await _terminate_proc(proc)
-            try:
-                stderr_b = await asyncio.wait_for(stderr_task, timeout=1.0)
-            except Exception:
-                stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
-                stderr_b = b""
+            if single_use:
+                await _close_worker(worker)
 
         if final_text is not None and final_text:
             return final_text
         joined = "".join(streamed_chunks).strip()
         if joined:
             return joined
-        stderr = stderr_b.decode("utf-8", errors="replace").strip()
-        raise _WarmSpareFallbackError(f"{spare.backend} warm CLI returned empty response: {stderr[:300]}")
+        stderr = worker.stderr_buf.decode("utf-8", errors="replace").strip()
+        await _close_worker(worker)
+        raise _WarmSpareFallbackError(f"{worker.backend} CLI worker returned empty response: {stderr[:300]}")
+
+    async def _call_persistent_cli_session(
+        self,
+        *,
+        backend: str,
+        session_key: str,
+        model: str,
+        messages: list[dict[str, str]],
+        timeout: float,
+        expect_json: bool,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        """
+        Execute one turn on a session-scoped persistent `agy` or `claude` worker.
+        Sends ONLY the latest user message when the worker's `prefix_digest` matches `messages[:-1]`,
+        achieving full provider-side prompt caching (~81%+ cache read on `agy`) and zero CLI boot.
+        On cold start, crash, eviction, or digest mismatch, spawns a fresh worker and sends ONE
+        flattened bootstrap prompt (`render_flat_messages`), then resumes incremental turns.
+        """
+        model_key = self._cli_model_key(backend, model)
+        sys_str = "\n\n".join(
+            str(m.get("content", "")).strip() for m in messages if m.get("role") == "system" and m.get("content")
+        )
+        format_rule = self._cli_format_rule(expect_json)
+        claude_sys = f"{sys_str}\n\n{format_rule}".strip() if backend == "claude" else None
+        prior_digest = messages_prefix_digest(messages[:-1])
+
+        # Wait briefly if a prewarm task for this exact session_key is already in flight
+        prewarm = self._session_prewarm_tasks.get(session_key)
+        if prewarm is not None and not prewarm.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(prewarm), timeout=5.0)
+            except Exception:
+                pass
+
+        for attempt in range(2):
+            now = time.monotonic()
+            worker: _CLISessionWorker | None = None
+            stale: list[_CLISessionWorker] = []
+            send_delta_only = False
+
+            async with self._warm_spare_lock:
+                cur = self._session_workers.get(session_key)
+                if cur is not None:
+                    alive = cur.proc.returncode is None and (now - cur.last_used) < _CLI_SESSION_TTL_SEC
+                    model_ok = cur.backend == backend and cur.model_key == model_key
+                    sys_ok = backend != "claude" or cur.system_prompt == claude_sys
+                    if alive and model_ok and sys_ok and not cur.in_use:
+                        if cur.turn_count == 0:
+                            worker = cur
+                            worker.in_use = True
+                            self._session_workers.move_to_end(session_key)
+                        elif cur.prefix_digest == prior_digest:
+                            worker = cur
+                            worker.in_use = True
+                            send_delta_only = True
+                            self._session_workers.move_to_end(session_key)
+                        else:
+                            stale.append(self._session_workers.pop(session_key))
+                    elif not cur.in_use:
+                        stale.append(self._session_workers.pop(session_key))
+
+            for w in stale:
+                await _close_worker(w)
+
+            if worker is None:
+                worker = await self._spawn_cli_worker(
+                    backend,
+                    model_key,
+                    max_turns=None,
+                    system_prompt=claude_sys,
+                )
+                worker.in_use = True
+                evicted: list[_CLISessionWorker] = []
+                async with self._warm_spare_lock:
+                    prev = self._session_workers.pop(session_key, None)
+                    if prev is not None and not prev.in_use:
+                        evicted.append(prev)
+                    self._session_workers[session_key] = worker
+                    self._session_workers.move_to_end(session_key)
+                    evicted.extend(self._evict_excess_session_workers_locked())
+                for w in evicted:
+                    await _close_worker(w)
+
+            if send_delta_only:
+                prompt_text = str(messages[-1].get("content", ""))
+            else:
+                prompt_text = render_flat_messages(
+                    messages,
+                    include_system=(backend == "agy"),
+                    format_rule=format_rule if backend == "agy" else "",
+                )
+
+            try:
+                result = await self._exchange_cli_worker_turn(
+                    worker,
+                    prompt_text=prompt_text,
+                    timeout=timeout,
+                    expect_json=expect_json,
+                    on_delta=on_delta,
+                )
+            except _WarmSpareFallbackError as exc:
+                async with self._warm_spare_lock:
+                    if self._session_workers.get(session_key) is worker:
+                        self._session_workers.pop(session_key, None)
+                worker.in_use = False
+                if attempt == 0:
+                    logger.debug(
+                        "%s persistent session worker died before output (%s); rehydrating once",
+                        backend,
+                        exc,
+                    )
+                    continue
+                raise RuntimeError(str(exc)) from exc
+            except Exception:
+                async with self._warm_spare_lock:
+                    if self._session_workers.get(session_key) is worker:
+                        self._session_workers.pop(session_key, None)
+                worker.in_use = False
+                raise
+
+            worker.turn_count += 1
+            worker.last_used = time.monotonic()
+            worker.prefix_digest = messages_prefix_digest(
+                messages + [{"role": "assistant", "content": result}]
+            )
+            worker.in_use = False
+            return result
+
+        raise RuntimeError(f"{backend} persistent session failed after recovery attempt")
 
     async def _call_agy_cli(
         self,
@@ -681,9 +1031,9 @@ class InterviewCopilotLLM:
         spare = await self._pop_warm_spare("agy", model)
         if spare is not None:
             try:
-                result = await self._run_warm_spare_turn(
+                result = await self._exchange_cli_worker_turn(
                     spare,
-                    combined_prompt=combined,
+                    prompt_text=combined,
                     timeout=timeout,
                     expect_json=expect_json,
                     on_delta=on_delta,
@@ -853,9 +1203,9 @@ class InterviewCopilotLLM:
         if spare is not None:
             combined = f"<INSTRUCTIONS>\n{sys_prompt}\n</INSTRUCTIONS>\n\n<INPUT>\n{user}\n</INPUT>"
             try:
-                result = await self._run_warm_spare_turn(
+                result = await self._exchange_cli_worker_turn(
                     spare,
-                    combined_prompt=combined,
+                    prompt_text=combined,
                     timeout=timeout,
                     expect_json=expect_json,
                     on_delta=on_delta,
@@ -1090,7 +1440,8 @@ class InterviewCopilotLLM:
         *,
         model: str,
         system: str,
-        user: str,
+        user: str = "",
+        messages: list[dict[str, str]] | None = None,
         temperature: float,
         max_tokens: int,
         timeout: float,
@@ -1104,13 +1455,40 @@ class InterviewCopilotLLM:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        api_messages: list[dict[str, Any]] = []
+        if messages is not None:
+            non_sys = [m for m in messages if m.get("role") in ("user", "assistant")]
+            if len(non_sys) == 1 and non_sys[0].get("role") == "user":
+                api_messages.append(
+                    {
+                        "role": "user",
+                        "content": _build_cached_user_blocks(str(non_sys[0].get("content", "")), cache_prefix_len),
+                    }
+                )
+            else:
+                for idx, m in enumerate(non_sys):
+                    txt = str(m.get("content", ""))
+                    if idx == len(non_sys) - 1 and txt.strip():
+                        api_messages.append(
+                            {
+                                "role": m["role"],
+                                "content": [
+                                    {"type": "text", "text": txt, "cache_control": {"type": "ephemeral"}}
+                                ],
+                            }
+                        )
+                    else:
+                        api_messages.append({"role": m["role"], "content": txt})
+        else:
+            api_messages.append(
+                {"role": "user", "content": _build_cached_user_blocks(user, cache_prefix_len)}
+            )
+
         payload: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": [
-                {"role": "user", "content": _build_cached_user_blocks(user, cache_prefix_len)}
-            ],
+            "messages": api_messages,
         }
         if system.strip():
             payload["system"] = [
@@ -1200,12 +1578,11 @@ class InterviewCopilotLLM:
                 "hint": hint,
             }
 
-    async def _complete_text(
+    async def _complete_messages(
         self,
+        messages: list[dict[str, str]],
         *,
         model: str,
-        system: str,
-        user: str,
         temperature: float = 0.2,
         max_tokens: int = 800,
         timeout: float = 30.0,
@@ -1213,37 +1590,69 @@ class InterviewCopilotLLM:
         disable_fast_thinking: bool = True,
         cache_prefix_len: int = 0,
         cache_key: str | None = None,
+        session_key: str | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
+        """
+        Unified multi-turn completion entry point across all providers:
+        - `agy` / `claude` with `session_key`: persistent locked-down `stream-json` worker (true prefix caching + 0s boot).
+        - `agy` / `claude` without `session_key`: single-use disposable warm spare / hardened one-shot.
+        - `codex` / `gemini` / `pi`: flattened canonical history via `render_flat_messages`.
+        - HTTP (Anthropic, OpenRouter, OpenAI, Gemini, DeepSeek, oMLX, Ollama): native multi-turn `messages`
+          with sliding `cache_control` breakpoints or `prompt_cache_key`.
+        """
+        sys_str = "\n\n".join(
+            str(m.get("content", "")).strip() for m in messages if m.get("role") == "system" and m.get("content")
+        )
+        non_sys = [m for m in messages if m.get("role") in ("user", "assistant")]
         cli = self.config.cli_backend
-        if cli == "pi":
-            return await self._call_pi_cli(
+
+        if cli in ("agy", "claude") and session_key:
+            return await self._call_persistent_cli_session(
+                backend=cli,
+                session_key=session_key,
                 model=model,
-                system=system,
-                user=user,
-                timeout=timeout,
-                on_delta=on_delta,
-            )
-        cli_dispatch = {
-            "agy": self._call_agy_cli,
-            "claude": self._call_claude_cli,
-            "codex": self._call_codex_cli,
-            "gemini": self._call_gemini_cli,
-        }
-        if cli in cli_dispatch:
-            return await cli_dispatch[cli](
-                model=model,
-                system=system,
-                user=user,
+                messages=messages,
                 timeout=timeout,
                 expect_json=expect_json,
                 on_delta=on_delta,
             )
+
+        if cli is not None:
+            flat_user = (
+                str(non_sys[0].get("content", ""))
+                if len(non_sys) == 1 and non_sys[0].get("role") == "user"
+                else render_flat_messages(messages, include_system=False)
+            )
+            if cli == "pi":
+                return await self._call_pi_cli(
+                    model=model,
+                    system=sys_str,
+                    user=flat_user,
+                    timeout=timeout,
+                    on_delta=on_delta,
+                )
+            cli_dispatch = {
+                "agy": self._call_agy_cli,
+                "claude": self._call_claude_cli,
+                "codex": self._call_codex_cli,
+                "gemini": self._call_gemini_cli,
+            }
+            if cli in cli_dispatch:
+                return await cli_dispatch[cli](
+                    model=model,
+                    system=sys_str,
+                    user=flat_user,
+                    timeout=timeout,
+                    expect_json=expect_json,
+                    on_delta=on_delta,
+                )
+
         if self.config.is_anthropic_native:
             return await self._call_anthropic_api(
                 model=model,
-                system=system,
-                user=user,
+                system=sys_str,
+                messages=non_sys,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
@@ -1256,27 +1665,44 @@ class InterviewCopilotLLM:
         is_openrouter_claude = self.config.provider == "openrouter" and (
             "anthropic/" in model.lower() or "claude" in model.lower()
         )
-        messages: list[dict[str, Any]] = []
-        if system.strip():
+        wire_messages: list[dict[str, Any]] = []
+        if sys_str:
             if is_openrouter_claude:
-                messages.append(
+                wire_messages.append(
                     {
                         "role": "system",
                         "content": [
-                            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+                            {"type": "text", "text": sys_str, "cache_control": {"type": "ephemeral"}}
                         ],
                     }
                 )
             else:
-                messages.append({"role": "system", "content": system})
-        user_content: str | list[dict[str, Any]] = (
-            _build_cached_user_blocks(user, cache_prefix_len) if is_openrouter_claude else user
-        )
-        messages.append({"role": "user", "content": user_content})
+                wire_messages.append({"role": "system", "content": sys_str})
+
+        if len(non_sys) == 1 and non_sys[0].get("role") == "user":
+            raw_u = str(non_sys[0].get("content", ""))
+            user_content: str | list[dict[str, Any]] = (
+                _build_cached_user_blocks(raw_u, cache_prefix_len) if is_openrouter_claude else raw_u
+            )
+            wire_messages.append({"role": "user", "content": user_content})
+        else:
+            for idx, m in enumerate(non_sys):
+                txt = str(m.get("content", ""))
+                if is_openrouter_claude and idx == len(non_sys) - 1 and txt.strip():
+                    wire_messages.append(
+                        {
+                            "role": m["role"],
+                            "content": [
+                                {"type": "text", "text": txt, "cache_control": {"type": "ephemeral"}}
+                            ],
+                        }
+                    )
+                else:
+                    wire_messages.append({"role": m["role"], "content": txt})
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": wire_messages,
             "max_tokens": max_tokens,
         }
         if not is_reasoning:
@@ -1308,6 +1734,38 @@ class InterviewCopilotLLM:
 
         resp = await client.chat.completions.create(**kwargs, timeout=timeout)
         return (resp.choices[0].message.content or "").strip()
+
+    async def _complete_text(
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+        timeout: float = 30.0,
+        expect_json: bool = False,
+        disable_fast_thinking: bool = True,
+        cache_prefix_len: int = 0,
+        cache_key: str | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        msgs: list[dict[str, str]] = []
+        if system.strip():
+            msgs.append({"role": "system", "content": system})
+        msgs.append({"role": "user", "content": user})
+        return await self._complete_messages(
+            msgs,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            expect_json=expect_json,
+            disable_fast_thinking=disable_fast_thinking,
+            cache_prefix_len=cache_prefix_len,
+            cache_key=cache_key,
+            on_delta=on_delta,
+        )
 
     async def suggest_probes(self, session: InterviewSession, qa: QAGroup) -> DiveDeeperResponse:
         # Include live in-progress (`final=False`) utterances so Dive Deeper works mid-answer!
@@ -2029,9 +2487,13 @@ class InterviewCopilotLLM:
         existing_carl: dict[str, str],
         workspace_context: dict[str, Any] | None = None,
         cache_key: str | None = None,
+        session: PracticeSession | None = None,
     ) -> dict[str, Any]:
         """
         Generate the AI interviewer's natural next turn + live CARL status + supportive coach nudge.
+        When `session` is provided, executes through the unified append-only multi-turn conversation
+        (`build_practice_turn_messages` -> `_complete_messages`), giving optimal prompt caching on
+        both persistent `agy`/`claude` CLI workers and direct HTTP APIs.
         """
         from .practice import build_heuristic_nudge, estimate_carl_heuristic
 
@@ -2065,69 +2527,101 @@ class InterviewCopilotLLM:
         if not self.config.is_configured:
             return _fallback()
 
-        history_lines = [
-            f"{'INTERVIEWER' if t.get('role') == 'interviewer' else 'CANDIDATE'}: {t.get('text', '')}"
-            for t in recent_turns[-24:]
-            if t.get("role") in ("interviewer", "candidate")
-        ]
-        ws_block = ""
-        if workspace_context:
-            if workspace_context.get("diagram_summary"):
-                ws_block += f"\nLIVE SYSTEM DESIGN DIAGRAM STATE:\n{str(workspace_context['diagram_summary'])[:2500]}\n"
-            if workspace_context.get("code"):
-                ws_block += (
-                    f"\nLIVE CODING WORKSPACE ({workspace_context.get('language', 'code')}):\n"
-                    f"```\n{str(workspace_context['code'])[:3000]}\n```\n"
-                )
-            if workspace_context.get("test_output"):
-                ws_block += f"\nLATEST TEST RUN OUTPUT:\n{str(workspace_context['test_output'])[:1200]}\n"
-
-        next_q_block = (
-            f"Next planned question (ONLY introduce if should_advance=true): {next_question.get('prompt')}"
-            if next_question
-            else "This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their CARL Coaching Debrief."
-        )
-
-        tone_instruction = practice_tone_instruction(coach_style)
-        system_prompt = render_prompt(
-            "practice_interviewer_reply",
-            interview_type_label=interview_type.replace("_", " "),
-            role_title=role_title,
-            target_level=target_level,
-            tone_instruction=tone_instruction,
-        )
-        # Place static question framing + append-only conversation history FIRST so prompt/KV
-        # caches stay warm across turns; place turn-mutable counters, live workspace, and latest answer LAST.
-        stable_prefix = (
-            f"Current Question: {current_question.get('prompt')}\n"
-            f"CARL / Rubric Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
-            f"Suggested follow-up angles: {follow_ups}\n"
-            f"{next_q_block}\n\n"
-            f"Recent conversation:\n" + ("\n".join(history_lines) if history_lines else "(Opening turn)")
-        )
-        mutable_suffix = (
-            f"\n\nFollow-ups already asked on this question: {follow_up_count} "
-            f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
-            f"{ws_block}\n\n"
-            f"Candidate's latest answer:\n{candidate_answer}"
-        )
-        user_prompt = stable_prefix + mutable_suffix
+        conv_commit: dict[str, Any] | None = None
+        session_key = f"practice:{session.id}" if session is not None else None
 
         try:
-            raw = await self._complete_text(
-                model=self.config.fast_model,
-                system=system_prompt,
-                user=user_prompt,
-                temperature=0.4,
-                max_tokens=480,
-                timeout=30.0,
-                expect_json=True,
-                cache_prefix_len=len(stable_prefix),
-                cache_key=cache_key,
-            )
+            if session is not None:
+                messages, pending_user, ws_snapshot, sys_prompt, reset_conv = build_practice_turn_messages(
+                    session,
+                    current_question=current_question,
+                    next_question=next_question,
+                    candidate_answer=candidate_answer,
+                    follow_up_count=follow_up_count,
+                    max_followups=max_followups,
+                    workspace_context=workspace_context,
+                )
+                raw = await self._complete_messages(
+                    messages,
+                    model=self.config.fast_model,
+                    temperature=0.4,
+                    max_tokens=480,
+                    timeout=30.0,
+                    expect_json=True,
+                    cache_key=cache_key or f"mockery:practice:{session.id}",
+                    session_key=session_key,
+                )
+                conv_commit = {
+                    "system_prompt": sys_prompt,
+                    "user_content": pending_user,
+                    "assistant_raw": raw,
+                    "workspace_snapshot": ws_snapshot,
+                    "reset_conversation": reset_conv,
+                }
+            else:
+                history_lines = [
+                    f"{'INTERVIEWER' if t.get('role') == 'interviewer' else 'CANDIDATE'}: {t.get('text', '')}"
+                    for t in recent_turns[-24:]
+                    if t.get("role") in ("interviewer", "candidate")
+                ]
+                ws_block = ""
+                if workspace_context:
+                    if workspace_context.get("diagram_summary"):
+                        ws_block += f"\nLIVE SYSTEM DESIGN DIAGRAM STATE:\n{str(workspace_context['diagram_summary'])[:2500]}\n"
+                    if workspace_context.get("code"):
+                        ws_block += (
+                            f"\nLIVE CODING WORKSPACE ({workspace_context.get('language', 'code')}):\n"
+                            f"```\n{str(workspace_context['code'])[:3000]}\n```\n"
+                        )
+                    if workspace_context.get("test_output"):
+                        ws_block += f"\nLATEST TEST RUN OUTPUT:\n{str(workspace_context['test_output'])[:1200]}\n"
+
+                next_q_block = (
+                    f"Next planned question (ONLY introduce if should_advance=true): {next_question.get('prompt')}"
+                    if next_question
+                    else "This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their CARL Coaching Debrief."
+                )
+
+                tone_instruction = practice_tone_instruction(coach_style)
+                system_prompt = render_prompt(
+                    "practice_interviewer_reply",
+                    interview_type_label=interview_type.replace("_", " "),
+                    role_title=role_title,
+                    target_level=target_level,
+                    tone_instruction=tone_instruction,
+                )
+                stable_prefix = (
+                    f"Current Question: {current_question.get('prompt')}\n"
+                    f"CARL / Rubric Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
+                    f"Suggested follow-up angles: {follow_ups}\n"
+                    f"{next_q_block}\n\n"
+                    f"Recent conversation:\n" + ("\n".join(history_lines) if history_lines else "(Opening turn)")
+                )
+                mutable_suffix = (
+                    f"\n\nFollow-ups already asked on this question: {follow_up_count} "
+                    f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
+                    f"{ws_block}\n\n"
+                    f"Candidate's latest answer:\n{candidate_answer}"
+                )
+                user_prompt = stable_prefix + mutable_suffix
+
+                raw = await self._complete_text(
+                    model=self.config.fast_model,
+                    system=system_prompt,
+                    user=user_prompt,
+                    temperature=0.4,
+                    max_tokens=480,
+                    timeout=30.0,
+                    expect_json=True,
+                    cache_prefix_len=len(stable_prefix),
+                    cache_key=cache_key,
+                )
+
             parsed = _extract_json_object(raw)
             reply = str(parsed.get("interviewer_reply") or "").strip()
             if not reply:
+                if session_key:
+                    await self.close_session_worker(session_key)
                 return _fallback()
             raw_adv = parsed.get("should_advance", False)
             if isinstance(raw_adv, bool):
@@ -2159,14 +2653,19 @@ class InterviewCopilotLLM:
                 if nudge_msg
                 else build_heuristic_nudge(merged_carl, interview_type)
             )
-            return {
+            out: dict[str, Any] = {
                 "interviewer_reply": reply,
                 "should_advance": should_advance,
                 "carl_signals": merged_carl,
                 "coach_nudge": nudge,
             }
+            if conv_commit is not None:
+                out["_conversation_commit"] = conv_commit
+            return out
         except Exception as exc:
             logger.warning("LLM generate_practice_interviewer_reply failed (%s); using fallback", exc)
+            if session_key:
+                await self.close_session_worker(session_key)
             return _fallback()
 
     async def generate_practice_hint(

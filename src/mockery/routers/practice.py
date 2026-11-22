@@ -21,6 +21,10 @@ from ..practice import (
     PracticeTurn,
     estimate_carl_heuristic,
 )
+from ..practice_conversation import (
+    build_practice_session_system_prompt,
+    commit_practice_conversation_turn,
+)
 from ..state_machines import (
     AsyncJobState,
     InvalidStateTransitionError,
@@ -110,9 +114,20 @@ def serialize_practice_session(
     debrief_job = runtime.practice_debrief_jobs.get(session.id, AsyncJobState.IDLE)
     sm = serialize_practice_state_machines(session, debrief_job=debrief_job)
     data = session.model_dump()
+    data.pop("llm_conversation", None)
     data["phase"] = sm["practice"]["phase"]
     data["state_machines"] = sm
     return data
+
+
+async def _safe_close_practice_worker(runtime: Any, session_id: str) -> None:
+    close_fn = getattr(runtime.llm, "close_session_worker", None)
+    if close_fn is None:
+        return
+    try:
+        await close_fn(f"practice:{session_id}")
+    except Exception:
+        pass
 
 
 def _check_practice_not_debriefing(
@@ -273,7 +288,13 @@ def build_practice_router(runtime: Any) -> APIRouter:
             turns=[opening_turn],
         )
         await asyncio.to_thread(runtime.practice_store.save, session)
-        runtime.llm.prewarm_fast_model()
+        prewarm_session = getattr(runtime.llm, "prewarm_session_worker", None)
+        if prewarm_session is not None:
+            prewarm_session(
+                f"practice:{session.id}",
+                system=build_practice_session_system_prompt(session),
+                expect_json=True,
+            )
         return {
             "session": serialize_practice_session(runtime, session),
             "opening_turn": opening_turn.model_dump(),
@@ -348,13 +369,16 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     existing_carl=dict(cur_q.carl_signals),
                     workspace_context=session.workspace_context or None,
                     cache_key=f"mockery:practice:{session.id}",
+                    session=session,
                 )
             except Exception as exc:
+                await _safe_close_practice_worker(runtime, session.id)
                 raise HTTPException(
                     status_code=503,
                     detail=f"AI interviewer could not reply right now: {exc}",
                 ) from exc
 
+            conv_commit = reply.pop("_conversation_commit", None)
             carl_signals = reply.get("carl_signals") or estimate_carl_heuristic(answer_text, cur_q.carl_signals)
             cur_q.carl_signals = dict(carl_signals)
             cur_q.follow_up_count += 1
@@ -368,8 +392,10 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 session.live_nudge = None
 
             should_advance = bool(reply.get("should_advance", False))
-            reply_text = str(reply.get("interviewer_reply") or "").strip()
+            raw_reply_text = str(reply.get("interviewer_reply") or "").strip()
+            reply_text = raw_reply_text
             target_q_id = cur_q.id
+            server_modified_reply = False
 
             if should_advance:
                 cur_q.status = "completed"
@@ -380,6 +406,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     prompt_probe = next_q.prompt.strip()[:36].lower()
                     if prompt_probe and prompt_probe not in reply_text.lower():
                         reply_text = f"{reply_text}\n\n{next_q.prompt.strip()}" if reply_text else next_q.prompt.strip()
+                        server_modified_reply = True
                 else:
                     session.phase = PracticePhase.AWAITING_DEBRIEF.value
 
@@ -390,9 +417,24 @@ def build_practice_router(runtime: Any) -> APIRouter:
             )
             session.turns.append(cand_turn)
             session.turns.append(interviewer_turn)
-            await asyncio.to_thread(runtime.practice_store.save, session)
-            if session.phase == PracticePhase.ACTIVE.value:
-                runtime.llm.prewarm_fast_model()
+            if isinstance(conv_commit, dict):
+                synced_count = len(session.turns) - 1 if server_modified_reply else len(session.turns)
+                commit_practice_conversation_turn(
+                    session,
+                    system_prompt=str(conv_commit["system_prompt"]),
+                    user_content=str(conv_commit["user_content"]),
+                    assistant_raw=str(conv_commit["assistant_raw"]),
+                    workspace_snapshot=dict(conv_commit["workspace_snapshot"]),
+                    synced_turn_count=synced_count,
+                    reset_conversation=bool(conv_commit["reset_conversation"]),
+                )
+            try:
+                await asyncio.to_thread(runtime.practice_store.save, session)
+            except Exception:
+                await _safe_close_practice_worker(runtime, session.id)
+                raise
+            if session.phase != PracticePhase.ACTIVE.value:
+                await _safe_close_practice_worker(runtime, session.id)
             return {
                 "session": serialize_practice_session(runtime, session),
                 "reply": reply,
@@ -505,6 +547,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             session.phase = PracticePhase.AWAITING_DEBRIEF.value
             session.live_nudge = None
             await asyncio.to_thread(runtime.practice_store.save, session)
+            await _safe_close_practice_worker(runtime, session.id)
             return {"session": serialize_practice_session(runtime, session), "has_more": False}
 
     @router.post("/api/practice/{session_id}/workspace")
@@ -542,6 +585,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     "session": serialize_practice_session(runtime, session),
                     "debrief": session.debrief,
                 }
+            await _safe_close_practice_worker(runtime, session.id)
             questions_snapshot = [
                 {**q.model_dump(), "status": "completed" if q.status == "active" else q.status}
                 for q in session.questions
@@ -563,9 +607,15 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         status_code=503,
                         detail=f"Could not generate coaching debrief right now: {exc}",
                     ) from exc
+                review_carl_by_qid: dict[str, dict[str, str]] = {}
+                for qr in debrief.get("question_reviews") or []:
+                    if isinstance(qr, dict) and qr.get("question_id") and isinstance(qr.get("carl"), dict):
+                        review_carl_by_qid[str(qr["question_id"])] = dict(qr["carl"])
                 for q in session.questions:
                     if q.status == "active":
                         q.status = "completed"
+                    if q.id in review_carl_by_qid:
+                        q.carl_signals = review_carl_by_qid[q.id]
                 session.debrief = debrief
                 session.phase = PracticePhase.COMPLETED.value
                 session.live_nudge = None
