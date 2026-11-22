@@ -331,29 +331,67 @@ class PracticeSessionStore:
             "question_count": len(raw.get("questions") or []),
             "turn_count": len(raw.get("turns") or []),
             "has_debrief": bool(raw.get("debrief")),
-            **PracticeSessionStore._history_extras(raw.get("questions") or []),
+            **PracticeSessionStore._history_extras(
+                raw.get("questions") or [], raw.get("retry_history"), raw.get("debrief")
+            ),
         }
 
     @staticmethod
-    def _history_extras(questions: list[Any]) -> dict[str, Any]:
-        """Small, privacy-safe facts that let the history rail tell sessions apart."""
+    def _history_extras(
+        questions: list[Any],
+        retry_history: list[Any] | None = None,
+        debrief: Any = None,
+    ) -> dict[str, Any]:
+        """Small, privacy-safe facts that let the history rail tell sessions apart.
+
+        ``score`` is the same number the debrief headline shows (see ``aggregateSignals`` /
+        ``effectiveQuestionSignals`` in practice_studio.js): each signal is averaged across
+        the scored questions, and once a retry has been scored its ``carl_after`` stands in
+        for the drilled question — so Home and the Debrief can never disagree.
+        """
+        dims = ("context", "action", "result", "learning")
+        weight = {"strong": 1.0, "partial": 0.5}
+        items = [q if isinstance(q, dict) else q.model_dump() for q in questions]
+
         focus_title = ""
         answered = 0
-        total = 0.0
-        scored = 0
-        for q in questions:
-            item = q if isinstance(q, dict) else q.model_dump()
+        for item in items:
             if not focus_title:
                 focus_title = str(item.get("title") or item.get("competency") or "").strip()[:80]
             if item.get("status") == "completed":
                 answered += 1
-            signals = item.get("carl_signals") or {}
-            if isinstance(signals, dict) and signals:
-                scored += 1
-                for dim in ("context", "action", "result", "learning"):
-                    val = signals.get(dim)
-                    total += 1.0 if val == "strong" else 0.5 if val == "partial" else 0.0
-        score = round((total / scored) * 2) / 2 if scored else None
+
+        def points(signals: Any) -> float:
+            if not isinstance(signals, dict):
+                return 0.0
+            return sum(weight.get(signals.get(dim), 0.0) for dim in dims)
+
+        rows: list[Any] = [item.get("carl_signals") for item in items]
+
+        retry_after = None
+        for attempt in reversed(retry_history or []):
+            feedback = attempt.get("feedback") if isinstance(attempt, dict) else None
+            after = feedback.get("carl_after") if isinstance(feedback, dict) else None
+            if isinstance(after, dict):
+                retry_after = after
+                break
+        if retry_after is not None and rows:
+            drill = debrief.get("retry_drill") if isinstance(debrief, dict) else None
+            drill_qid = drill.get("question_id") if isinstance(drill, dict) else None
+            drill_idx = next(
+                (i for i, item in enumerate(items) if drill_qid and item.get("id") == drill_qid),
+                # No explicit target: the drill reworks the weakest answer (first one on ties).
+                min(range(len(rows)), key=lambda i: points(rows[i])),
+            )
+            rows[drill_idx] = retry_after
+
+        scored = [row for row in rows if isinstance(row, dict)]
+        score: float | None = None
+        if scored:
+            score = 0.0
+            for dim in dims:
+                avg = sum(weight.get(row.get(dim), 0.0) for row in scored) / len(scored)
+                score += 1.0 if avg >= 0.75 else 0.5 if avg >= 0.25 else 0.0
         return {"focus_title": focus_title, "answered_count": answered, "score": score}
 
     @staticmethod
@@ -369,7 +407,9 @@ class PracticeSessionStore:
             "question_count": len(session.questions),
             "turn_count": len(session.turns),
             "has_debrief": bool(session.debrief),
-            **PracticeSessionStore._history_extras(list(session.questions)),
+            **PracticeSessionStore._history_extras(
+                list(session.questions), session.retry_history, session.debrief
+            ),
         }
 
     def _safe_path(self, session_id: str) -> Path:
