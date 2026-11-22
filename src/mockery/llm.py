@@ -1910,8 +1910,9 @@ class InterviewCopilotLLM:
             return out
 
         try:
+            debrief_model = self.config.calibration_model or self.config.fast_model
             raw = await self._complete_text(
-                model=self.config.calibration_model or self.config.fast_model,
+                model=debrief_model,
                 system=system_prompt,
                 user=user_prompt,
                 temperature=0.35,
@@ -1920,7 +1921,29 @@ class InterviewCopilotLLM:
                 expect_json=True,
                 disable_fast_thinking=False,
             )
-            parsed = _extract_json_object(raw)
+            try:
+                parsed = _extract_json_object(raw)
+            except json.JSONDecodeError as parse_exc:
+                logger.warning(
+                    "LLM generate_practice_debrief returned malformed JSON (%s); retrying once at temperature=0.0",
+                    parse_exc,
+                )
+                raw_retry = await self._complete_text(
+                    model=debrief_model,
+                    system=system_prompt,
+                    user=(
+                        user_prompt
+                        + "\n\nIMPORTANT: Your previous response had invalid JSON syntax. "
+                        "Return ONLY one strictly valid raw JSON object matching the schema. "
+                        "Use single quotes inside string values instead of unescaped double quotes."
+                    ),
+                    temperature=0.0,
+                    max_tokens=1600,
+                    timeout=45.0,
+                    expect_json=True,
+                    disable_fast_thinking=False,
+                )
+                parsed = _extract_json_object(raw_retry)
             overall = str(parsed.get("overall_encouragement") or "").strip()
             raw_reviews = parsed.get("question_reviews")
             if not overall or not isinstance(raw_reviews, list):

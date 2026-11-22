@@ -810,3 +810,63 @@ def test_practice_debrief_dataset_and_scorer() -> None:
     )
     bad_score, bad_info = score_practice_debrief(bad_json, ex)
     assert bad_score < 0.55, bad_info
+
+
+def test_practice_debrief_retries_once_on_malformed_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = LLMRuntimeConfig(tmp_path)
+    cfg.provider = "openai"
+    cfg.api_key = "test-key"
+    cfg.fast_model = "gpt-4o-mini"
+    cfg.calibration_model = "gpt-4o"
+    llm = InterviewCopilotLLM(cfg)
+
+    calls: list[dict[str, Any]] = []
+    valid_reply = json.dumps(
+        {
+            "overall_encouragement": "Strong ownership across your migration.",
+            "top_strengths": ["Clear metrics.", "Calm execution."],
+            "carl_primer": "CARL turns actions into clear L5 impact.",
+            "question_reviews": [
+                {
+                    "question_id": "q1",
+                    "title": "Ownership",
+                    "prompt": "Tell me about a time...",
+                    "carl": {"context": "strong", "action": "strong", "result": "partial", "learning": "missing"},
+                    "strength": "Owned rollout cleanly.",
+                    "coaching_tip": "Add a concrete metric.",
+                    "carl_reframe": "I led the rollout, cutting errors by [X%].",
+                }
+            ],
+            "retry_drill": {
+                "question_id": "q1",
+                "focus": "Quantify Result",
+                "prompt": "In 45 seconds, add the outcome metric.",
+            },
+        }
+    )
+
+    async def fake_complete(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return '{"overall_encouragement": "Great work on "migration"!", "question_reviews": []}'
+        return valid_reply
+
+    monkeypatch.setattr(llm, "_complete_text", fake_complete)
+    result = asyncio.run(
+        llm.generate_practice_debrief(
+            role_title="Senior Engineer",
+            company="Acme",
+            interview_type="behavioral",
+            target_level="Senior (L5)",
+            questions=[{"id": "q1", "title": "Ownership", "prompt": "Tell me about a time..."}],
+            turns=[{"role": "candidate", "question_id": "q1", "text": "I owned the rollout."}],
+        )
+    )
+    assert len(calls) == 2
+    assert calls[0]["temperature"] == 0.35
+    assert calls[1]["temperature"] == 0.0
+    assert "invalid JSON syntax" in calls[1]["user"]
+    assert result["overall_encouragement"] == "Strong ownership across your migration."

@@ -150,14 +150,19 @@ def extract_document_text(filename: str, raw_bytes: bytes) -> str:
     if ext == ".pdf" or raw_bytes[:4] == b"%PDF":
         from pypdf import PdfReader
 
-        reader = PdfReader(io.BytesIO(raw_bytes))
-        pages: list[str] = []
-        for page in reader.pages:
-            txt = page.extract_text() or ""
-            if txt.strip():
-                pages.append(txt.strip())
-        text = "\n\n".join(pages)
-        return _normalize_extracted_whitespace(text)
+        try:
+            reader = PdfReader(io.BytesIO(raw_bytes))
+            pages: list[str] = []
+            for page in reader.pages:
+                txt = page.extract_text() or ""
+                if txt.strip():
+                    pages.append(txt.strip())
+            text = "\n\n".join(pages)
+            return _normalize_extracted_whitespace(text)
+        except Exception as exc:
+            raise ValueError(
+                f"Could not read PDF file (it may be corrupted or password-protected): {exc}"
+            ) from exc
 
     if ext == ".docx" or raw_bytes[:2] == b"PK":
         try:

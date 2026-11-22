@@ -1179,18 +1179,24 @@ def create_app(
             selected_question_id=selected_qid,
         )
 
-        planned_raw, opening = await runtime.llm.generate_practice_plan(
-            role_title=role_title,
-            company=company,
-            interview_type=cfg.interview_type,
-            target_level=cfg.target_level,
-            question_source=cfg.question_source,
-            question_count=cfg.question_count,
-            bank_candidates=bank_candidates,
-            redacted_resume=redacted_resume,
-            jd_text=jd_text,
-            selected_question_id=cfg.selected_question_id,
-        )
+        try:
+            planned_raw, opening = await runtime.llm.generate_practice_plan(
+                role_title=role_title,
+                company=company,
+                interview_type=cfg.interview_type,
+                target_level=cfg.target_level,
+                question_source=cfg.question_source,
+                question_count=cfg.question_count,
+                bank_candidates=bank_candidates,
+                redacted_resume=redacted_resume,
+                jd_text=jd_text,
+                selected_question_id=cfg.selected_question_id,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"AI interviewer is temporarily unavailable while preparing questions: {exc}",
+            ) from exc
 
         questions: list[PracticeQuestionItem] = []
         for idx, item in enumerate(planned_raw):
@@ -1292,20 +1298,26 @@ def create_app(
             )
             recent_with_cand = [t.model_dump() for t in session.turns[-9:]] + [cand_turn.model_dump()]
 
-            reply = await runtime.llm.generate_practice_interviewer_reply(
-                role_title=session.role_title,
-                company=session.company,
-                interview_type=session.config.interview_type,
-                target_level=session.config.target_level,
-                coach_style=session.config.coach_style,
-                current_question=cur_q.model_dump(),
-                next_question=next_q.model_dump() if next_q else None,
-                recent_turns=recent_with_cand,
-                candidate_answer=answer_text,
-                follow_up_count=cur_q.follow_up_count,
-                existing_carl=dict(cur_q.carl_signals),
-                workspace_context=session.workspace_context or None,
-            )
+            try:
+                reply = await runtime.llm.generate_practice_interviewer_reply(
+                    role_title=session.role_title,
+                    company=session.company,
+                    interview_type=session.config.interview_type,
+                    target_level=session.config.target_level,
+                    coach_style=session.config.coach_style,
+                    current_question=cur_q.model_dump(),
+                    next_question=next_q.model_dump() if next_q else None,
+                    recent_turns=recent_with_cand,
+                    candidate_answer=answer_text,
+                    follow_up_count=cur_q.follow_up_count,
+                    existing_carl=dict(cur_q.carl_signals),
+                    workspace_context=session.workspace_context or None,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"AI interviewer could not reply right now: {exc}",
+                ) from exc
 
             carl_signals = reply.get("carl_signals") or estimate_carl_heuristic(
                 answer_text, cur_q.carl_signals
@@ -1377,13 +1389,19 @@ def create_app(
                 )
                 raise HTTPException(status_code=409, detail=err.to_dict())
 
-            hint_text = await runtime.llm.generate_practice_hint(
-                interview_type=session.config.interview_type,
-                target_level=session.config.target_level,
-                current_question=cur_q.model_dump(),
-                recent_turns=[t.model_dump() for t in session.turns[-8:]],
-                workspace_context=session.workspace_context or None,
-            )
+            try:
+                hint_text = await runtime.llm.generate_practice_hint(
+                    interview_type=session.config.interview_type,
+                    target_level=session.config.target_level,
+                    current_question=cur_q.model_dump(),
+                    recent_turns=[t.model_dump() for t in session.turns[-8:]],
+                    workspace_context=session.workspace_context or None,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"AI coach could not generate a hint right now: {exc}",
+                ) from exc
             coach_turn = PracticeTurn(
                 role="coach",
                 question_id=cur_q.id,
@@ -1494,15 +1512,21 @@ def create_app(
             ]
             runtime.practice_debrief_jobs[session.id] = AsyncJobState.RUNNING
             try:
-                debrief = await runtime.llm.generate_practice_debrief(
-                    role_title=session.role_title,
-                    company=session.company,
-                    interview_type=session.config.interview_type,
-                    target_level=session.config.target_level,
-                    questions=questions_snapshot,
-                    turns=[t.model_dump() for t in session.turns],
-                    workspace_context=session.workspace_context or None,
-                )
+                try:
+                    debrief = await runtime.llm.generate_practice_debrief(
+                        role_title=session.role_title,
+                        company=session.company,
+                        interview_type=session.config.interview_type,
+                        target_level=session.config.target_level,
+                        questions=questions_snapshot,
+                        turns=[t.model_dump() for t in session.turns],
+                        workspace_context=session.workspace_context or None,
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Could not generate coaching debrief right now: {exc}",
+                    ) from exc
                 for q in session.questions:
                     if q.status == "active":
                         q.status = "completed"
@@ -1559,14 +1583,20 @@ def create_app(
             ]
             original_answer = "\n\n".join(orig_answers) or "No prior answer recorded."
 
-            feedback = await runtime.llm.evaluate_practice_retry(
-                role_title=session.role_title,
-                target_level=session.config.target_level,
-                drill_focus=drill_focus,
-                drill_prompt=drill_prompt,
-                original_answer=original_answer,
-                retry_answer=retry_text,
-            )
+            try:
+                feedback = await runtime.llm.evaluate_practice_retry(
+                    role_title=session.role_title,
+                    target_level=session.config.target_level,
+                    drill_focus=drill_focus,
+                    drill_prompt=drill_prompt,
+                    original_answer=original_answer,
+                    retry_answer=retry_text,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Could not evaluate retry right now: {exc}",
+                ) from exc
 
             retry_turn = PracticeTurn(
                 role="candidate",
