@@ -523,7 +523,7 @@ export function createProfileAddonsController({
         if (!res.ok) {
           showToast(formatApiDetail(data.detail, "Could not update redaction."));
           if (res.status === 409) {
-            await loadProfile();
+            await refreshProfile();
           }
           return;
         }

@@ -515,62 +515,111 @@ def create_app(
     app.state.runtime = runtime
     app.state.auth_token = auth_token
 
-    @app.middleware("http")
-    async def verify_http_origin_and_token(request: Request, call_next: Any):
-        host = request.headers.get("host") or ""
-        if not auth_token:
-            # Defend loopback-only server against browser DNS rebinding attacks
-            parsed_host = (urlparse(f"http://{host}").hostname or "").lower()
-            if not is_loopback_host(parsed_host, allow_testserver=True):
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "Untrusted Host header rejected in local loopback mode."},
-                )
-        if auth_token:
-            query_token = request.query_params.get("token")
-            cookie_token = request.cookies.get("mockery_token")
-            auth_header = request.headers.get("authorization")
-            if not _has_valid_token(
-                auth_token,
-                query_token=query_token,
-                cookie_token=cookie_token,
-                auth_header=auth_header,
-            ):
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Missing or invalid Mockery LAN access token."},
-                )
-        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
-            origin = request.headers.get("origin")
-            if not is_trusted_origin(origin, host, allow_same_host_lan=bool(auth_token)):
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "Untrusted Origin rejected."},
-                )
-            cl = request.headers.get("content-length")
-            cl_int = int(cl) if (cl and cl.isdigit()) else None
-            if cl_int is not None:
-                path = request.url.path
-                size_limits = (
-                    (path.startswith("/api/profile/resume"), MAX_RESUME_UPLOAD_BYTES + 262_144, "Resume upload exceeds 10 MB limit."),
-                    (path == "/api/asr/transcribe", MAX_ASR_AUDIO_BYTES + 65_536, "Audio upload exceeds 4 MB limit."),
-                    (path in ("/api/tts/speak", "/api/tts/stream"), MAX_TTS_REQUEST_BYTES, "TTS request exceeds 32 KB limit."),
-                    (path.startswith("/api/practice"), MAX_PRACTICE_REQUEST_BYTES, "Practice request exceeds 256 KB limit."),
-                )
-                for matched, limit_bytes, detail_msg in size_limits:
-                    if matched and cl_int > limit_bytes:
-                        return JSONResponse(status_code=413, content={"detail": detail_msg})
-        response = await call_next(request)
-        if request.url.path.startswith(("/api/practice", "/api/profile", "/api/asr/transcribe")):
-            response.headers["Cache-Control"] = "no-store"
-        if auth_token and request.query_params.get("token"):
-            response.set_cookie(
-                key="mockery_token",
-                value=auth_token,
-                httponly=True,
-                samesite="strict",
-            )
-        return response
+    class _SecurityAndHeadersMiddleware:
+        """
+        Pure ASGI security & response-header middleware.
+        Unlike Starlette's BaseHTTPMiddleware (`@app.middleware("http")`), this passes
+        the raw ASGI `receive` channel straight through so `request.is_disconnected()`
+        detects client aborts immediately in route handlers.
+        """
+
+        def __init__(self, asgi_app: Any) -> None:
+            self.asgi_app = asgi_app
+
+        async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+            if scope.get("type") != "http":
+                await self.asgi_app(scope, receive, send)
+                return
+
+            request = Request(scope)
+            host = request.headers.get("host") or ""
+            if not auth_token:
+                # Defend loopback-only server against browser DNS rebinding attacks
+                parsed_host = (urlparse(f"http://{host}").hostname or "").lower()
+                if not is_loopback_host(parsed_host, allow_testserver=True):
+                    resp = JSONResponse(
+                        status_code=403,
+                        content={"detail": "Untrusted Host header rejected in local loopback mode."},
+                    )
+                    await resp(scope, receive, send)
+                    return
+
+            if auth_token:
+                query_token = request.query_params.get("token")
+                cookie_token = request.cookies.get("mockery_token")
+                auth_header = request.headers.get("authorization")
+                if not _has_valid_token(
+                    auth_token,
+                    query_token=query_token,
+                    cookie_token=cookie_token,
+                    auth_header=auth_header,
+                ):
+                    resp = JSONResponse(
+                        status_code=401,
+                        content={"detail": "Missing or invalid Mockery LAN access token."},
+                    )
+                    await resp(scope, receive, send)
+                    return
+
+            path = request.url.path
+            if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+                origin = request.headers.get("origin")
+                if not is_trusted_origin(origin, host, allow_same_host_lan=bool(auth_token)):
+                    resp = JSONResponse(
+                        status_code=403,
+                        content={"detail": "Untrusted Origin rejected."},
+                    )
+                    await resp(scope, receive, send)
+                    return
+                cl = request.headers.get("content-length")
+                cl_int = int(cl) if (cl and cl.isdigit()) else None
+                if cl_int is not None:
+                    size_limits = (
+                        (
+                            path.startswith("/api/profile/resume"),
+                            MAX_RESUME_UPLOAD_BYTES + 262_144,
+                            "Resume upload exceeds 10 MB limit.",
+                        ),
+                        (
+                            path == "/api/asr/transcribe",
+                            MAX_ASR_AUDIO_BYTES + 65_536,
+                            "Audio upload exceeds 4 MB limit.",
+                        ),
+                        (
+                            path in ("/api/tts/speak", "/api/tts/stream"),
+                            MAX_TTS_REQUEST_BYTES,
+                            "TTS request exceeds 32 KB limit.",
+                        ),
+                        (
+                            path.startswith("/api/practice"),
+                            MAX_PRACTICE_REQUEST_BYTES,
+                            "Practice request exceeds 256 KB limit.",
+                        ),
+                    )
+                    for matched, limit_bytes, detail_msg in size_limits:
+                        if matched and cl_int > limit_bytes:
+                            resp = JSONResponse(status_code=413, content={"detail": detail_msg})
+                            await resp(scope, receive, send)
+                            return
+
+            needs_no_store = path.startswith(("/api/practice", "/api/profile", "/api/asr/transcribe"))
+            needs_token_cookie = bool(auth_token and request.query_params.get("token"))
+
+            async def send_with_headers(message: dict[str, Any]) -> None:
+                if message.get("type") == "http.response.start":
+                    headers = list(message.get("headers") or [])
+                    if needs_no_store:
+                        headers = [(k, v) for k, v in headers if k.lower() != b"cache-control"]
+                        headers.append((b"cache-control", b"no-store"))
+                    if needs_token_cookie and auth_token:
+                        cookie_val = f"mockery_token={auth_token}; HttpOnly; Path=/; SameSite=Strict"
+                        headers.append((b"set-cookie", cookie_val.encode("latin-1")))
+                    message = {**message, "headers": headers}
+                await send(message)
+
+            await self.asgi_app(scope, receive, send_with_headers)
+
+    app.add_middleware(_SecurityAndHeadersMiddleware)
 
     @app.get("/api/machines")
     async def get_machine_specs() -> dict[str, Any]:
@@ -1398,7 +1447,9 @@ def create_app(
                         await final_seg_queue.put(None)
                         await seg_worker_task
                     finally:
-                        if was_capture_owner or not runtime.ws_senders:
+                        # Never clear another disconnecting owner's `capturing_sender` before it
+                        # acquires the lock and flushes its trailing audio.
+                        if was_capture_owner or (not runtime.ws_senders and runtime.capturing_sender is None):
                             runtime.pause_or_end_capture(mark_ended=False)
                             try:
                                 await runtime.llm.release_warm_spare()
@@ -1823,6 +1874,19 @@ async def _handle_ws_command(
 
     if action == "flush_and_end":
         async with runtime.capture_lifecycle_lock():
+            if (
+                runtime.is_capturing
+                and runtime.capturing_sender is not None
+                and runtime.capturing_sender is not send_json
+            ):
+                phase_str, allowed, _ = runtime.current_phase_and_actions()
+                raise InvalidStateTransitionError(
+                    machine="session_phase",
+                    current_state=phase_str,
+                    event="flush_and_end",
+                    allowed_events=allowed,
+                    remediation="Only the tab that started live recording can stop capture.",
+                )
             if capture_gate is not None:
                 capture_gate["closed"] = True
             cur_session = runtime.active_session

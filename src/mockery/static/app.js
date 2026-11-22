@@ -508,6 +508,10 @@ function handleServerMessage(msg) {
     if (state.captureState === "streaming" || state.captureState === "starting") {
       stopCaptureSession({ flush: false });
     }
+    if ((state.session?.utterances || []).length === 0) {
+      state.forceWorkspace = false;
+      renderWorkspaceMode();
+    }
     showToast(msg.message || "Capture failed to start.", 4500);
     return;
   }

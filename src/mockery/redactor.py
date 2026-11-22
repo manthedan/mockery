@@ -124,13 +124,17 @@ _NAME_TOKEN_PUNCT = frozenset("'.-’")
 
 
 def _is_name_token(word: str) -> bool:
-    """Unicode-aware capitalized name token check (handles accented letters like María Núñez)."""
-    if not (2 <= len(word) <= 25):
+    """Unicode-aware capitalized name token check (handles NFC & NFD accented letters like María Núñez)."""
+    norm = unicodedata.normalize("NFC", word)
+    if not (2 <= len(norm) <= 25):
         return False
-    first = word[0]
+    first = norm[0]
     if not first.isalpha() or not first.isupper():
         return False
-    return all(ch.isalpha() or ch in _NAME_TOKEN_PUNCT for ch in word[1:])
+    return all(
+        ch.isalpha() or ch in _NAME_TOKEN_PUNCT or unicodedata.category(ch) == "Mn"
+        for ch in norm[1:]
+    )
 _NAME_PARTICLES = {
     "al", "ben", "bin", "da", "de", "del", "della", "di", "du",
     "el", "ibn", "la", "le", "mac", "mc", "van", "von",
