@@ -311,7 +311,7 @@ export function createPracticeStudioController({
       pill.disabled = true;
       pill.title = "Saving workspace changes locally…";
     } else if (st === "dirty") {
-      pill.textContent = "Unsaved";
+      pill.textContent = "Autosaving…";
       pill.classList.add("is-dirty");
       pill.disabled = false;
       pill.title = "Changes will autosave momentarily — click to save now";
@@ -352,8 +352,17 @@ export function createPracticeStudioController({
     return sess.questions[idx]?.id || null;
   }
 
+  // Interviewers and candidates name identifiers in markdown backticks. Escape first,
+  // then show them as real inline code — never as raw ticks in serif prose.
+  function formatInline(text) {
+    return escapeHtml(String(text || "")).replace(
+      /`([^`\n]+)`/g,
+      '<code class="inline-code">$1</code>'
+    );
+  }
+
   function formatWithNewlines(text) {
-    return escapeHtml(String(text || "")).replace(/\n/g, "<br>");
+    return formatInline(text).replace(/\n/g, "<br>");
   }
 
   /* ---------------- Home Mode Switching & Add-On Gating ---------------- */
@@ -508,7 +517,7 @@ export function createPracticeStudioController({
             ? "Downloading…"
             : phononOp === "uninstalling"
               ? "Removing…"
-              : "Fast · 62 MB";
+              : "Phonon · 62 MB";
       }
       if (installKokoroBtn) {
         installKokoroBtn.classList.toggle("hidden", !tts.kokoro_available);
@@ -520,7 +529,7 @@ export function createPracticeStudioController({
             ? "Downloading…"
             : kokoroOp === "uninstalling"
               ? "Removing…"
-              : "Studio · 183 MB";
+              : "Kokoro · 183 MB";
       }
     }
 
@@ -1018,14 +1027,58 @@ export function createPracticeStudioController({
       else if (phase === "transcribing") lbl.textContent = "Transcribing…";
       else lbl.textContent = isRetry ? "Speak retry" : "Speak answer";
     }
-    if (btn) {
-      const lockedByPhase =
-        !isRetry &&
+    const lockedByPhase = Boolean(
+      !isRetry &&
         local.session &&
-        (local.session.phase === "awaiting_debrief" || local.session.phase === "debriefing");
-      btn.disabled = phase === "transcribing" || phase === "requesting_mic" || Boolean(lockedByPhase);
+        (local.session.phase === "awaiting_debrief" || local.session.phase === "debriefing")
+    );
+    if (btn) {
+      // An idle mic also waits while an AI reply is in flight, so it never competes with "Thinking…".
+      btn.disabled =
+        phase === "transcribing" ||
+        phase === "requesting_mic" ||
+        lockedByPhase ||
+        (phase === "idle" && Boolean(local.busy));
     }
-    if (status && note) status.textContent = note;
+    // While the dock is locked its status line belongs to syncComposerLock().
+    if (status && note && !lockedByPhase) {
+      status.textContent = note;
+      delete status.dataset.lockNote;
+    }
+  }
+
+  /* The answer dock steps back whenever something else has the floor: an in-flight
+     AI reply (waiting) or the end of the interview (locked). One function owns that
+     state so the mic, the input and the status line can never disagree. */
+  function syncComposerLock() {
+    const phase = local.session?.phase || "active";
+    const isDebriefing = phase === "debriefing";
+    const locked = isDebriefing || phase === "awaiting_debrief";
+    const waiting = Boolean(local.busy) && !locked;
+    const micIdle = micMachine.state === "idle";
+
+    const composer = el("practiceComposerWrap");
+    if (composer) composer.classList.toggle("is-locked", locked);
+    const input = el("practiceAnswerInput");
+    if (input) input.disabled = locked;
+    // Never touch a mic mid-capture: its button is the only way to stop the recording.
+    const micBtn = el("practiceMicBtn");
+    if (micBtn && micIdle) micBtn.disabled = locked || waiting;
+    const retryMicBtn = el("practiceRetryMicBtn");
+    if (retryMicBtn && micIdle) retryMicBtn.disabled = Boolean(local.busy);
+
+    const status = el("practiceMicStatus");
+    if (status) {
+      if (locked) {
+        status.textContent = isDebriefing
+          ? "Writing your debrief…"
+          : "Every question answered — your debrief is ready when you are";
+        status.dataset.lockNote = "1";
+      } else if (status.dataset.lockNote) {
+        status.textContent = "Transcribed privately on this Mac";
+        delete status.dataset.lockNote;
+      }
+    }
   }
 
   function cleanupMicResources() {
@@ -1835,6 +1888,7 @@ export function createPracticeStudioController({
     if (debriefBtn) debriefBtn.disabled = busy || isDebriefing;
     const retryBtn = el("practiceRetrySubmitBtn");
     if (retryBtn) retryBtn.disabled = busy;
+    syncComposerLock();
   }
 
   async function startNewPractice() {
@@ -2565,7 +2619,9 @@ export function createPracticeStudioController({
         <div class="debrief-hero-actions">
           ${
             drill.prompt
-              ? `<button type="button" class="btn btn-primary btn-sm" data-jump-retry>Jump to 45s Retry Drill ↓</button>`
+              ? retries.length > 0
+                ? `<button type="button" class="btn btn-outline btn-sm" data-jump-retry>View your retry ↓</button>`
+                : `<button type="button" class="btn btn-primary btn-sm" data-jump-retry>Jump to 45s Retry Drill ↓</button>`
               : ""
           }
           <span class="debrief-hero-score">
@@ -2606,22 +2662,22 @@ export function createPracticeStudioController({
                         ${renderCarlBadgesInline(improved ? effective[idx] : qr.carl, { fmt, final: true })}
                       </span>
                     </div>
-                    ${qr.prompt ? `<p class="debrief-q-prompt">${escapeHtml(qr.prompt)}</p>` : ""}
+                    ${qr.prompt ? `<p class="debrief-q-prompt">${formatInline(qr.prompt)}</p>` : ""}
                     ${
                       qr.strength
-                        ? `<div class="debrief-q-row"><span class="debrief-q-label">What worked</span><span>${escapeHtml(qr.strength)}</span></div>`
+                        ? `<div class="debrief-q-row"><span class="debrief-q-label">What worked</span><span>${formatInline(qr.strength)}</span></div>`
                         : ""
                     }
                     ${
                       qr.coaching_tip
-                        ? `<div class="debrief-q-row"><span class="debrief-q-label">Next level</span><span>${escapeHtml(qr.coaching_tip)}</span></div>`
+                        ? `<div class="debrief-q-row"><span class="debrief-q-label">Next level</span><span>${formatInline(qr.coaching_tip)}</span></div>`
                         : ""
                     }
                     ${
                       qr.carl_reframe
                         ? `<div class="debrief-q-reframe">
                             <span class="practice-kicker">${isCarl ? "Suggested CARL reframe" : "Suggested reframe"}</span>
-                            <p>${escapeHtml(qr.carl_reframe)}</p>
+                            <p>${formatInline(qr.carl_reframe)}</p>
                           </div>`
                         : ""
                     }
@@ -2808,9 +2864,7 @@ export function createPracticeStudioController({
 
     const answerInput = el("practiceAnswerInput");
     const sendBtn = el("practiceSendBtn");
-    const micBtn = el("practiceMicBtn");
     if (answerInput) {
-      answerInput.disabled = isInputLocked;
       answerInput.placeholder = isDebriefing
         ? "Writing your coaching debrief — one moment…"
         : isAwaitingDebrief
@@ -2818,10 +2872,8 @@ export function createPracticeStudioController({
         : "Speak, or type your answer here…";
     }
     if (sendBtn && opMachine.state === "idle") sendBtn.disabled = isInputLocked;
-    // Never re-enable mic button while requesting permission or transcribing
-    if (micBtn && micMachine.state === "idle") {
-      micBtn.disabled = isInputLocked;
-    }
+    // Input, both mics and the dock's status line follow the phase and any in-flight reply.
+    syncComposerLock();
 
     el("practiceActiveView")?.classList.toggle("hidden", isCompleted);
     el("practiceDebriefView")?.classList.toggle("hidden", !isCompleted);
@@ -2862,8 +2914,13 @@ export function createPracticeStudioController({
     if (coachMsgEl && coachToneEl) {
       if (isCompleted) {
         const retried = Boolean(latestRetrySignals(sess));
+        // Only suggest another rep while there is still a signal left to win.
+        const maxedOut =
+          retried && carlScore(aggregateSignals(effectiveQuestionSignals(sess))) >= CARL_DIMS.length;
         coachToneEl.textContent = retried ? "Retry scored" : "Debrief ready";
-        coachMsgEl.textContent = retried
+        coachMsgEl.textContent = maxedOut
+          ? "All four signals landed cleanly — export your report or start another practice."
+          : retried
           ? "Your session score now reflects the retry. Run it again to lock the stronger version in, or export the report."
           : "Start with what went well, then run the retry drill while the feedback is fresh.";
       } else if (isDebriefing) {

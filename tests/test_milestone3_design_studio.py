@@ -127,6 +127,8 @@ import {
   normalizeDiagramGraph,
   serializeDiagramSummary,
   createStarterGraph,
+  routeEdge,
+  placeEdgeLabel,
 } from './src/mockery/static/design_studio.js';
 
 // 1. Starter graph adapts to streaming AI question
@@ -192,6 +194,51 @@ for (let i = 0; i < hugeSummary.length; i++) {
     i++;
   } else if (c >= 0xdc00 && c <= 0xdfff) {
     throw new Error('Unpaired low surrogate in summary');
+  }
+}
+
+// 5. Edge routing: arrows leave the source border, stop just short of the target border,
+//    and label pills never sit on a box.
+const NODE_W = 148, NODE_H = 58;
+const rectOf = (n) => ({ x1: n.x, y1: n.y, x2: n.x + NODE_W, y2: n.y + NODE_H });
+const onBorder = (p, r) =>
+  p.x >= r.x1 && p.x <= r.x2 && p.y >= r.y1 && p.y <= r.y2 &&
+  (p.x === r.x1 || p.x === r.x2 || p.y === r.y1 || p.y === r.y2);
+const gapTo = (p, r) =>
+  Math.hypot(Math.max(r.x1 - p.x, 0, p.x - r.x2), Math.max(r.y1 - p.y, 0, p.y - r.y2));
+const layouts = [
+  g1,
+  createStarterGraph({ title: 'URL shortener' }),
+  // Diagonal neighbours: the layout where labels used to bury their arrows.
+  {
+    nodes: [
+      { id: 'gw', x: 216, y: 155 }, { id: 'cache', x: 216, y: 34 }, { id: 'svc', x: 420, y: 155 },
+      { id: 'db', x: 636, y: 71 }, { id: 'mq', x: 636, y: 239 }, { id: 'ai', x: 756, y: 335 },
+    ],
+    edges: [
+      { from: 'gw', to: 'cache' }, { from: 'gw', to: 'svc' }, { from: 'svc', to: 'gw' },
+      { from: 'svc', to: 'db' }, { from: 'svc', to: 'mq' }, { from: 'mq', to: 'ai' },
+    ],
+  },
+];
+for (const layout of layouts) {
+  const byId = new Map(layout.nodes.map((n) => [n.id, n]));
+  const boxes = layout.nodes.map(rectOf);
+  for (const e of layout.edges) {
+    const a = byId.get(e.from);
+    const b = byId.get(e.to);
+    const paired = layout.edges.some((o) => o.from === e.to && o.to === e.from);
+    const pts = routeEdge(a, b, { paired, obstacles: boxes });
+    const tag = e.from + ' → ' + e.to + ' ' + JSON.stringify(pts);
+    if (pts.length < 2 || pts.length > 3) throw new Error('Unexpected route shape: ' + tag);
+    if (!onBorder(pts[0], rectOf(a))) throw new Error('Edge does not start on the source border: ' + tag);
+    const gap = gapTo(pts[pts.length - 1], rectOf(b));
+    if (!(gap > 0 && gap <= 6)) throw new Error('Arrow does not stop just outside the target border: ' + tag);
+    const lbl = placeEdgeLabel(pts, 80, 17, { boxes });
+    const pill = { x1: lbl.x - 40, y1: lbl.y - 8.5, x2: lbl.x + 40, y2: lbl.y + 8.5 };
+    if (boxes.some((r) => pill.x1 < r.x2 && pill.x2 > r.x1 && pill.y1 < r.y2 && pill.y2 > r.y1)) {
+      throw new Error('Label pill overlaps a box: ' + tag);
+    }
   }
 }
 console.log(JSON.stringify({ ok: true, nodes: g1.nodes.length, edges: g1.edges.length, summaryLen: hugeSummary.length }));

@@ -185,10 +185,17 @@ export function normalizeCodingWorkspace(question, savedWorkspace, addons) {
   };
 }
 
+/** Runs are timed in whole milliseconds; a sub-millisecond pass reads "<1 ms", never a suspicious "0 ms". */
+export function formatDurationMs(durationMs) {
+  if (!Number.isFinite(durationMs)) return "";
+  const ms = Math.max(0, Math.round(durationMs));
+  return ms < 1 ? "<1 ms" : `${ms} ms`;
+}
+
 export function formatTestRunSummary({ language, ok, stdout, error, durationMs, timedOut = false }) {
   const langLabel = language === "python" ? "Python (Pyodide)" : "JavaScript";
   const status = timedOut ? "TIMEOUT" : ok ? "PASSED" : "FAILED";
-  const msText = Number.isFinite(durationMs) ? ` (${Math.max(0, Math.round(durationMs))} ms)` : "";
+  const msText = Number.isFinite(durationMs) ? ` (${formatDurationMs(durationMs)})` : "";
   const parts = [`[${status}] ${langLabel}${msText}`];
   const cleanOut = safeClipText(stdout || "", 2400).trim();
   const cleanErr = safeClipText(error || "", 1200).trim();
@@ -495,8 +502,9 @@ export function deriveCodingRunnerState({
   }
 
   if (matchingResult?.status === "passed") {
-    const msPill = Number.isFinite(matchingResult.durationMs) ? ` · ${matchingResult.durationMs} ms` : "";
-    const msMeta = Number.isFinite(matchingResult.durationMs) ? ` in ${matchingResult.durationMs} ms` : "";
+    const ms = formatDurationMs(matchingResult.durationMs);
+    const msPill = ms ? ` · ${ms}` : "";
+    const msMeta = ms ? ` in ${ms}` : "";
     return {
       status: "passed",
       pillText: `Tests Passed${msPill}`,
@@ -527,7 +535,8 @@ export function deriveCodingRunnerState({
   }
 
   if (matchingResult?.status === "failed") {
-    const msMeta = Number.isFinite(matchingResult.durationMs) ? ` after ${matchingResult.durationMs} ms` : "";
+    const ms = formatDurationMs(matchingResult.durationMs);
+    const msMeta = ms ? ` after ${ms}` : "";
     return {
       status: "failed",
       pillText: "Tests Failed",

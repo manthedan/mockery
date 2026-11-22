@@ -3306,8 +3306,9 @@ function renderOnboardingPacksStep() {
   const doneBtn = el("onboardDoneBtn");
   if (doneBtn) {
     doneBtn.textContent = anyVoiceInstalled ? "Start using Mockery" : "Continue with macOS voice";
-    doneBtn.classList.add("btn-primary");
-    doneBtn.classList.remove("btn-outline");
+    // One filled CTA per step: until a neural voice is in, that is "Install Phonon".
+    doneBtn.classList.toggle("btn-primary", anyVoiceInstalled);
+    doneBtn.classList.toggle("btn-outline", !anyVoiceInstalled);
   }
 
   const optList = el("onboardOptionalPacksList");
@@ -3318,21 +3319,18 @@ function renderOnboardingPacksStep() {
       .map((id) => packs.find((p) => p.id === id))
       .filter(Boolean);
 
-    // Human-first names: what the pack does for you, with its size stated once.
-    const friendly = {
-      rampart_pii: {
-        name: "Resume privacy",
-        desc: "On-device resume privacy scrubber · 15 MB",
-      },
-      pyodide_python: {
-        name: "Python for coding rounds",
-        desc: "Local Python test runner · 14 MB",
-      },
+    // Pack names come from the catalog, so every surface says the same thing;
+    // onboarding only shortens the description and states the size once.
+    const shortDesc = {
+      rampart_pii: "Hides names and contact details before anything reaches a cloud AI",
+      pyodide_python: "Runs your Python tests on this Mac",
     };
 
     optList.innerHTML = optionalPacks
       .map((pk) => {
-        const copy = friendly[pk.id] || { name: pk.name, desc: pk.description };
+        const desc = [shortDesc[pk.id] || pk.description, pk.size_mb ? `${pk.size_mb} MB` : ""]
+          .filter(Boolean)
+          .join(" · ");
         const op = packOps.get(pk.id);
         const isInstalling = op === "installing" || pk.state === "installing";
         const isUninstalling = op === "uninstalling" || pk.state === "uninstalling";
@@ -3356,10 +3354,10 @@ function renderOnboardingPacksStep() {
           <div class="onboard-pack-row">
             <div class="onboard-pack-main">
               <div class="onboard-pack-title">
-                ${escapeHtml(copy.name)}
+                ${escapeHtml(pk.name)}
                 ${recTag}
               </div>
-              <div class="onboard-pack-desc">${escapeHtml(copy.desc)}</div>
+              <div class="onboard-pack-desc">${escapeHtml(desc)}</div>
               ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
             </div>
             <div class="onboard-pack-actions">${actionHtml}</div>
