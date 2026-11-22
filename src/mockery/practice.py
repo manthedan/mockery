@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .models import short_id
+from .practice_conversation import PracticeConversation
 
 PracticeInterviewType = Literal["behavioral", "system_design", "coding", "general"]
 PracticeQuestionSource = Literal["bank_only", "resume_jd_tailored", "mixed"]
@@ -88,6 +89,7 @@ class PracticeSession(BaseModel):
     debrief: dict[str, Any] | None = None
     retry_history: list[dict[str, Any]] = Field(default_factory=list)
     workspace_context: dict[str, Any] = Field(default_factory=dict)
+    llm_conversation: PracticeConversation | None = None
 
     def current_question(self) -> PracticeQuestionItem | None:
         if 0 <= self.current_question_index < len(self.questions):
@@ -366,7 +368,16 @@ class PracticeSessionStore:
                 return 0.0
             return sum(weight.get(signals.get(dim), 0.0) for dim in dims)
 
-        rows: list[Any] = [item.get("carl_signals") for item in items]
+        review_carl_by_qid: dict[str, dict[str, Any]] = {}
+        if isinstance(debrief, dict):
+            for rev in debrief.get("question_reviews") or []:
+                if isinstance(rev, dict) and rev.get("question_id") and isinstance(rev.get("carl"), dict):
+                    review_carl_by_qid[str(rev["question_id"])] = rev["carl"]
+
+        rows: list[Any] = [
+            review_carl_by_qid.get(str(item.get("id") or ""), item.get("carl_signals"))
+            for item in items
+        ]
 
         retry_after = None
         for attempt in reversed(retry_history or []):
