@@ -10,6 +10,7 @@ import {
   createWorkspaceSaveMachine,
   formatApiDetail,
 } from "./state_machines.js";
+import { jdRoleLabel } from "./profile_addons.js";
 
 const SOURCE_NOTES = {
   mixed:
@@ -209,6 +210,7 @@ export function createPracticeStudioController({
   clientMachines = null,
   packOps = null,
   onInstallPack = null,
+  onHomeModeChange = null,
 }) {
   let savedVoice = "";
   try {
@@ -271,6 +273,17 @@ export function createPracticeStudioController({
     workspaceSaveSeq: 0,
     workspaceAckSeq: 0,
     debriefPollTimer: null,
+
+    // Split studio: collapsible conversation column (never persisted — the first
+    // question and the debrief progress live there, so each session opens expanded)
+    convCollapsed: false,
+    convSeenTurns: 0,
+    convSessionId: null,
+    convPhase: null,
+
+    // Home launch form
+    levelTouched: false,
+    pickerSeq: 0,
     exitForceArmed: false,
     exitForceTimer: null,
   };
@@ -398,9 +411,24 @@ export function createPracticeStudioController({
     }
     el("setupLaunchpad")?.setAttribute("data-home-mode", next);
 
+    // Let the Home target-job line re-align role and level before the picker loads.
+    if (typeof onHomeModeChange === "function") onHomeModeChange(next);
     if (isPractice) {
       refreshQuestionPicker();
     }
+  }
+
+  /* One owner for the target level: the pills, the question picker and the start
+     payload all read it. An automatic alignment (from the active target job) never
+     overrides a level the user picked by hand. Returns true when the level changed. */
+  function setTargetLevel(level, { auto = false } = {}) {
+    const pills = el("practiceLevelPills");
+    const btn = pills?.querySelector(`[data-practice-level="${CSS.escape(String(level || ""))}"]`);
+    if (!btn || (auto && local.levelTouched) || local.targetLevel === level) return false;
+    local.targetLevel = level;
+    pills.querySelectorAll("[data-practice-level]").forEach((b) => b.classList.toggle("active", b === btn));
+    refreshQuestionPicker();
+    return true;
   }
 
   function buildAvailableVoiceGroups(tts = local.ttsStatus) {
@@ -592,6 +620,8 @@ export function createPracticeStudioController({
     const fmt = getSelectedFormat();
     const catParam = fmt === "general" ? "" : `&category=${encodeURIComponent(fmt)}`;
     const lvlParam = local.targetLevel ? `&level=${encodeURIComponent(local.targetLevel)}` : "";
+    // Level and format can change back to back; only the latest request may paint.
+    const seq = ++local.pickerSeq;
     try {
       const res = await fetch(`/api/banks?match_active_jd=true${catParam}${lvlParam}`);
       if (!res.ok) return;
@@ -603,6 +633,7 @@ export function createPracticeStudioController({
           questions = (await fallbackRes.json()).questions || [];
         }
       }
+      if (seq !== local.pickerSeq) return;
       const prevVal = picker.value;
       picker.innerHTML =
         `<option value="">Auto-select best match for your target JD</option>` +
@@ -1030,7 +1061,7 @@ export function createPracticeStudioController({
     const lockedByPhase = Boolean(
       !isRetry &&
         local.session &&
-        (local.session.phase === "awaiting_debrief" || local.session.phase === "debriefing")
+        (local.session.phase === "awaiting_debrief" || isDebriefInFlight())
     );
     if (btn) {
       // An idle mic also waits while an AI reply is in flight, so it never competes with "Thinking…".
@@ -1050,15 +1081,26 @@ export function createPracticeStudioController({
   /* The answer dock steps back whenever something else has the floor: an in-flight
      AI reply (waiting) or the end of the interview (locked). One function owns that
      state so the mic, the input and the status line can never disagree. */
+  /* True from the moment End & Debrief is clicked (the request is in flight) until the
+     session leaves the debriefing phase — including a reload that resumes mid-debrief. */
+  function isDebriefInFlight() {
+    return local.session?.phase === "debriefing" || opMachine.state === "debriefing";
+  }
+
   function syncComposerLock() {
     const phase = local.session?.phase || "active";
-    const isDebriefing = phase === "debriefing";
+    const isDebriefing = isDebriefInFlight();
     const locked = isDebriefing || phase === "awaiting_debrief";
     const waiting = Boolean(local.busy) && !locked;
     const micIdle = micMachine.state === "idle";
 
     const composer = el("practiceComposerWrap");
-    if (composer) composer.classList.toggle("is-locked", locked);
+    if (composer) {
+      composer.classList.toggle("is-locked", locked);
+      // While the debrief is written the dock disappears entirely; one calm status line
+      // stays. Phase-driven, so an error or a new session restores the dock by itself.
+      composer.classList.toggle("is-debriefing", isDebriefing);
+    }
     const input = el("practiceAnswerInput");
     if (input) input.disabled = locked;
     // Never touch a mic mid-capture: its button is the only way to stop the recording.
@@ -1071,7 +1113,7 @@ export function createPracticeStudioController({
     if (status) {
       if (locked) {
         status.textContent = isDebriefing
-          ? "Writing your debrief…"
+          ? "Finalizing your coaching debrief…"
           : "Every question answered — your debrief is ready when you are";
         status.dataset.lockNote = "1";
       } else if (status.dataset.lockNote) {
@@ -1346,8 +1388,168 @@ export function createPracticeStudioController({
   function setStudioLayout(fmt) {
     const ws = el("practiceWorkspace");
     if (!ws) return;
+    const changed = (ws.getAttribute("data-studio") || null) !== (fmt || null);
     if (fmt) ws.setAttribute("data-studio", fmt);
     else ws.removeAttribute("data-studio");
+    // Only on a real layout change: a re-render must never fight an in-progress drag.
+    if (changed) applySplitPct(fmt || null, fmt ? readSplitPct(fmt) : null);
+  }
+
+  /* ---------------- Split studio: resizable divider + collapsible conversation ----------------
+     The conversation column's width is one CSS variable (--split-pct) on the workspace;
+     styles.css clamps it and supplies the per-format default when it is unset. */
+
+  const SPLIT_PCT_MIN = 22;
+  const SPLIT_PCT_MAX = 48;
+  const SPLIT_PX_MIN = 260;
+  const SPLIT_PX_MAX = 560;
+  const SPLIT_PCT_DEFAULT = { system_design: 30, coding: 34 };
+  const clampNum = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+  const splitStorageKey = (fmt) => `mockery_split_pct_${fmt}`;
+
+  function readSplitPct(fmt) {
+    try {
+      const n = Number.parseFloat(window.localStorage?.getItem(splitStorageKey(fmt)) ?? "");
+      return Number.isFinite(n) ? clampNum(n, SPLIT_PCT_MIN, SPLIT_PCT_MAX) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function storeSplitPct(fmt, pct) {
+    try {
+      if (pct === null) window.localStorage?.removeItem(splitStorageKey(fmt));
+      else window.localStorage?.setItem(splitStorageKey(fmt), pct.toFixed(1));
+    } catch {
+      /* storage unavailable: the width simply lasts for this session */
+    }
+  }
+
+  /* pct === null means "use the stylesheet default for this format". */
+  function applySplitPct(fmt, pct) {
+    const ws = el("practiceWorkspace");
+    if (!ws) return;
+    if (pct === null) ws.style.removeProperty("--split-pct");
+    else ws.style.setProperty("--split-pct", `${pct.toFixed(2)}%`);
+    el("practiceSplitHandle")?.setAttribute(
+      "aria-valuenow",
+      String(Math.round(pct ?? SPLIT_PCT_DEFAULT[fmt] ?? SPLIT_PCT_DEFAULT.system_design))
+    );
+  }
+
+  function bindSplitHandle() {
+    const handle = el("practiceSplitHandle");
+    const ws = el("practiceWorkspace");
+    if (!handle || !ws) return;
+    let drag = null; // { pointerId, fmt, grabOffset, pct }
+
+    const mainRect = () => handle.parentElement.getBoundingClientRect();
+    const convRight = () => el("practiceActiveView")?.getBoundingClientRect().right ?? mainRect().left;
+    const pctForEdge = (edgeX) => {
+      const rect = mainRect();
+      if (rect.width <= 0) return null;
+      const px = clampNum(edgeX - rect.left, SPLIT_PX_MIN, SPLIT_PX_MAX);
+      return clampNum((px / rect.width) * 100, SPLIT_PCT_MIN, SPLIT_PCT_MAX);
+    };
+
+    handle.addEventListener("pointerdown", (ev) => {
+      const fmt = ws.getAttribute("data-studio");
+      if (!fmt || ev.button !== 0) return;
+      ev.preventDefault();
+      // The handle owns this pointer until release, so the whiteboard and the editor
+      // underneath never see the gesture.
+      drag = { pointerId: ev.pointerId, fmt, grabOffset: ev.clientX - convRight(), pct: null };
+      try {
+        handle.setPointerCapture(ev.pointerId);
+      } catch {
+        /* synthetic pointers cannot be captured */
+      }
+      ws.classList.add("is-split-resizing");
+    });
+
+    handle.addEventListener("pointermove", (ev) => {
+      if (!drag || ev.pointerId !== drag.pointerId) return;
+      const pct = pctForEdge(ev.clientX - drag.grabOffset);
+      if (pct === null) return;
+      drag.pct = pct;
+      applySplitPct(drag.fmt, pct);
+    });
+
+    const endDrag = (ev) => {
+      if (!drag || ev.pointerId !== drag.pointerId) return;
+      if (drag.pct !== null) storeSplitPct(drag.fmt, drag.pct);
+      drag = null;
+      ws.classList.remove("is-split-resizing");
+    };
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+    handle.addEventListener("lostpointercapture", endDrag);
+
+    const resetSplit = () => {
+      const fmt = ws.getAttribute("data-studio");
+      if (!fmt) return;
+      storeSplitPct(fmt, null);
+      applySplitPct(fmt, null);
+    };
+    handle.addEventListener("dblclick", resetSplit);
+
+    handle.addEventListener("keydown", (ev) => {
+      const fmt = ws.getAttribute("data-studio");
+      if (!fmt) return;
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        resetSplit();
+        return;
+      }
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      ev.preventDefault();
+      const rect = mainRect();
+      if (rect.width <= 0) return;
+      const stepPx = (rect.width * 2) / 100;
+      const pct = pctForEdge(convRight() + (ev.key === "ArrowLeft" ? -stepPx : stepPx));
+      if (pct === null) return;
+      applySplitPct(fmt, pct);
+      storeSplitPct(fmt, pct);
+    });
+  }
+
+  function renderConversationToggle() {
+    const sess = local.session;
+    const collapsed = local.convCollapsed;
+    el("practiceWorkspace")?.toggleAttribute("data-conv-collapsed", collapsed);
+    const turnCount = sess?.turns?.length || 0;
+    if (!collapsed) local.convSeenTurns = turnCount;
+    const btn = el("practiceConvToggleBtn");
+    if (!btn) return;
+    const label = collapsed ? "Show conversation" : "Hide conversation — focus on your workspace";
+    btn.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    btn.setAttribute("aria-label", label);
+    btn.title = label;
+    // A quiet dot says the interviewer or coach replied while the panel was tucked away.
+    btn.classList.toggle("has-unread", collapsed && turnCount > local.convSeenTurns);
+  }
+
+  function setConversationCollapsed(collapsed) {
+    const next = Boolean(collapsed);
+    if (local.convCollapsed === next) return;
+    local.convCollapsed = next;
+    renderConversationToggle();
+    if (!next) {
+      const feed = el("practiceFeed");
+      if (feed) feed.scrollTop = feed.scrollHeight;
+    }
+  }
+
+  /* A new session, or the interview wrapping up, always brings the conversation back:
+     the opening question and the debrief progress are both read there. */
+  function syncConversationPanel(sess) {
+    const sessionChanged = sess.id !== local.convSessionId;
+    const wrappingUp = sess.phase !== local.convPhase && sess.phase !== "active";
+    local.convSessionId = sess.id;
+    local.convPhase = sess.phase;
+    if (sessionChanged) local.convSeenTurns = 0;
+    if (local.convCollapsed && (sessionChanged || wrappingUp)) local.convCollapsed = false;
+    renderConversationToggle();
   }
 
   function unmountStudioPlugin({ flush = true } = {}) {
@@ -1928,7 +2130,13 @@ export function createPracticeStudioController({
     if (lbl) lbl.textContent = "Preparing your interview…";
     if (hintEl) hintEl.classList.add("is-loading");
 
-    const roleTitle = (el("setupRoleInput")?.value || "").trim();
+    // The Home headline shows the JD role as "Title (Company)". The server already pairs the
+    // session with the active JD's company, so send the bare title — otherwise the studio bar
+    // and the interviewer's greeting read "Title (Company) · Company".
+    const typedRole = (el("setupRoleInput")?.value || "").trim();
+    const activeJd = state.profileSummary?.active_jd;
+    const roleTitle =
+      activeJd?.title && activeJd.company && typedRole === jdRoleLabel(activeJd) ? activeJd.title : typedRole;
     const fmt = getSelectedFormat();
     const selectedQ = el("practiceQuestionPicker")?.value || null;
     const liveNudges = Boolean(el("practiceNudgesCheckbox")?.checked ?? true);
@@ -2238,6 +2446,7 @@ export function createPracticeStudioController({
     stopSpeaking();
     setButtonLoading("practiceDebriefBtn", true, "Writing debrief…");
     local.debriefStartedAt = Date.now();
+    setConversationCollapsed(false);
     showPendingDebriefCard(el("practiceFeed"), local.debriefStartedAt);
     try {
       if (micMachine.state === "recording" && local.recordingTarget) {
@@ -2891,6 +3100,8 @@ export function createPracticeStudioController({
     // Sync M3 / M4 embedded studio slot & save pill
     syncStudioSlot();
     renderWorkspaceSaveStatus();
+    // Before the feed paints, so a panel that re-opens can scroll to its newest turn.
+    syncConversationPanel(sess);
 
     // Render feed
     const feed = el("practiceFeed");
@@ -3032,14 +3243,16 @@ export function createPracticeStudioController({
     el("practiceLevelPills")?.addEventListener("click", (ev) => {
       const btn = ev.target.closest("[data-practice-level]");
       if (!btn) return;
-      local.targetLevel = btn.getAttribute("data-practice-level") || "L5";
-      el("practiceLevelPills")
-        ?.querySelectorAll("[data-practice-level]")
-        .forEach((b) => b.classList.toggle("active", b === btn));
-      refreshQuestionPicker();
+      local.levelTouched = true;
+      setTargetLevel(btn.getAttribute("data-practice-level") || "L5");
     });
 
     el("practiceStartBtn")?.addEventListener("click", () => startNewPractice());
+
+    bindSplitHandle();
+    el("practiceConvToggleBtn")?.addEventListener("click", () => {
+      setConversationCollapsed(!local.convCollapsed);
+    });
 
     el("homePracticeList")?.addEventListener("click", (ev) => {
       const btn = ev.target.closest("[data-open-practice]");
@@ -3222,6 +3435,7 @@ export function createPracticeStudioController({
     openPracticeSession,
     exitPracticeToHome,
     setHomeMode,
+    setTargetLevel,
     selectBankQuestion,
     registerStudioPlugin,
     pushWorkspaceSnapshot,

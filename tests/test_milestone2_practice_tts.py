@@ -390,7 +390,8 @@ def test_practice_full_lifecycle_privacy_and_asr_routes(tmp_path: Path, monkeypa
     # 11. Export Markdown coaching report & list sessions
     md_res = client.get(f"/api/practice/{sid}/markdown")
     assert md_res.status_code == 200
-    assert "Retry Drill Progress" in md_res.text
+    assert "## Retry drill progress" in md_res.text
+    assert "## Full practice transcript" in md_res.text
     assert f'filename="{sid}_practice.md"' in md_res.headers["content-disposition"]
 
     list_res = client.get("/api/practice/sessions")

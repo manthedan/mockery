@@ -4498,8 +4498,13 @@ profileAddons = createProfileAddonsController({
       el("contextRoleSummary").textContent = roleLabel;
     }
     pushSessionConfig();
-    practiceStudio?.refreshQuestionPicker();
+    // The level pill follows the JD too; setTargetLevel refreshes the question picker itself.
+    if (!practiceStudio?.setTargetLevel(jd.target_level)) {
+      practiceStudio?.refreshQuestionPicker();
+    }
   },
+  onLevelApply: (level, opts) => practiceStudio?.setTargetLevel(level, opts),
+  isPracticeHome: () => Boolean(practiceStudio?.isHomePracticeMode?.()),
   onAddonsChange: (addons, tts = null) => {
     state.addons = addons;
     if (tts) state.tts = tts;
@@ -4520,6 +4525,7 @@ practiceStudio = createPracticeStudioController({
   onPracticeActiveChange: () => {
     renderWorkspaceMode();
   },
+  onHomeModeChange: () => profileAddons?.syncHomeJdTarget(),
 });
 packOps.subscribe(() => {
   if (state.modalState === "onboarding" && state.onboardStep === "packs") {

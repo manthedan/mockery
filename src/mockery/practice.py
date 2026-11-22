@@ -116,14 +116,14 @@ class PracticeSession(BaseModel):
                 lines.append("")
             strengths = [str(s) for s in (d.get("top_strengths") or []) if s]
             if strengths:
-                lines.append("## What You Did Well")
+                lines.append("## What you did well")
                 lines.append("")
                 for s in strengths:
                     lines.append(f"- {s}")
                 lines.append("")
             q_reviews = [qr for qr in (d.get("question_reviews") or []) if isinstance(qr, dict)]
             if q_reviews:
-                lines.append("## Question-by-Question CARL Coaching")
+                lines.append("## Question-by-question CARL coaching")
                 lines.append("")
                 for idx, qr in enumerate(q_reviews, 1):
                     lines.append(f"### Q{idx}: {qr.get('title') or str(qr.get('prompt', ''))[:80]}")
@@ -143,14 +143,14 @@ class PracticeSession(BaseModel):
                     lines.append("")
             drill = d.get("retry_drill") if isinstance(d.get("retry_drill"), dict) else {}
             if drill.get("prompt"):
-                lines.append("## Recommended 45-Second Retry Drill")
+                lines.append("## Recommended 45-second retry drill")
                 lines.append("")
                 lines.append(f"- **Focus:** {drill.get('focus', 'Strengthen CARL signal')}")
                 lines.append(f"- **Prompt:** {drill['prompt']}")
                 lines.append("")
 
         if self.retry_history:
-            lines.append("## Retry Drill Progress")
+            lines.append("## Retry drill progress")
             lines.append("")
             for idx, r in enumerate(self.retry_history, 1):
                 lines.append(f"### Retry #{idx}")
@@ -190,7 +190,7 @@ class PracticeSession(BaseModel):
                     lines.extend(_fenced_block(test_out[:4000], "text"))
                 lines.append("")
 
-        lines.append("## Full Practice Transcript")
+        lines.append("## Full practice transcript")
         lines.append("")
         for t in self.turns:
             if t.role == "coach":
