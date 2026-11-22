@@ -228,10 +228,6 @@ def _pcm16_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
     return buf.getvalue()
 
 
-def _float32_to_wav_bytes(samples: np.ndarray, sample_rate: int = 24000) -> bytes:
-    return _pcm16_to_wav_bytes(_float32_to_pcm16_bytes(samples), sample_rate=sample_rate)
-
-
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -508,8 +504,6 @@ class LocalTTSEngine:
             return list(self._cached_macos_voices)
         available: list[str] = []
         try:
-            import subprocess
-
             proc = subprocess.run(
                 ["say", "-v", "?"],
                 capture_output=True,

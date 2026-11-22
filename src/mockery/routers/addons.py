@@ -42,29 +42,30 @@ def build_addons_router(
         runtime.addons.update_modules(body.modules)
         return runtime.addons.status_dict()
 
-    @router.post("/api/addons/{pack_id}/install")
-    async def install_addon_pack(pack_id: str) -> dict[str, Any]:
+    async def _run_pack_action(pack_id: str, event: str, action_verb: str, op_fn: Callable[[str], Any]) -> dict[str, Any]:
         pack = runtime.addons.get_pack_spec(pack_id)
-        if pack is not None and "install" not in pack["allowed_events"]:
+        if pack is not None and event not in pack["allowed_events"]:
             raise HTTPException(
                 status_code=409,
                 detail=InvalidStateTransitionError(
                     machine="addon_pack",
                     current_state=pack["state"],
-                    event="install",
+                    event=event,
                     allowed_events=pack["allowed_events"],
                     remediation=pack["blocked_reasons"].get(
-                        "install",
-                        f"Cannot install '{pack_id}' while in state '{pack['state']}'.",
+                        event,
+                        f"Cannot {action_verb} '{pack_id}' while in state '{pack['state']}'.",
                     ),
                 ).to_dict(),
             )
         try:
-            status = await runtime.addons.install_pack(pack_id)
+            status = await op_fn(pack_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to install {pack_id}: {exc}") from exc
+            if event == "install":
+                raise HTTPException(status_code=500, detail=f"Failed to install {pack_id}: {exc}") from exc
+            raise
         if pack_id == "rampart_pii" and runtime.profiles.state.resume is not None:
             await asyncio.to_thread(
                 runtime.profiles.update_redaction_prefs,
@@ -76,37 +77,13 @@ def build_addons_router(
             "tts": runtime.tts.status_dict(),
         }
 
+    @router.post("/api/addons/{pack_id}/install")
+    async def install_addon_pack(pack_id: str) -> dict[str, Any]:
+        return await _run_pack_action(pack_id, "install", "install", runtime.addons.install_pack)
+
     @router.delete("/api/addons/{pack_id}")
     async def uninstall_addon_pack(pack_id: str) -> dict[str, Any]:
-        pack = runtime.addons.get_pack_spec(pack_id)
-        if pack is not None and "uninstall" not in pack["allowed_events"]:
-            raise HTTPException(
-                status_code=409,
-                detail=InvalidStateTransitionError(
-                    machine="addon_pack",
-                    current_state=pack["state"],
-                    event="uninstall",
-                    allowed_events=pack["allowed_events"],
-                    remediation=pack["blocked_reasons"].get(
-                        "uninstall",
-                        f"Cannot remove '{pack_id}' while in state '{pack['state']}'.",
-                    ),
-                ).to_dict(),
-            )
-        try:
-            status = await runtime.addons.uninstall_pack(pack_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if pack_id == "rampart_pii" and runtime.profiles.state.resume is not None:
-            await asyncio.to_thread(
-                runtime.profiles.update_redaction_prefs,
-                runtime.profiles.state.resume.prefs,
-            )
-        return {
-            "addons": status,
-            "profile": runtime.profiles.public_dict(),
-            "tts": runtime.tts.status_dict(),
-        }
+        return await _run_pack_action(pack_id, "uninstall", "remove", runtime.addons.uninstall_pack)
 
     @router.get("/api/addons/pyodide/{asset_path:path}")
     async def serve_pyodide_asset(asset_path: str, request: Request) -> Response:

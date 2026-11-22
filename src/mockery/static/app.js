@@ -320,18 +320,6 @@ function fmtMs(ms) {
   return fmtClock(Math.floor((ms || 0) / 1000));
 }
 
-function fmtFriendlyDate(isoStr) {
-  if (!isoStr) return "";
-  const d = new Date(isoStr);
-  if (Number.isNaN(d.getTime())) return isoStr;
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
 function escapeHtml(str) {
   return String(str ?? "")
     .replace(/&/g, "&amp;")
@@ -4315,7 +4303,6 @@ function initEvents() {
   el("closeOnboardingBtn")?.addEventListener("click", () => setModalState("none"));
   el("onboardTestSaveBtn")?.addEventListener("click", testAndSaveOnboardingKey);
   el("onboardSkipBtn")?.addEventListener("click", skipOnboardingTranscriptOnly);
-  el("onboardMoreBtn")?.addEventListener("click", () => openSettingsModal());
   el("onboardNextStepBtn")?.addEventListener("click", () => setOnboardStep("packs"));
   el("onboardBackBtn")?.addEventListener("click", () => setOnboardStep("ai"));
   el("onboardDoneBtn")?.addEventListener("click", () => setModalState("none"));
@@ -4377,12 +4364,7 @@ function initEvents() {
       ev.stopPropagation();
       const action = actionBtn.getAttribute("data-action");
       const qaId = actionBtn.getAttribute("data-qa");
-      if (action === "dive") {
-        state.selectedQaId = qaId;
-        renderQAList();
-        activateRightTab("probes");
-        sendCmd({ type: "dive_deeper", qa_id: qaId, force_refresh: false });
-      } else if (action === "merge") {
+      if (action === "merge") {
         sendCmd({ type: "merge_card", qa_id: qaId });
       } else if (action === "split") {
         sendCmd({

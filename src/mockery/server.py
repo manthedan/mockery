@@ -78,10 +78,6 @@ MAX_TTS_REQUEST_BYTES = 32 * 1024
 MAX_PRACTICE_REQUEST_BYTES = 256 * 1024
 
 
-def resolve_project_root() -> Path:
-    return resolve_data_root()
-
-
 def is_trusted_origin(
     origin: str | None,
     host_header: str | None,
@@ -477,7 +473,7 @@ def create_app(
     preload_asr: bool = True,
     auth_token: str | None = None,
 ) -> FastAPI:
-    root = project_root or resolve_project_root()
+    root = project_root or resolve_data_root()
     runtime = AppRuntime(root)
 
     @asynccontextmanager
@@ -541,30 +537,17 @@ def create_app(
                 )
             cl = request.headers.get("content-length")
             cl_int = int(cl) if (cl and cl.isdigit()) else None
-            if request.url.path.startswith("/api/profile/resume"):
-                if cl_int is not None and cl_int > MAX_RESUME_UPLOAD_BYTES + 262_144:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"detail": "Resume upload exceeds 10 MB limit."},
-                    )
-            elif request.url.path == "/api/asr/transcribe":
-                if cl_int is not None and cl_int > MAX_ASR_AUDIO_BYTES + 65_536:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"detail": "Audio upload exceeds 4 MB limit."},
-                    )
-            elif request.url.path in ("/api/tts/speak", "/api/tts/stream"):
-                if cl_int is not None and cl_int > MAX_TTS_REQUEST_BYTES:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"detail": "TTS request exceeds 32 KB limit."},
-                    )
-            elif request.url.path.startswith("/api/practice"):
-                if cl_int is not None and cl_int > MAX_PRACTICE_REQUEST_BYTES:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"detail": "Practice request exceeds 256 KB limit."},
-                    )
+            if cl_int is not None:
+                path = request.url.path
+                size_limits = (
+                    (path.startswith("/api/profile/resume"), MAX_RESUME_UPLOAD_BYTES + 262_144, "Resume upload exceeds 10 MB limit."),
+                    (path == "/api/asr/transcribe", MAX_ASR_AUDIO_BYTES + 65_536, "Audio upload exceeds 4 MB limit."),
+                    (path in ("/api/tts/speak", "/api/tts/stream"), MAX_TTS_REQUEST_BYTES, "TTS request exceeds 32 KB limit."),
+                    (path.startswith("/api/practice"), MAX_PRACTICE_REQUEST_BYTES, "Practice request exceeds 256 KB limit."),
+                )
+                for matched, limit_bytes, detail_msg in size_limits:
+                    if matched and cl_int > limit_bytes:
+                        return JSONResponse(status_code=413, content={"detail": detail_msg})
         response = await call_next(request)
         if request.url.path.startswith(("/api/practice", "/api/profile", "/api/asr/transcribe")):
             response.headers["Cache-Control"] = "no-store"
@@ -630,36 +613,21 @@ def create_app(
         target_provider = (body.provider or runtime.llm_config.provider).strip()
         preset = LLM_PRESETS.get(target_provider, {})
         cfg.provider = target_provider
-        cfg.base_url = (
-            body.base_url.strip()
-            if body.base_url is not None and body.base_url.strip()
-            else (
-                runtime.llm_config.base_url
-                if target_provider == runtime.llm_config.provider
-                else str(preset.get("base_url", ""))
-            )
-        )
-        cfg.fast_model = (
-            body.fast_model.strip()
-            if body.fast_model is not None and body.fast_model.strip()
-            else (
-                runtime.llm_config.fast_model
-                if target_provider == runtime.llm_config.provider
-                else str(preset.get("fast_model", ""))
-            )
-        )
-        cfg.calibration_model = (
-            body.calibration_model.strip()
-            if body.calibration_model is not None and body.calibration_model.strip()
-            else (
-                runtime.llm_config.calibration_model
-                if target_provider == runtime.llm_config.provider
-                else str(preset.get("calibration_model", ""))
-            )
+        same_provider = target_provider == runtime.llm_config.provider
+
+        def _resolve_field(override: str | None, current: str, preset_key: str) -> str:
+            if override is not None and override.strip():
+                return override.strip()
+            return current if same_provider else str(preset.get(preset_key, ""))
+
+        cfg.base_url = _resolve_field(body.base_url, runtime.llm_config.base_url, "base_url")
+        cfg.fast_model = _resolve_field(body.fast_model, runtime.llm_config.fast_model, "fast_model")
+        cfg.calibration_model = _resolve_field(
+            body.calibration_model, runtime.llm_config.calibration_model, "calibration_model"
         )
         if body.api_key is not None and body.api_key.strip():
             cfg.api_key = body.api_key.strip()
-        elif target_provider == runtime.llm_config.provider:
+        elif same_provider:
             cfg.api_key = runtime.llm_config.api_key
         else:
             env_var = PROVIDER_ENV_KEYS.get(target_provider)
@@ -706,8 +674,7 @@ def create_app(
     async def list_sessions() -> dict[str, Any]:
         return {"sessions": runtime.store.list_recent()}
 
-    @app.get("/api/sessions/{session_id}")
-    async def get_saved_session(session_id: str) -> dict[str, Any]:
+    def _require_historical_load_allowed() -> None:
         phase_str, allowed, blocked = runtime.current_phase_and_actions()
         if "load_historical_session" not in allowed:
             raise HTTPException(
@@ -721,6 +688,10 @@ def create_app(
                     "allowed_events": allowed,
                 },
             )
+
+    @app.get("/api/sessions/{session_id}")
+    async def get_saved_session(session_id: str) -> dict[str, Any]:
+        _require_historical_load_allowed()
         loaded = (
             runtime.active_session
             if runtime.active_session.id == session_id
@@ -732,19 +703,7 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/load")
     async def load_saved_session(session_id: str) -> dict[str, Any]:
-        phase_str, allowed, blocked = runtime.current_phase_and_actions()
-        if "load_historical_session" not in allowed:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": blocked.get(
-                        "load_historical_session",
-                        "Stop live audio capture before switching to a historical session.",
-                    ),
-                    "state": phase_str,
-                    "allowed_events": allowed,
-                },
-            )
+        _require_historical_load_allowed()
         loaded = runtime.store.load(session_id)
         if loaded is None:
             raise HTTPException(status_code=404, detail="Session not found")
