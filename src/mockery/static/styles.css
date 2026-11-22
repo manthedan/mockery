@@ -8649,11 +8649,144 @@ label.addon-row {
 /* Split studio: the conversation column gets a readable measure. Coding can
    spare more width than the whiteboard, whose canvas scales with its pane. */
 .practice-workspace[data-studio] .practice-main {
-  grid-template-columns: minmax(300px, 30%) minmax(0, 1fr);
+  grid-template-columns: clamp(260px, var(--split-pct, max(300px, 30%)), 560px) minmax(0, 1fr);
 }
 
 .practice-workspace[data-studio="coding"] .practice-main {
-  grid-template-columns: minmax(320px, 34%) minmax(0, 1fr);
+  grid-template-columns: clamp(260px, var(--split-pct, max(320px, 34%)), 560px) minmax(0, 1fr);
+}
+
+/* Split divider: an 8px grab strip centred on the column hairline. At rest it is
+   invisible (the conversation's own border is the rule); hover, focus and drag
+   strengthen that one line instead of adding chrome. --split-pct is set by a drag. */
+.practice-split-handle {
+  display: none;
+}
+
+.practice-workspace[data-studio] .practice-split-handle {
+  display: block;
+  position: relative;
+  z-index: 3;
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: start;
+  width: 8px;
+  margin-left: -4px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.practice-split-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.practice-split-handle:hover::after,
+.practice-split-handle:focus-visible::after {
+  background: var(--line-strong);
+  box-shadow: 0 0 0 0.5px var(--line-strong);
+  transition-delay: 60ms;
+}
+
+.practice-workspace.is-split-resizing .practice-split-handle::after {
+  background: var(--ink-3);
+  box-shadow: 0 0 0 0.5px var(--ink-3);
+  transition-delay: 0s;
+}
+
+.practice-workspace.is-split-resizing,
+.practice-workspace.is-split-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Conversation toggle: lives beside Home, only while a studio shares the stage. */
+.conv-toggle {
+  display: none;
+  position: relative;
+  flex-shrink: 0;
+  margin-left: -6px;
+  color: var(--ink-3);
+}
+
+.practice-workspace[data-studio] .conv-toggle {
+  display: inline-flex;
+}
+
+.conv-toggle .conv-toggle-pane {
+  opacity: 0.55;
+  transition: opacity 140ms ease;
+}
+
+.conv-toggle[aria-pressed="true"] {
+  color: var(--ink);
+}
+
+.conv-toggle[aria-pressed="true"] .conv-toggle-pane {
+  opacity: 0;
+}
+
+.conv-toggle-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink);
+  box-shadow: 0 0 0 2px var(--bg);
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.conv-toggle.has-unread .conv-toggle-dot {
+  opacity: 1;
+  transform: none;
+}
+
+/* Collapsed: the whiteboard or editor takes the full stage. Wide layouts only —
+   the stacked narrow layout below always shows both panes. */
+@media (min-width: 961px) {
+  .practice-workspace[data-studio][data-conv-collapsed] .practice-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .practice-workspace[data-studio][data-conv-collapsed] .practice-active-view,
+  .practice-workspace[data-studio][data-conv-collapsed] .practice-split-handle {
+    display: none;
+  }
+
+  .practice-workspace[data-studio][data-conv-collapsed] .practice-studio-slot {
+    grid-column: 1;
+  }
+}
+
+/* Debrief in flight: the answer dock steps aside and one calm status line remains
+   under the progress card. Nothing dimmed, nothing that looks tappable. */
+.practice-composer.is-debriefing .composer-dock,
+.practice-composer.is-debriefing .composer-kbd {
+  display: none;
+}
+
+.practice-composer.is-debriefing .practice-composer-tools {
+  justify-content: center;
+  padding: 12px 18px 4px;
+  border-top: 1px solid var(--line);
+}
+
+.practice-composer.is-debriefing .practice-mic-status {
+  font-size: 12.5px;
+  letter-spacing: 0.005em;
+  text-align: center;
 }
 
 /* The fade matches the top padding exactly, so a scrolled prompt dissolves under
@@ -8784,6 +8917,11 @@ label.addon-row {
     border-right: 0;
   }
 
+  .practice-workspace[data-studio] .practice-split-handle,
+  .practice-workspace[data-studio] .conv-toggle {
+    display: none;
+  }
+
   .cs-editor-wrap {
     min-height: 300px;
   }
@@ -8832,7 +8970,10 @@ label.addon-row {
   .switch,
   .switch::after,
   .studio-check::after,
-  .pturn-replay-btn {
+  .pturn-replay-btn,
+  .practice-split-handle::after,
+  .conv-toggle-pane,
+  .conv-toggle-dot {
     animation: none !important;
     transition: none !important;
   }

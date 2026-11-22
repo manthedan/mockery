@@ -386,3 +386,52 @@ def test_inference_latency_indicators_contract():
     assert "typing-dots" in app_js
     assert 'calibBtn.classList.toggle("is-loading", calibRunning)' in app_js
     assert 'btn.classList.add("is-loading")' in app_js
+
+
+def test_ux92_interactive_ergonomics_contract():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    css = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    practice_js = (STATIC_DIR / "practice_studio.js").read_text(encoding="utf-8")
+    profile_js = (STATIC_DIR / "profile_addons.js").read_text(encoding="utf-8")
+
+    # Split studio: resizable divider (outside the studio slot, so plugin pointer capture is untouched)
+    assert 'id="practiceSplitHandle"' in html
+    assert 'role="separator"' in html
+    assert html.index('id="practiceStudioSlot"') < html.index('id="practiceSplitHandle"') < html.index(
+        'id="practiceActiveView"'
+    )
+    assert 'id="practiceConvToggleBtn"' in html
+    for token in (
+        ".practice-split-handle",
+        "cursor: col-resize",
+        "clamp(260px, var(--split-pct, max(300px, 30%)), 560px)",
+        "clamp(260px, var(--split-pct, max(320px, 34%)), 560px)",
+        "[data-conv-collapsed]",
+    ):
+        assert token in css, f"Missing split-studio CSS: {token}"
+    for hook in (
+        "mockery_split_pct_",
+        "bindSplitHandle",
+        "setPointerCapture",
+        '"dblclick"',
+        "setConversationCollapsed",
+    ):
+        assert hook in practice_js, f"Missing split-studio hook: {hook}"
+
+    # Pending debrief: the dock is hidden, one calm status line remains, restored by phase
+    assert ".practice-composer.is-debriefing .composer-dock" in css
+    assert 'classList.toggle("is-debriefing", isDebriefing)' in practice_js
+    assert "Finalizing your coaching debrief…" in practice_js
+
+    # Home ↔ active target JD alignment (role + level), hand edits always win
+    assert "autoAlignHomeToJd" in profile_js
+    assert "roleEditedByHand" in profile_js
+    assert "From your active target job" in profile_js
+    assert "setTargetLevel" in practice_js
+    assert "levelTouched" in practice_js
+    assert "onLevelApply" in app_js
+    assert "isPracticeHome" in app_js
+    # Stock defaults stay intact for an empty profile
+    assert 'value="Senior Software Engineer"' in html
+    assert 'class="seg-opt active" data-practice-level="L5"' in html

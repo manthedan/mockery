@@ -545,6 +545,14 @@
         <div class="practice-bar">
           <div class="practice-bar-left">
             <button id="practiceHomeBtn" class="btn btn-ghost btn-sm studio-back" type="button" title="Save and return home"><svg class="icon-xs" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M9.75 3.5L5.25 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg><span>Home</span></button>
+            <button id="practiceConvToggleBtn" class="btn btn-ghost btn-icon btn-sm conv-toggle" type="button" aria-pressed="false" aria-controls="practiceActiveView" title="Hide conversation — focus on your workspace" aria-label="Hide conversation — focus on your workspace">
+              <svg class="icon-sm" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="2.25" y="3.25" width="11.5" height="9.5" rx="2" stroke="currentColor" stroke-width="1.4" />
+                <path d="M6.5 3.5v9" stroke="currentColor" stroke-width="1.4" />
+                <rect class="conv-toggle-pane" x="3.6" y="4.6" width="1.9" height="6.8" rx="0.6" fill="currentColor" />
+              </svg>
+              <span class="conv-toggle-dot" aria-hidden="true"></span>
+            </button>
             <span class="studio-bar-rule" aria-hidden="true"></span>
             <div class="practice-title-block">
               <span id="practiceRoleTitle" class="practice-role-title">Senior Software Engineer</span>
@@ -605,6 +613,21 @@
           <section class="practice-main">
             <!-- Extensible studio slot for Milestone 3 (System Design Canvas) & Milestone 4 (Coding Studio) -->
             <div id="practiceStudioSlot" class="practice-studio-slot hidden"></div>
+
+            <!-- Split studio divider: drag to resize, double-click to reset (shown only beside a studio) -->
+            <div
+              id="practiceSplitHandle"
+              class="practice-split-handle"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize conversation and workspace"
+              aria-controls="practiceActiveView"
+              aria-valuemin="22"
+              aria-valuemax="48"
+              aria-valuenow="30"
+              tabindex="0"
+              title="Drag to resize · double-click to reset"
+            ></div>
 
             <!-- Active Interview View -->
             <div id="practiceActiveView" class="practice-active-view">
