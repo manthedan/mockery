@@ -502,6 +502,16 @@ function handleServerMessage(msg) {
     return;
   }
 
+  if (msg.type === "capture_error") {
+    state.pendingNewSession = false;
+    rollbackOptimisticState();
+    if (state.captureState === "streaming" || state.captureState === "starting") {
+      stopCaptureSession({ flush: false });
+    }
+    showToast(msg.message || "Capture failed to start.", 4500);
+    return;
+  }
+
   if (msg.type === "error") {
     state.pendingNewSession = false;
     rollbackOptimisticState();
@@ -1264,6 +1274,18 @@ function renderAsrBadge() {
   }
 }
 
+function diarizerEnrolledCount() {
+  const raw = state.diarizer?.enrolled_speakers;
+  if (Array.isArray(raw)) return raw.length;
+  return Number(raw || 0);
+}
+
+function isAutoDiarizerActive() {
+  const autoDiarize = Boolean(state.session?.config?.auto_diarize ?? true);
+  const diarizerReady = Boolean(state.diarizer?.ready ?? state.diarizer?.embedder_ready);
+  return autoDiarize && diarizerReady && !state.diarizer?.manual_override;
+}
+
 function renderSpeakerToggle() {
   const mode = el("modeSelect").value;
   const btn = el("speakerToggleBtn");
@@ -1271,8 +1293,6 @@ function renderSpeakerToggle() {
   const candMeter = el("candMeterWrap");
   const tabKbd = el("speakerTabKbd");
   const hasUtts = (state.session?.utterances || []).length > 0;
-  const autoDiarize = Boolean(state.session?.config?.auto_diarize ?? true);
-  const diarizerReady = Boolean(state.diarizer?.embedder_ready);
   const completed = isSessionCompleted();
 
   if (mode === "in_person" && !completed) {
@@ -1282,8 +1302,8 @@ function renderSpeakerToggle() {
 
     const dot = el("diarizerModeDot");
     const label = el("manualSpeakerLabel");
-    if (autoDiarize && diarizerReady && !state.diarizer?.manual_override) {
-      const enrolled = state.diarizer?.enrolled_speakers || 0;
+    if (isAutoDiarizerActive()) {
+      const enrolled = diarizerEnrolledCount();
       label.textContent = enrolled >= 2 ? "Auto (2)" : "Auto";
       dot.classList.remove("you");
       tabKbd.classList.add("hidden");
@@ -3690,6 +3710,10 @@ async function checkInitialOnboarding() {
     state.llm = data.llm;
     state.addons = data.addons || state.addons;
     state.tts = data.tts || state.tts;
+    if (data.diarizer) {
+      state.diarizer = data.diarizer;
+      renderSpeakerToggle();
+    }
     syncHomeAiPrompt(data.llm);
     profileAddons?.applyStatusSnapshot(data);
     practiceStudio?.applyStatusSnapshot(data);
@@ -4101,22 +4125,28 @@ function initEvents() {
   el("menuSwapSpeakersBtn").onclick = triggerSwapAll;
 
   el("newSessionBtn").onclick = async () => {
-    closeAllPopovers();
-    state.pendingNewSession = true;
-    state.forceWorkspace = false;
-    state.activeCitationUttId = null;
-    if (state.captureState === "streaming") {
-      await stopCaptureSession({ flush: true });
+    if (state.startingNewSession) return;
+    state.startingNewSession = true;
+    try {
+      closeAllPopovers();
+      state.pendingNewSession = true;
+      state.forceWorkspace = false;
+      state.activeCitationUttId = null;
+      if (state.captureState === "streaming") {
+        await stopCaptureSession({ flush: true });
+      }
+      state.selectedQaId = null;
+      state.baseElapsedMs = 0;
+      state.localSegmentStartedAt = null;
+      state.editingSelfRating = false;
+      state.searchQuery = "";
+      el("transcriptSearchInput").value = "";
+      renderTimerPill(0);
+      activateRightTab("probes");
+      sendCmd({ type: "new_session", config: currentConfigPayload() });
+    } finally {
+      state.startingNewSession = false;
     }
-    state.selectedQaId = null;
-    state.baseElapsedMs = 0;
-    state.localSegmentStartedAt = null;
-    state.editingSelfRating = false;
-    state.searchQuery = "";
-    el("transcriptSearchInput").value = "";
-    renderTimerPill(0);
-    activateRightTab("probes");
-    sendCmd({ type: "new_session", config: currentConfigPayload() });
   };
 
   el("newCardBtn").onclick = () => sendCmd({ type: "force_new_card" });
@@ -4306,16 +4336,29 @@ function initEvents() {
     };
   }
 
+  const triggerFileDownload = (url) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   el("exportInterviewerMdBtn").onclick = () => {
     closeAllPopovers();
     if (state.session?.id) {
-      window.location.href = `/api/sessions/${encodeURIComponent(state.session.id)}/markdown?audience=interviewer`;
+      triggerFileDownload(
+        `/api/sessions/${encodeURIComponent(state.session.id)}/markdown?audience=interviewer`
+      );
     }
   };
   el("exportCandidateMdBtn").onclick = () => {
     closeAllPopovers();
     if (state.session?.id) {
-      window.location.href = `/api/sessions/${encodeURIComponent(state.session.id)}/markdown?audience=candidate`;
+      triggerFileDownload(
+        `/api/sessions/${encodeURIComponent(state.session.id)}/markdown?audience=candidate`
+      );
     }
   };
 
@@ -4617,11 +4660,7 @@ function initEvents() {
         sendCmd({ type: "force_new_card" });
       }
     } else if (ev.key === "Tab" && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
-      const autoDiarize = Boolean(state.session?.config?.auto_diarize ?? true);
-      const diarizerReady = Boolean(state.diarizer?.embedder_ready);
-      const manualMode =
-        el("modeSelect").value === "in_person" &&
-        !(autoDiarize && diarizerReady && !state.diarizer?.manual_override);
+      const manualMode = el("modeSelect").value === "in_person" && !isAutoDiarizerActive();
       if (state.captureState === "streaming" && manualMode) {
         ev.preventDefault();
         const next = state.manualSpeaker === "interviewer" ? "candidate" : "interviewer";

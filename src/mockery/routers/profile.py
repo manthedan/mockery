@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
-from ..profiles import ResumeRedactionPrefs
+from ..profiles import ResumeRedactionPrefs, StaleResumeDocumentError
 from ..redactor import (
     clean_job_listing_text,
     extract_document_text,
@@ -83,8 +83,18 @@ def build_profile_router(runtime: Any) -> APIRouter:
         return runtime.profiles.public_dict()
 
     @router.post("/api/profile/resume/toggle/{span_id}")
-    async def toggle_resume_span_redaction(span_id: str) -> dict[str, Any]:
-        updated = await asyncio.to_thread(runtime.profiles.toggle_span_redaction, span_id)
+    async def toggle_resume_span_redaction(
+        span_id: str,
+        doc_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            updated = await asyncio.to_thread(
+                runtime.profiles.toggle_span_redaction,
+                span_id,
+                expected_doc_id=doc_id,
+            )
+        except StaleResumeDocumentError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if updated is None:
             raise HTTPException(status_code=404, detail="Resume or span not found.")
         return runtime.profiles.public_dict()

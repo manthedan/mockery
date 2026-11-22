@@ -165,16 +165,15 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
         proc.terminationHandler = { [weak self] terminated in
             guard let self = self else { return }
             DispatchQueue.main.async {
-                if self.serverProcess === terminated {
-                    try? self.logHandle?.close()
-                    self.logHandle = nil
-                    self.serverProcess = nil
+                guard self.serverProcess === terminated else { return }
+                try? self.logHandle?.close()
+                self.logHandle = nil
+                self.serverProcess = nil
+                if terminated.terminationReason == .exit && terminated.terminationStatus == 0 {
+                    self.statusMenuItem?.title = "Stopped"
+                } else {
+                    self.statusMenuItem?.title = "Server exited (\(terminated.terminationStatus))"
                 }
-            }
-            if terminated.terminationReason == .exit && terminated.terminationStatus == 0 {
-                self.updateStatus("Stopped")
-            } else {
-                self.updateStatus("Server exited (\(terminated.terminationStatus))")
             }
         }
 
@@ -187,10 +186,14 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        let launchedProc = proc
+        let port = self.activePort
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let port = self.activePort
             for _ in 0..<80 {
+                if !launchedProc.isRunning {
+                    return
+                }
                 if self.isServerHealthy(port: port) {
                     self.updateStatus("Running on port \(port)")
                     if openBrowserWhenReady {
@@ -200,12 +203,11 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
                     }
                     return
                 }
-                if self.serverProcess?.isRunning == false {
-                    return
-                }
                 Thread.sleep(forTimeInterval: 0.25)
             }
-            self.updateStatus("Starting (check log if slow)…")
+            if launchedProc.isRunning {
+                self.updateStatus("Starting (check log if slow)…")
+            }
         }
     }
 
@@ -217,7 +219,7 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
         guard let proc = serverProcess else { return }
         if proc.isRunning {
             proc.terminate()
-            let deadline = Date().addingTimeInterval(2.5)
+            let deadline = Date().addingTimeInterval(6.0)
             while proc.isRunning && Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.05)
             }

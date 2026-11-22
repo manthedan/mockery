@@ -8,7 +8,7 @@ import re
 import time
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -70,10 +70,67 @@ class PracticeWorkspaceUpdateRequest(BaseModel):
     workspace_context: dict[str, Any]
 
 
+class PracticeDebriefRequest(BaseModel):
+    final_answer: str | None = None
+    expected_question_id: str | None = None
+    workspace_context: dict[str, Any] | None = None
+
+
 class PracticeRetryRequest(BaseModel):
     answer_text: str
     question_id: str | None = None
     focus: str = ""
+
+
+class _ClientDisconnectedError(Exception):
+    """Raised when the HTTP client aborts before an LLM operation commits."""
+
+
+async def _await_with_disconnect(request: Request, coro: Any) -> Any:
+    """
+    Await `coro` while watching `request.is_disconnected()`. If the browser aborts
+    the fetch (e.g. clicking Cancel), cancel the in-flight LLM task immediately so
+    nothing mutates or persists after cancel.
+    """
+    work_task = asyncio.create_task(coro)
+
+    async def _watch_disconnect() -> None:
+        while not work_task.done():
+            try:
+                if await request.is_disconnected():
+                    return
+            except Exception:
+                return
+            await asyncio.sleep(0.15)
+
+    watch_task = asyncio.create_task(_watch_disconnect())
+    try:
+        done, _ = await asyncio.wait(
+            {work_task, watch_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if work_task in done:
+            return work_task.result()
+        # Client disconnected before work finished — cancel and drain cleanly
+        work_task.cancel()
+        try:
+            await work_task
+        except BaseException:
+            pass
+        raise _ClientDisconnectedError()
+    finally:
+        if not watch_task.done():
+            watch_task.cancel()
+            try:
+                await watch_task
+            except BaseException:
+                pass
+        if not work_task.done():
+            work_task.cancel()
+            try:
+                await work_task
+            except BaseException:
+                pass
 
 
 def merge_workspace_context(session: PracticeSession, patch: dict[str, Any] | None) -> None:
@@ -301,7 +358,11 @@ def build_practice_router(runtime: Any) -> APIRouter:
         }
 
     @router.post("/api/practice/{session_id}/turn")
-    async def submit_practice_turn(session_id: str, body: PracticeTurnRequest) -> dict[str, Any]:
+    async def submit_practice_turn(
+        session_id: str,
+        body: PracticeTurnRequest,
+        request: Request,
+    ) -> dict[str, Any]:
         answer_text = (body.text or "").strip()
         if not answer_text:
             raise HTTPException(status_code=400, detail="Answer text cannot be empty.")
@@ -355,22 +416,28 @@ def build_practice_router(runtime: Any) -> APIRouter:
             prior_turns = [t.model_dump() for t in session.turns[-24:]]
 
             try:
-                reply = await runtime.llm.generate_practice_interviewer_reply(
-                    role_title=session.role_title,
-                    company=session.company,
-                    interview_type=session.config.interview_type,
-                    target_level=session.config.target_level,
-                    coach_style=session.config.coach_style,
-                    current_question=cur_q.model_dump(),
-                    next_question=next_q.model_dump() if next_q else None,
-                    recent_turns=prior_turns,
-                    candidate_answer=answer_text,
-                    follow_up_count=cur_q.follow_up_count,
-                    existing_carl=dict(cur_q.carl_signals),
-                    workspace_context=session.workspace_context or None,
-                    cache_key=f"mockery:practice:{session.id}",
-                    session=session,
+                reply = await _await_with_disconnect(
+                    request,
+                    runtime.llm.generate_practice_interviewer_reply(
+                        role_title=session.role_title,
+                        company=session.company,
+                        interview_type=session.config.interview_type,
+                        target_level=session.config.target_level,
+                        coach_style=session.config.coach_style,
+                        current_question=cur_q.model_dump(),
+                        next_question=next_q.model_dump() if next_q else None,
+                        recent_turns=prior_turns,
+                        candidate_answer=answer_text,
+                        follow_up_count=cur_q.follow_up_count,
+                        existing_carl=dict(cur_q.carl_signals),
+                        workspace_context=session.workspace_context or None,
+                        cache_key=f"mockery:practice:{session.id}",
+                        session=session,
+                    ),
                 )
+            except _ClientDisconnectedError:
+                await _safe_close_practice_worker(runtime, session.id)
+                raise HTTPException(status_code=499, detail="Request cancelled by client.")
             except Exception as exc:
                 await _safe_close_practice_worker(runtime, session.id)
                 raise HTTPException(
@@ -442,7 +509,11 @@ def build_practice_router(runtime: Any) -> APIRouter:
             }
 
     @router.post("/api/practice/{session_id}/hint")
-    async def request_practice_hint(session_id: str, body: PracticeHintRequest | None = None) -> dict[str, Any]:
+    async def request_practice_hint(
+        session_id: str,
+        request: Request,
+        body: PracticeHintRequest | None = None,
+    ) -> dict[str, Any]:
         _check_practice_not_debriefing(runtime, session_id, "request_hint")
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
@@ -468,13 +539,18 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 raise HTTPException(status_code=409, detail=err.to_dict())
 
             try:
-                hint_text = await runtime.llm.generate_practice_hint(
-                    interview_type=session.config.interview_type,
-                    target_level=session.config.target_level,
-                    current_question=cur_q.model_dump(),
-                    recent_turns=[t.model_dump() for t in session.turns[-8:]],
-                    workspace_context=session.workspace_context or None,
+                hint_text = await _await_with_disconnect(
+                    request,
+                    runtime.llm.generate_practice_hint(
+                        interview_type=session.config.interview_type,
+                        target_level=session.config.target_level,
+                        current_question=cur_q.model_dump(),
+                        recent_turns=[t.model_dump() for t in session.turns[-8:]],
+                        workspace_context=session.workspace_context or None,
+                    ),
                 )
+            except _ClientDisconnectedError:
+                raise HTTPException(status_code=499, detail="Hint request cancelled by client.")
             except Exception as exc:
                 raise HTTPException(
                     status_code=503,
@@ -573,7 +649,10 @@ def build_practice_router(runtime: Any) -> APIRouter:
             }
 
     @router.post("/api/practice/{session_id}/debrief")
-    async def generate_practice_debrief(session_id: str) -> dict[str, Any]:
+    async def generate_practice_debrief(
+        session_id: str,
+        body: PracticeDebriefRequest | None = None,
+    ) -> dict[str, Any]:
         _check_practice_not_debriefing(runtime, session_id, "generate_debrief")
         async with runtime.practice_lock(session_id):
             session = await asyncio.to_thread(runtime.practice_store.get, session_id)
@@ -585,6 +664,32 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     "session": serialize_practice_session(runtime, session),
                     "debrief": session.debrief,
                 }
+            if body and body.workspace_context:
+                try:
+                    merge_workspace_context(session, body.workspace_context)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+            # If the candidate had an unsent final answer when clicking End & Debrief,
+            # record it directly before grading (avoids burning an extra interviewer-reply LLM call).
+            final_answer = (body.final_answer or "").strip() if body and body.final_answer else ""
+            if final_answer:
+                if len(final_answer) > MAX_PRACTICE_TURN_CHARS:
+                    raise HTTPException(status_code=413, detail="Final answer exceeds maximum allowed length.")
+                cur_q = session.current_question()
+                if cur_q is not None and (
+                    not body.expected_question_id or body.expected_question_id == cur_q.id
+                ):
+                    est_carl = estimate_carl_heuristic(final_answer, cur_q.carl_signals)
+                    cur_q.carl_signals = dict(est_carl)
+                    session.turns.append(
+                        PracticeTurn(
+                            role="candidate",
+                            question_id=cur_q.id,
+                            text=final_answer,
+                            carl_signals=dict(est_carl),
+                        )
+                    )
+                    await asyncio.to_thread(runtime.practice_store.save, session)
             await _safe_close_practice_worker(runtime, session.id)
             questions_snapshot = [
                 {**q.model_dump(), "status": "completed" if q.status == "active" else q.status}
@@ -636,7 +741,11 @@ def build_practice_router(runtime: Any) -> APIRouter:
             }
 
     @router.post("/api/practice/{session_id}/retry")
-    async def submit_practice_retry(session_id: str, body: PracticeRetryRequest) -> dict[str, Any]:
+    async def submit_practice_retry(
+        session_id: str,
+        body: PracticeRetryRequest,
+        request: Request,
+    ) -> dict[str, Any]:
         retry_text = (body.answer_text or "").strip()
         if not retry_text:
             raise HTTPException(status_code=400, detail="Retry answer cannot be empty.")
@@ -678,14 +787,19 @@ def build_practice_router(runtime: Any) -> APIRouter:
             original_answer = "\n\n".join(orig_answers) or "No prior answer recorded."
 
             try:
-                feedback = await runtime.llm.evaluate_practice_retry(
-                    role_title=session.role_title,
-                    target_level=session.config.target_level,
-                    drill_focus=drill_focus,
-                    drill_prompt=drill_prompt,
-                    original_answer=original_answer,
-                    retry_answer=retry_text,
+                feedback = await _await_with_disconnect(
+                    request,
+                    runtime.llm.evaluate_practice_retry(
+                        role_title=session.role_title,
+                        target_level=session.config.target_level,
+                        drill_focus=drill_focus,
+                        drill_prompt=drill_prompt,
+                        original_answer=original_answer,
+                        retry_answer=retry_text,
+                    ),
                 )
+            except _ClientDisconnectedError:
+                raise HTTPException(status_code=499, detail="Retry evaluation cancelled by client.")
             except Exception as exc:
                 raise HTTPException(
                     status_code=503,

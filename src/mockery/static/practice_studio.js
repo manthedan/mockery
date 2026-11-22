@@ -1439,7 +1439,7 @@ export function createPracticeStudioController({
 
   async function stopMicAndTranscribe() {
     const target = local.recordingTarget;
-    if (!target || micMachine.state !== "recording") return;
+    if (!target || micMachine.state !== "recording") return false;
     local.recGen += 1;
     const myRecGen = local.recGen;
     const mySessionGen = local.sessionGen;
@@ -1454,10 +1454,10 @@ export function createPracticeStudioController({
       local.micTarget = null;
       micMachine.transition("idle", { event: "clip_too_short" });
       updateMicUI(target, "idle", "Recording was too short — try again or type below.");
-      return;
+      return false;
     }
 
-    await transcribeInt16Clip(int16, {
+    return await transcribeInt16Clip(int16, {
       target,
       myQuestionId,
       mySessionGen,
@@ -2437,6 +2437,7 @@ export function createPracticeStudioController({
     let clearedDraft = false;
     let submittedText = "";
     let opCtrl = null;
+    const prevTurnCount = Array.isArray(local.session.turns) ? local.session.turns.length : 0;
     try {
       if (micMachine.state === "recording" && local.recordingTarget === "answer") {
         await stopMicAndTranscribe();
@@ -2500,14 +2501,35 @@ export function createPracticeStudioController({
       }
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
+        let serverCommitted = false;
+        if (err?.name === "AbortError" && local.session?.id) {
+          // Reconcile with server in case the turn committed right before the abort reached the backend
+          try {
+            const syncRes = await fetch(`/api/practice/sessions/${encodeURIComponent(local.session.id)}`);
+            if (syncRes.ok && mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
+              const syncData = await syncRes.json();
+              if (
+                syncData?.session &&
+                Array.isArray(syncData.session.turns) &&
+                syncData.session.turns.length > prevTurnCount
+              ) {
+                local.session = syncData.session;
+                serverCommitted = true;
+              }
+            }
+          } catch {
+            /* ignore reconcile failure and restore draft */
+          }
+        }
         const inputEl = el("practiceAnswerInput");
-        if (clearedDraft && submittedText && inputEl && !inputEl.value.trim()) {
+        if (!serverCommitted && clearedDraft && submittedText && inputEl && !inputEl.value.trim()) {
           inputEl.value = submittedText;
         }
-        const msg =
-          err?.name === "AbortError"
-            ? "Cancelled — your answer is still in the box."
-            : `${err.message || err} — your answer was kept in the box.`;
+        const msg = serverCommitted
+          ? "Your answer had already been submitted — synced with latest reply."
+          : err?.name === "AbortError"
+          ? "Cancelled — your answer is still in the box."
+          : `${err.message || err} — your answer was kept in the box.`;
         showToast(msg, 3600);
         renderPracticeSession();
       }
@@ -2673,15 +2695,21 @@ export function createPracticeStudioController({
     if (!opMachine.transition("debriefing", { event: "run_debrief" })) return;
     setBusy(true);
     stopSpeaking();
-    const opCtrl = beginOpAbort();
-    // End & Debrief simply goes quiet (disabled by setBusy): the progress card is the status.
+    // End & Debrief runs uninterruptibly on the server so we never attach an Esc/Cancel abort controller.
     local.debriefStartedAt = Date.now();
     setConversationCollapsed(false);
     showPendingDebriefCard(el("practiceFeed"), local.debriefStartedAt);
     try {
       if (micMachine.state === "recording" && local.recordingTarget) {
-        await stopMicAndTranscribe();
+        const transcribedOk = await stopMicAndTranscribe();
         if (mySessionGen !== local.sessionGen || !local.session || opMachine.state === "exiting") return;
+        if (!transcribedOk) {
+          showToast(
+            "Your last spoken answer could not be transcribed yet — retry transcription or edit before ending.",
+            4200
+          );
+          return;
+        }
       }
       if (local.mountedPlugin) {
         const savedOk = await pushWorkspaceSnapshot();
@@ -2694,45 +2722,35 @@ export function createPracticeStudioController({
           return;
         }
       }
-      // If the candidate typed or just spoke a final answer, include it in the transcript before debriefing!
+      // Pass any unsent final draft directly to `/debrief` so it is recorded & graded
+      // without burning an extra interviewer-reply LLM call.
       const inputEl = el("practiceAnswerInput");
-      const unsentDraft = (inputEl?.value || "").trim();
-      if (unsentDraft && local.session.phase === "active") {
-        const turnRes = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/turn`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: opCtrl.signal,
-          body: JSON.stringify({
-            text: unsentDraft,
-            workspace_context: getActiveWorkspaceContext(),
+      const unsentDraft = local.session.phase === "active" ? (inputEl?.value || "").trim() : "";
+      const debriefPayload = unsentDraft
+        ? {
+            final_answer: unsentDraft,
             expected_question_id: currentQuestionId(),
-          }),
-        });
-        const turnData = await turnRes.json();
-        if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
-        if (!turnRes.ok) {
-          throw new Error(formatApiDetail(turnData.detail, "Could not save your final answer before debrief"));
-        }
-        local.session = turnData.session;
-        if (inputEl) inputEl.value = "";
-      }
+            workspace_context: getActiveWorkspaceContext(),
+          }
+        : {};
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/debrief`, {
         method: "POST",
-        signal: opCtrl.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(debriefPayload),
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not generate debrief"));
+      if (unsentDraft && inputEl) inputEl.value = "";
       local.session = data.session;
       renderPracticeSession();
       refreshPracticeHistory();
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
-        showToast(err?.name === "AbortError" ? "Debrief cancelled." : String(err.message || err), 3400);
+        showToast(String(err.message || err), 3400);
         renderPracticeSession();
       }
     } finally {
-      if (local.opAbortController === opCtrl) local.opAbortController = null;
       if (local.session?.phase !== "debriefing") {
         clearPendingOpUI();
       }
@@ -2850,7 +2868,7 @@ export function createPracticeStudioController({
         return;
       }
       setButtonLoading("practiceRetrySubmitBtn", true, "Evaluating retry…");
-      const opCtrl = beginOpAbort();
+      const retryOpCtrl = beginOpAbort();
       showPendingTurnCard({
         container: el("practiceRetryHistory"),
         roleClass: "pturn-coach",
@@ -2866,7 +2884,7 @@ export function createPracticeStudioController({
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/retry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: opCtrl.signal,
+        signal: retryOpCtrl.signal,
         body: JSON.stringify({
           answer_text: text,
           question_id: drill.question_id || null,
@@ -2886,7 +2904,7 @@ export function createPracticeStudioController({
         showToast(err?.name === "AbortError" ? "Retry evaluation cancelled." : String(err.message || err), 3200);
       }
     } finally {
-      local.opAbortController = null;
+      if (local.opAbortController === retryOpCtrl) local.opAbortController = null;
       clearPendingOpUI();
       if (opMachine.state === "submitting_retry") {
         opMachine.transition("idle", { event: "submit_retry_done" });
@@ -3604,7 +3622,12 @@ export function createPracticeStudioController({
 
     el("practiceExportMdBtn")?.addEventListener("click", () => {
       if (!local.session) return;
-      window.location.href = `/api/practice/${encodeURIComponent(local.session.id)}/markdown`;
+      const a = document.createElement("a");
+      a.href = `/api/practice/${encodeURIComponent(local.session.id)}/markdown`;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     });
 
     el("practiceToggleTranscriptBtn")?.addEventListener("click", () => {
@@ -3735,18 +3758,22 @@ export function createPracticeStudioController({
         stopSpeaking();
         return true;
       }
-      if (local.opAbortController) {
-        return cancelActiveOp();
-      }
       return false;
     },
     toggleVoiceShortcut: () => {
-      if (!local.session) return false;
+      if (!local.session || opMachine.state !== "idle") return false;
       if (local.session.phase === "active") {
+        const micBtn = el("practiceMicBtn");
+        if (!micBtn || micBtn.disabled) return false;
         toggleMicRecording("answer");
         return true;
       }
-      if (local.session.phase === "completed" && el("practiceRetryMicBtn")) {
+      if (local.session.phase === "completed") {
+        const retryCard = el("practiceRetryCard");
+        const retryBtn = el("practiceRetryMicBtn");
+        if (!retryCard || retryCard.classList.contains("hidden") || !retryBtn || retryBtn.disabled) {
+          return false;
+        }
         toggleMicRecording("retry");
         return true;
       }

@@ -364,7 +364,10 @@ class SessionStore:
                 except Exception:
                     data = None
             if data is None:
-                sess = self._recover_from_jsonl(sid)
+                try:
+                    sess = self._recover_from_jsonl(sid)
+                except Exception:
+                    continue
                 if sess is None:
                     continue
                 data = sess.model_dump()

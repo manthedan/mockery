@@ -47,33 +47,22 @@ class ASRTranscription:
 def parakeet_snapshot_is_complete(snapshot_dir: Path) -> bool:
     """
     Verify a cached Parakeet snapshot directory contains both a readable non-empty
-    `config.json` and non-empty `.safetensors` weights (rejecting partial downloads).
+    `config.json` and readable non-empty `model.safetensors` weights (matching
+    `parakeet_mlx.utils.from_pretrained` and rejecting partial downloads).
     """
     if not snapshot_dir.is_dir():
         return False
-    cfg_path = snapshot_dir / "config.json"
-    try:
-        if not cfg_path.is_file() or cfg_path.stat().st_size <= 0:
-            return False
-        with cfg_path.open("rb") as fh:
-            if not fh.read(1):
+    for required_name in ("config.json", "model.safetensors"):
+        req_path = snapshot_dir / required_name
+        try:
+            if not req_path.is_file() or req_path.stat().st_size <= 0:
                 return False
-    except OSError:
-        return False
-
-    try:
-        for entry in snapshot_dir.iterdir():
-            if entry.name.endswith(".safetensors"):
-                try:
-                    if entry.is_file() and entry.stat().st_size > 0:
-                        with entry.open("rb") as fh:
-                            if fh.read(1):
-                                return True
-                except OSError:
-                    continue
-    except OSError:
-        return False
-    return False
+            with req_path.open("rb") as fh:
+                if not fh.read(1):
+                    return False
+        except OSError:
+            return False
+    return True
 
 
 def _resolve_model_source(model_id: str) -> str:

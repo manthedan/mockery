@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import logging
 import os
 import secrets
 import threading
+import time
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -14,17 +14,11 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 
-from .paths import resolve_data_root
+from .paths import is_loopback_host, resolve_data_root
 
 
 def _is_loopback_host(host: str) -> bool:
-    clean = (host or "").strip().strip("[]").lower()
-    if clean == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(clean).is_loopback
-    except ValueError:
-        return False
+    return is_loopback_host(host)
 
 
 def _format_url_host(host: str) -> str:
@@ -43,10 +37,9 @@ def _open_browser_when_ready(
     stop_event: threading.Event,
     timeout_s: float = 15.0,
 ) -> None:
-    deadline = threading.Event()
-    elapsed = 0.0
+    deadline = time.monotonic() + timeout_s
     step = 0.15
-    while not stop_event.is_set() and elapsed < timeout_s:
+    while not stop_event.is_set() and time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(probe_url, timeout=0.5) as resp:
                 if getattr(resp, "status", 0) == 200:
@@ -55,10 +48,9 @@ def _open_browser_when_ready(
                     return
         except Exception:
             pass
-        if stop_event.wait(step):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or stop_event.wait(min(step, remaining)):
             return
-        elapsed += step
-    _ = deadline
 
 
 def main() -> None:
@@ -152,9 +144,10 @@ def main() -> None:
 
     from .server import create_app
 
+    bind_host = args.host.strip().strip("[]") or "127.0.0.1"
     app = create_app(project_root=resolved_root, auth_token=lan_token)
     try:
-        uvicorn.run(app, host=args.host, port=port, log_level="info")
+        uvicorn.run(app, host=bind_host, port=port, log_level="info")
     finally:
         stop_browser_probe.set()
 
