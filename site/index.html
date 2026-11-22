@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mockery — a local-first mock interview studio for Apple Silicon</title>
-  <meta name="description" content="Practice interviews out loud with an AI interviewer, or run a mock for someone else with a live transcript, follow-up probes and a blind calibration audit. Speech recognition runs offline on your Mac.">
+  <title>Mockery — Local-first mock interview studio for Apple Silicon</title>
+  <meta name="description" content="Practice interviews out loud with an AI interviewer, or run mocks for others with live transcripts, probes, and blind calibration. Audio stays on your Mac.">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)">
@@ -12,8 +12,8 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Mockery">
-  <meta property="og:title" content="Mockery — practice the interview out loud. Then run one for someone else.">
-  <meta property="og:description" content="A calm, local-first mock interview studio for Apple Silicon. Voice-first practice with coaching, plus a live interviewer copilot. Speech stays on your Mac.">
+  <meta property="og:title" content="Mockery — Practice the interview out loud. Then run one for someone else.">
+  <meta property="og:description" content="Local-first mock interview studio for Apple Silicon. Voice-first AI practice with CARL coaching, whiteboard, and coding—plus a live interviewer copilot.">
   <meta property="og:url" content="https://manthedan.github.io/mockery/">
   <meta property="og:image" content="https://manthedan.github.io/mockery/assets/og-social-card.png">
   <meta property="og:image:type" content="image/png">
@@ -21,8 +21,8 @@
   <meta property="og:image:height" content="640">
   <meta property="og:image:alt" content="Mockery: practice the interview out loud, then run one for someone else. Beside the headline, the system design whiteboard running at 127.0.0.1.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Mockery — practice the interview out loud. Then run one for someone else.">
-  <meta name="twitter:description" content="A calm, local-first mock interview studio for Apple Silicon. Speech stays on your Mac.">
+  <meta name="twitter:title" content="Mockery — Practice the interview out loud. Then run one for someone else.">
+  <meta name="twitter:description" content="Local-first mock interview studio for Apple Silicon. Practice out loud with an AI interviewer, or run sharper mocks for others. Audio never leaves your Mac.">
   <meta name="twitter:image" content="https://manthedan.github.io/mockery/assets/og-social-card.png">
   <meta name="twitter:image:alt" content="Mockery: practice the interview out loud, then run one for someone else.">
 
@@ -69,7 +69,7 @@
     <!-- ───────────────────────────── Hero ───────────────────────────── -->
     <section class="hero" id="top">
       <div class="wrap">
-        <p class="label">v0.2.0 · macOS · Apple Silicon</p>
+        <p class="label">v0.2.0 · macOS · Apple Silicon (M1–M4)</p>
         <h1>
           <span class="voice-a">Practice the interview <mark>out&nbsp;loud</mark>.</span>
           <span class="voice-b">Then run one for someone else.</span>
@@ -77,10 +77,10 @@
 
         <div class="hero-row">
           <p class="lede">
-            Mockery is a calm mock interview studio that lives on your Mac. Answer an AI interviewer
-            by voice and get coached on what you actually said. Or take the interviewer’s chair, with
-            a live transcript, follow-up probes and a blind check on your own verdict. Speech
-            recognition runs offline, so your audio never leaves the machine.
+            A local-first interview studio on your Mac. Rehearse behavioral, system design, and coding
+            rounds out loud with an AI interviewer that coaches what you actually said. Or take the
+            interviewer’s chair with offline transcription, live follow-ups, and a blind audit of your
+            own hire call. Your audio never leaves the machine.
           </p>
 
           <div class="hero-install">
@@ -90,7 +90,7 @@
               <button type="button" class="btn-ink" data-copy="#heroCmd">Copy</button>
             </div>
             <p class="fine">
-              Free and MIT licensed. Works with no API key.
+              Free and MIT licensed. Transcript-only needs no key; AI rounds connect to your CLI, local model, or API key.
               <a href="#install">Other ways to install</a> · <a href="https://github.com/manthedan/mockery">Source on GitHub</a>
             </p>
           </div>
@@ -142,24 +142,24 @@
           <article class="mode">
             <p class="label">AI Mock Practice</p>
             <h3>You’re the candidate.</h3>
-            <p class="mode-lede">A solo interviewer that asks, listens and follows up, shaped by your resume and the job you’re aiming for.</p>
+            <p class="mode-lede">An AI interviewer tuned to your redacted resume and target role. It listens, probes, and coaches every round.</p>
             <dl class="rows">
-              <div><dt>Voice-first behavioral</dt><dd>Answer out loud. A live CARL meter tracks Context, Action, Result and Learning as you speak.</dd></div>
-              <div><dt>Debrief and 45-second retry</dt><dd>A question-by-question breakdown, then one timed redo of the answer that needs it most, while the feedback is fresh.</dd></div>
-              <div><dt>System design whiteboard</dt><dd>Sketch services, queues and stores on an SVG canvas. The interviewer asks about what you actually drew.</dd></div>
-              <div><dt>Coding studio</dt><dd>Run real tests in an isolated worker: JavaScript built in, Python offline through a local Pyodide pack.</dd></div>
+              <div><dt>Voice-first behavioral</dt><dd>Answer out loud to a local neural voice (Kokoro or Phonon) while a live CARL meter tracks Context, Action, Result, and Learning.</dd></div>
+              <div><dt>Debrief and 45-second retry</dt><dd>Get a question-by-question breakdown and reframe, then re-deliver your weakest answer in one timed 45-second drill while it’s fresh.</dd></div>
+              <div><dt>System design whiteboard</dt><dd>Sketch services, caches, queues, and stores on an SVG canvas. The interviewer reads your diagram and probes what you actually drew.</dd></div>
+              <div><dt>Coding studio</dt><dd>Write and run real tests in sandboxed Web Workers—JavaScript built in, Python offline via a local Pyodide pack.</dd></div>
             </dl>
           </article>
 
           <article class="mode">
             <p class="label">Live Interviewer Copilot</p>
             <h3>You’re the interviewer.</h3>
-            <p class="mode-lede">A quiet second pair of ears for the mock you run for a friend or teammate, on Google Meet or across a table.</p>
+            <p class="mode-lede">A quiet second pair of ears when you run a mock for a friend or teammate, on Google Meet or across a desk.</p>
             <dl class="rows">
-              <div><dt>Offline speech-to-text</dt><dd>Parakeet on MLX transcribes on your Mac. Drafts appear in about 50&nbsp;ms and lock in with full context.</dd></div>
-              <div><dt>Two voices, kept apart</dt><dd>WeSpeaker acoustic diarization separates two speakers on one microphone. On Meet, your mic and the tab are captured separately.</dd></div>
-              <div><dt>Live follow-up probes</dt><dd>Press <kbd>D</kbd> for three follow-ups grounded in what the candidate just said. <kbd>1</kbd>–<kbd>3</kbd> marks them asked.</dd></div>
-              <div><dt>Blind calibration</dt><dd>Lock in your own hire signal first. Then read an audit of that call against the transcript, cited to the second.</dd></div>
+              <div><dt>Offline speech-to-text</dt><dd>Parakeet on MLX transcribes locally on Apple Silicon. Drafts stream in ~50&nbsp;ms and lock in with full-sentence context.</dd></div>
+              <div><dt>Two voices, kept apart</dt><dd>WeSpeaker acoustic diarization splits two speakers on a single mic. On Google Meet, your mic and call tab capture on separate tracks.</dd></div>
+              <div><dt>Live follow-up probes</dt><dd>Speculatively pre-drafted as they talk. Hit <kbd>D</kbd> for three grounded follow-ups, and <kbd>1</kbd>–<kbd>3</kbd> to mark them asked.</dd></div>
+              <div><dt>Blind calibration</dt><dd>Commit to your own hire call before seeing the AI’s take. Then inspect an evidence audit cited to the exact timestamp.</dd></div>
             </dl>
           </article>
         </div>
@@ -172,7 +172,7 @@
         <div class="section-head">
           <p class="label">Studio showcase</p>
           <h2>Look inside before you install.</h2>
-          <p class="section-lede">Real screens from v0.2, captured from the running app with synthetic demo data.</p>
+          <p class="section-lede">Unretouched v0.2 screens captured straight from the running app, populated with synthetic demo data.</p>
         </div>
 
         <div class="tabs-scroll">
@@ -190,7 +190,7 @@
           <div class="panel-head">
             <div>
               <h3>Say it out loud. See what landed.</h3>
-              <p>Speak your answer and the CARL meter fills in as you go. End the session for a question-by-question debrief, a suggested reframe, and one 45-second retry on the part that needs it most.</p>
+              <p>Speak your answer and watch the CARL meter track Context, Action, Result, and Learning as you go. End the round for a question-by-question debrief, a concrete reframe, and one 45-second retry drill on the story that needs it most.</p>
             </div>
             <div class="seg" role="tablist" aria-label="Behavioral views">
               <button type="button" role="tab" id="viewBehLive" aria-controls="shotBehLive" aria-selected="true">Live answer</button>
@@ -225,7 +225,7 @@
           <div class="panel-head">
             <div>
               <h3>Draw the system while you talk.</h3>
-              <p>Drop clients, gateways, services, stores and queues on a dot-grid canvas and connect them with labelled flows. The interviewer reads the diagram, tracks requirements, and asks about what you actually drew.</p>
+              <p>Place clients, gateways, services, caches, stores, and queues on an SVG dot-grid canvas and wire them with labeled flows. The interviewer inspects your diagram, tracks requirements, and probes the trade-offs in what you actually drew.</p>
             </div>
           </div>
           <figure class="window">
@@ -245,7 +245,7 @@
           <div class="panel-head">
             <div>
               <h3>Write it, run it, explain it.</h3>
-              <p>JavaScript runs in an isolated Web Worker. Python runs offline through a local Pyodide pack, no internet needed. Tests, output and coaching signals sit right beside the conversation.</p>
+              <p>Run real test suites in isolated Web Workers—JavaScript out of the box, Python completely offline through a local Pyodide pack. Your editor, test output, and interviewer stay right beside each other.</p>
             </div>
           </div>
           <figure class="window">
@@ -265,7 +265,7 @@
           <div class="panel-head">
             <div>
               <h3>See exactly what leaves your Mac.</h3>
-              <p>Names, emails, phone numbers and links are found on-device and swapped for neutral placeholders. The preview is the only version a cloud model can ever read, and any detail flips between Hidden and Visible with a click.</p>
+              <p>Rampart detects names, employers, emails, phone numbers, and links right on your Mac, swapping them for neutral placeholders. Flip any item between Hidden and Visible in one click—the preview on screen is the only version a cloud model ever sees.</p>
             </div>
           </div>
           <figure class="window">
@@ -285,7 +285,7 @@
           <div class="panel-head">
             <div>
               <h3>Three follow-ups, the moment you need them.</h3>
-              <p>While the candidate talks, Mockery drafts three probes grounded in what was just said. Afterwards, commit to your own verdict before the audit shows you the evidence, with every claim linked to its moment in the transcript.</p>
+              <p>As the candidate speaks, Mockery pre-drafts three grounded follow-ups in the background so they’re ready the instant you ask. When the round wraps, lock in your own verdict first, then inspect a blind calibration audit with every claim cited to its exact timestamp.</p>
             </div>
             <div class="seg" role="tablist" aria-label="Copilot views">
               <button type="button" role="tab" id="viewCopProbes" aria-controls="shotCopProbes" aria-selected="true">Follow-ups</button>
@@ -323,7 +323,7 @@
         <div class="section-head">
           <p class="label">Local-first, on Apple Silicon</p>
           <h2>What runs where.</h2>
-          <p class="section-lede">Listening, speaking, redacting and running code all happen on your Mac. The only thing that can leave is text, and only to a model you picked.</p>
+          <p class="section-lede">Listening, speaking, PII redaction, and code execution all run locally on your Mac. The only thing that can ever leave is text—and only to a model you chose.</p>
         </div>
 
         <div class="arch">
@@ -331,12 +331,12 @@
             <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>Your Mac · 127.0.0.1:8765</span></div>
             <h3 class="sr-only">On your Mac</h3>
             <dl class="rows rows-arch">
-              <div><dt>Speech-to-text</dt><dd><b>Parakeet TDT 0.6B on MLX.</b> Downloaded once (about 600&nbsp;MB), then fully offline.</dd></div>
-              <div><dt>Speaker separation</dt><dd><b>WeSpeaker on CoreML.</b> Two-speaker acoustic diarization from a single microphone.</dd></div>
-              <div><dt>Interviewer voice</dt><dd><b>Kokoro or Phonon.</b> Optional local neural voices. The built-in macOS voice works with nothing installed.</dd></div>
-              <div><dt>Resume redaction</dt><dd><b>Rampart.</b> An optional 15&nbsp;MB on-device model for names, employers and contact details. Basic detection is built in.</dd></div>
-              <div><dt>Code runner</dt><dd><b>Web Worker sandboxes.</b> JavaScript built in, Python through a local Pyodide pack.</dd></div>
-              <div><dt>Your sessions</dt><dd><b>Plain files on disk.</b> Transcripts in Application Support, API keys in a <code>0600</code> file.</dd></div>
+              <div><dt>Speech-to-text</dt><dd><b>Parakeet TDT 0.6B on MLX.</b> Downloaded once (~600&nbsp;MB), then 100% offline.</dd></div>
+              <div><dt>Speaker separation</dt><dd><b>WeSpeaker on CoreML.</b> Acoustic diarization for two voices on a single mic.</dd></div>
+              <div><dt>Interviewer voice</dt><dd><b>Kokoro or Phonon.</b> Optional local neural voice packs; built-in macOS speech works out of the box.</dd></div>
+              <div><dt>Resume redaction</dt><dd><b>Rampart.</b> Optional 15&nbsp;MB on-device scrubber for names, employers, and contacts. Basic detection is built in.</dd></div>
+              <div><dt>Code runner</dt><dd><b>Sandboxed Web Workers.</b> JavaScript built in; Python offline via a local Pyodide pack.</dd></div>
+              <div><dt>Your sessions</dt><dd><b>Plain files on disk.</b> Transcripts in Application Support, API keys locked in a <code>0600</code> file.</dd></div>
             </dl>
           </div>
 
@@ -349,22 +349,22 @@
           <div class="arch-box arch-box-out">
             <div class="arch-out-head">
               <h3>The model you bring</h3>
-              <p>Optional. Powers the practice interviewer, probes and calibration.</p>
+              <p>Optional. Powers AI practice, live probes, and calibration.</p>
             </div>
             <ul class="arch-options">
-              <li><span class="dot dot-local"></span><div><b>oMLX, Ollama or LM Studio</b><span>Stays on your Mac. Nothing leaves at all.</span></div></li>
-              <li><span class="dot dot-local"></span><div><b>Transcript-only</b><span>No model. Transcript, notes and export.</span></div></li>
-              <li><span class="dot dot-cloud"></span><div><b>A CLI you already use</b><span>Claude Code, Codex or Gemini, on your existing plan.</span></div></li>
-              <li><span class="dot dot-cloud"></span><div><b>Your own API key</b><span>Gemini, Anthropic, OpenAI, DeepSeek or OpenRouter.</span></div></li>
+              <li><span class="dot dot-local"></span><div><b>oMLX, Ollama or LM Studio</b><span>Stays 100% on your Mac. Nothing leaves at all.</span></div></li>
+              <li><span class="dot dot-local"></span><div><b>Transcript-only</b><span>No model or key needed. Local transcript, notes, and export.</span></div></li>
+              <li><span class="dot dot-cloud"></span><div><b>A CLI you already use</b><span>Claude Code, Codex, Gemini, Agy, or Pi—on your existing plan.</span></div></li>
+              <li><span class="dot dot-cloud"></span><div><b>Your own API key</b><span>Gemini, Anthropic, OpenAI, DeepSeek, or OpenRouter.</span></div></li>
             </ul>
             <p class="arch-legend"><span class="dot dot-local"></span> stays local <span class="dot dot-cloud"></span> sends text to that provider</p>
           </div>
         </div>
 
         <ul class="facts">
-          <li><b>Local by default.</b> The studio binds to <code>127.0.0.1</code>, so it only answers your own machine, and it checks that requests come from its own page.</li>
-          <li><b>A token if you open it up.</b> Run it on your LAN on purpose and Mockery requires a random access token.</li>
-          <li><b>Redacted before it’s sent.</b> A cloud model only ever sees the resume preview you approved.</li>
+          <li><b>Loopback by default.</b> Mockery binds strictly to <code>127.0.0.1</code> and verifies same-origin requests—nothing else on your network can touch it.</li>
+          <li><b>Token-gated on LAN.</b> Expose the studio on your local network intentionally and Mockery enforces a random access token.</li>
+          <li><b>Redacted before upload.</b> Cloud models only ever receive the scrubbed resume preview you explicitly approved.</li>
         </ul>
       </div>
     </section>
@@ -375,7 +375,7 @@
         <div class="section-head">
           <p class="label">Bring your own model</p>
           <h2>Use what you already have.</h2>
-          <p class="section-lede">Transcription, speaker separation, cards, talk ratios and Markdown export need no key at all. Add a model when you want the practice interviewer, probes, coaching and calibration.</p>
+          <p class="section-lede">Transcript-only mode—offline transcription, diarization, phase cards, talk ratios, and Markdown export—needs zero API keys. Connect a model whenever you want AI Mock Practice, follow-up probes, coaching, and calibration.</p>
         </div>
 
         <div class="table-wrap">
@@ -385,29 +385,29 @@
             </thead>
             <tbody>
               <tr>
-                <th scope="row">Local CLIs <span class="mono">claude · codex · gemini</span></th>
+                <th scope="row">Local CLIs <span class="mono">claude · codex · gemini · agy · pi</span></th>
                 <td data-label="Cost and sign-in">Your existing subscription. No API key.</td>
-                <td data-label="Best for">One click. Detected automatically if installed.</td>
+                <td data-label="Best for">One-click connect—auto-detected if installed on your Mac.</td>
               </tr>
               <tr>
                 <th scope="row">Google Gemini API</th>
-                <td data-label="Cost and sign-in">Free tier through Google AI Studio.</td>
-                <td data-label="Best for">The easiest cloud setup without a credit card.</td>
+                <td data-label="Cost and sign-in">Free tier via Google AI Studio.</td>
+                <td data-label="Best for">Fastest cloud setup with no credit card.</td>
               </tr>
               <tr>
                 <th scope="row">Anthropic, OpenAI, DeepSeek, OpenRouter</th>
                 <td data-label="Cost and sign-in">Bring your own API key.</td>
-                <td data-label="Best for">Your favourite frontier or budget model.</td>
+                <td data-label="Best for">Running your favorite frontier or low-cost model.</td>
               </tr>
               <tr>
                 <th scope="row">oMLX, Ollama, LM Studio</th>
                 <td data-label="Cost and sign-in">Free and fully offline.</td>
-                <td data-label="Best for">Private local models. A 16&nbsp;GB Mac or larger is recommended.</td>
+                <td data-label="Best for">Air-gapped local inference. 16&nbsp;GB+ Apple Silicon Mac recommended.</td>
               </tr>
               <tr>
                 <th scope="row">Transcript-only</th>
                 <td data-label="Cost and sign-in">Free. Zero setup.</td>
-                <td data-label="Best for">Pure local transcription, notes and export.</td>
+                <td data-label="Best for">Pure offline transcription, notes, and Markdown export.</td>
               </tr>
             </tbody>
           </table>
@@ -420,15 +420,15 @@
       <div class="wrap">
         <div class="section-head">
           <p class="label">Install</p>
-          <h2>Running in about a minute.</h2>
-          <p class="section-lede">You need a Mac with Apple Silicon. Google Chrome is recommended if you want to capture a Meet tab.</p>
+          <h2>Up and running in a minute.</h2>
+          <p class="section-lede">Requires a Mac with Apple Silicon (M1–M4). Use Google Chrome if you want dual-track Google Meet tab capture.</p>
         </div>
 
         <div class="install">
           <div class="install-row">
             <div class="install-what">
               <h3>One-line installer</h3>
-              <p>Installs <code>Mockery.app</code> into Applications.</p>
+              <p>Installs <code>Mockery.app</code> straight into Applications.</p>
             </div>
             <div class="install-how">
               <div class="cmd" role="group" aria-label="Installer command">
@@ -436,9 +436,9 @@
                 <button type="button" class="btn-ink" data-copy="#installCmd">Copy</button>
               </div>
               <ol class="steps">
-                <li>Paste the line into Terminal.</li>
-                <li>Open Mockery from Applications or Spotlight. It sits in your menu bar and opens the studio at <code>127.0.0.1:8765</code></li>
-                <li>On first launch it downloads the offline speech engine once. A welcome screen then helps you connect a model, or skip straight to transcript-only.</li>
+                <li>Paste the command into Terminal.</li>
+                <li>Launch Mockery from Applications or Spotlight. It lives in your menu bar and opens the studio at <code>127.0.0.1:8765</code>.</li>
+                <li>First launch downloads the offline Parakeet speech engine once. Pick an auto-detected CLI, local model, or API key—or skip straight to transcript-only.</li>
               </ol>
             </div>
           </div>
@@ -446,7 +446,7 @@
           <div class="install-row">
             <div class="install-what">
               <h3>Run from source</h3>
-              <p>For developers, with <a href="https://docs.astral.sh/uv/">uv</a>.</p>
+              <p>Prefer a git checkout? Run it with <a href="https://docs.astral.sh/uv/">uv</a>.</p>
             </div>
             <div class="install-how">
               <div class="cmd cmd-stack" role="group" aria-label="Run from source commands">
@@ -468,7 +468,7 @@ uv run mockery</span></code>
       <div>
         <img class="only-dark" src="assets/wordmark-on-dark.svg" width="106" height="24" alt="Mockery" loading="lazy">
         <img class="only-light" src="assets/wordmark-on-light.svg" width="106" height="24" alt="Mockery" loading="lazy">
-        <p>A calm, local-first mock interview studio. MIT licensed.</p>
+        <p>Local-first mock interview studio for Apple Silicon. MIT licensed.</p>
       </div>
       <div class="footer-links">
         <a href="https://github.com/manthedan/mockery">GitHub</a>
@@ -476,7 +476,7 @@ uv run mockery</span></code>
         <a href="https://github.com/manthedan/mockery/issues">Issues</a>
       </div>
     </div>
-    <div class="wrap"><p class="footer-note">This page loads no web fonts, analytics or third-party scripts. Demo screens use fictional people and sessions.</p></div>
+    <div class="wrap"><p class="footer-note">Zero web fonts, analytics, or third-party scripts. Demo screens use synthetic people and sessions.</p></div>
   </footer>
 
   <div class="sr-only" aria-live="polite" data-live></div>
