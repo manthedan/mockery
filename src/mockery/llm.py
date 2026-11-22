@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import ipaddress
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import dotenv_values
@@ -126,8 +128,20 @@ class LLMRuntimeConfig:
     def is_local_http(self) -> bool:
         if self.cli_backend is not None or self.provider == "none":
             return False
-        low_url = self.base_url.lower()
-        return self.provider in LOCAL_HTTP_PROVIDERS or "localhost" in low_url or "127.0.0.1" in low_url
+        if self.provider in LOCAL_HTTP_PROVIDERS:
+            return True
+        try:
+            host = (urlparse(self.base_url).hostname or "").strip().lower()
+        except ValueError:
+            host = ""
+        if not host:
+            return False
+        if host == "localhost" or host.endswith(".localhost"):
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
     @property
     def is_configured(self) -> bool:
@@ -232,41 +246,86 @@ def _is_reasoning_model(model_name: str) -> bool:
     return any(tok in m for tok in ("reasoner", "deepseek-r1", "/r1", "o1", "o3", "o4-mini", "thinking"))
 
 
+_OPUS_4_MINOR_RE = re.compile(r"opus[-_.]4[-_.](\d+)")
+_CLAUDE_5_PLUS_RE = re.compile(r"claude[-_.](?:opus|sonnet|haiku|fable)[-_.](\d+)")
+
+
 def _anthropic_supports_temperature(model_name: str) -> bool:
-    """Newer Claude models (Opus 4.7+, 5.x series) reject explicit `temperature` with HTTP 400."""
-    m = model_name.lower()
+    """Newer Claude models (Opus 4.7+, Mythos, and 5.x series) reject explicit `temperature` with HTTP 400."""
+    m = model_name.lower().strip()
     if _is_reasoning_model(m):
         return False
-    return not any(
-        tok in m
-        for tok in (
-            "opus-4-7",
-            "opus-4.7",
-            "opus-5",
-            "sonnet-5",
-            "haiku-5",
-            "fable-5",
-        )
-    )
+    if "mythos" in m:
+        return False
+    opus4 = _OPUS_4_MINOR_RE.search(m)
+    if opus4 and int(opus4.group(1)) >= 7:
+        return False
+    c5 = _CLAUDE_5_PLUS_RE.search(m)
+    if c5 and int(c5.group(1)) >= 5:
+        return False
+    return True
 
 
 def _head_tail_excerpt(text: str, max_chars: int) -> str:
-    """Keep both opening setup (35%) and closing outcome/learning (65%) when bounding long excerpts."""
+    """Keep both opening setup (35%) and closing outcome/learning (65%) strictly within `max_chars`."""
+    if max_chars <= 0:
+        return ""
     if len(text) <= max_chars:
         return text
     marker = "\n[... middle omitted ...]\n"
-    usable = max(80, max_chars - len(marker))
-    head_len = max(40, int(usable * 0.35))
-    tail_len = max(40, usable - head_len)
+    if max_chars <= len(marker) + 4:
+        return text[:max_chars]
+    usable = max_chars - len(marker)
+    head_len = max(1, int(usable * 0.35))
+    tail_len = max(1, usable - head_len)
     return text[:head_len].rstrip() + marker + text[-tail_len:].lstrip()
 
 
-def _extract_usage_counts(usage: Any) -> dict[str, int | None]:
-    """Normalize provider-reported token counters across OpenAI, Anthropic, and CLI JSON envelopes."""
+def _looks_like_truncated_json(raw: str, finish_reason: str | None = None) -> bool:
+    """Detect output truncation via provider finish_reason or unbalanced JSON braces on cleaned output."""
+    if finish_reason in ("length", "max_tokens"):
+        return True
+    cleaned = THINK_BLOCK_RE.sub("", raw or "").strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    start = cleaned.find("{")
+    if start == -1:
+        return False
+    tail = cleaned[start:]
+    if not tail.endswith("}"):
+        return True
+    depth = 0
+    in_str = False
+    esc = False
+    for ch in tail:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+    return in_str or depth > 0
+
+
+def _extract_usage_counts(usage: Any, *, provider_format: str = "generic") -> dict[str, int | None]:
+    """
+    Normalize provider-reported token counters across OpenAI, Anthropic, and CLI JSON envelopes.
+    `input_tokens` always represents total prompt tokens (including cache reads/writes on Anthropic)
+    so counters are directly comparable across providers.
+    """
     out: dict[str, int | None] = {
         "input_tokens": None,
         "output_tokens": None,
         "cache_read_tokens": None,
+        "cache_write_tokens": None,
     }
     if usage is None:
         return out
@@ -276,27 +335,43 @@ def _extract_usage_counts(usage: Any) -> dict[str, int | None]:
         def get(key: str, default: Any = None) -> Any:
             return getattr(usage, key, default)
 
-    in_tok = get("input_tokens")
-    if in_tok is None:
-        in_tok = get("prompt_tokens")
+    raw_in = get("input_tokens")
+    if raw_in is None:
+        raw_in = get("prompt_tokens")
     out_tok = get("output_tokens")
     if out_tok is None:
         out_tok = get("completion_tokens")
-    cache_tok = get("cache_read_input_tokens")
-    if cache_tok is None:
-        cache_tok = get("cache_read_tokens")
-    if cache_tok is None:
-        cache_tok = get("cached_tokens")
-    if cache_tok is None:
+    cache_read = get("cache_read_input_tokens")
+    if cache_read is None:
+        cache_read = get("cache_read_tokens")
+    if cache_read is None:
+        cache_read = get("cached_tokens")
+    if cache_read is None:
         details = get("prompt_tokens_details")
         if isinstance(details, dict):
-            cache_tok = details.get("cached_tokens")
+            cache_read = details.get("cached_tokens")
         elif details is not None:
-            cache_tok = getattr(details, "cached_tokens", None)
+            cache_read = getattr(details, "cached_tokens", None)
+    cache_write = get("cache_creation_input_tokens")
+    if cache_write is None:
+        cache_write = get("cache_write_tokens")
 
-    for key, val in (("input_tokens", in_tok), ("output_tokens", out_tok), ("cache_read_tokens", cache_tok)):
-        if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
-            out[key] = val
+    def _valid_int(val: Any) -> int | None:
+        return val if isinstance(val, int) and not isinstance(val, bool) and val >= 0 else None
+
+    in_i = _valid_int(raw_in)
+    out_i = _valid_int(out_tok)
+    cr_i = _valid_int(cache_read)
+    cw_i = _valid_int(cache_write)
+
+    # Anthropic's `input_tokens` excludes cache_read_input_tokens and cache_creation_input_tokens
+    if provider_format == "anthropic" and in_i is not None:
+        in_i = in_i + (cr_i or 0) + (cw_i or 0)
+
+    out["input_tokens"] = in_i
+    out["output_tokens"] = out_i
+    out["cache_read_tokens"] = cr_i
+    out["cache_write_tokens"] = cw_i
     return out
 
 
@@ -617,13 +692,17 @@ class InterviewCopilotLLM:
         self._cached_client: AsyncOpenAI | None = None
         self._cached_client_key: tuple[str, str, int] | None = None
         self._anthropic_http: httpx.AsyncClient | None = None
+        self._anthropic_http_loop: asyncio.AbstractEventLoop | None = None
         self._warm_spare: _CLISessionWorker | None = None
         self._warm_spare_reaper: asyncio.Task[Any] | None = None
+        self._warm_spare_prewarm_tasks: set[asyncio.Task[Any]] = set()
         self._session_workers: OrderedDict[str, _CLISessionWorker] = OrderedDict()
         self._warm_spare_lock = asyncio.Lock()
         self._warm_spare_tasks: set[asyncio.Task[Any]] = set()
         self._session_prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._closing_tasks: set[asyncio.Task[Any]] = set()
         self._worker_generation: int = 0
+        self._warm_spare_generation: int = 0
         self.recent_usage_events: deque[dict[str, Any]] = deque(maxlen=50)
 
     def _client(self) -> AsyncOpenAI:
@@ -642,8 +721,17 @@ class InterviewCopilotLLM:
         return self._cached_client
 
     def _anthropic_client(self) -> httpx.AsyncClient:
-        if self._anthropic_http is None or getattr(self._anthropic_http, "is_closed", False):
+        try:
+            cur_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            cur_loop = None
+        stale_loop = (
+            self._anthropic_http_loop is not None
+            and (self._anthropic_http_loop is not cur_loop or self._anthropic_http_loop.is_closed())
+        )
+        if self._anthropic_http is None or getattr(self._anthropic_http, "is_closed", False) or stale_loop:
             self._anthropic_http = httpx.AsyncClient(timeout=60.0)
+            self._anthropic_http_loop = cur_loop
         return self._anthropic_http
 
     def _record_usage(
@@ -671,6 +759,7 @@ class InterviewCopilotLLM:
             "input_tokens": u.get("input_tokens"),
             "output_tokens": u.get("output_tokens"),
             "cache_read_tokens": u.get("cache_read_tokens"),
+            "cache_write_tokens": u.get("cache_write_tokens"),
             "ok": ok,
         }
         self.recent_usage_events.append(event)
@@ -679,18 +768,27 @@ class InterviewCopilotLLM:
     async def aclose(self) -> None:
         await self.close_all_workers()
         if self._cached_client is not None:
-            try:
-                await self._cached_client.close()
-            except Exception:
-                pass
+            client = self._cached_client
             self._cached_client = None
             self._cached_client_key = None
-        if self._anthropic_http is not None:
             try:
-                await self._anthropic_http.aclose()
+                await client.close()
             except Exception:
                 pass
+        if self._anthropic_http is not None:
+            http_client = self._anthropic_http
+            http_loop = self._anthropic_http_loop
             self._anthropic_http = None
+            self._anthropic_http_loop = None
+            try:
+                cur_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                cur_loop = None
+            if http_loop is None or (http_loop is cur_loop and not http_loop.is_closed()):
+                try:
+                    await http_client.aclose()
+                except Exception:
+                    pass
 
     @staticmethod
     def _cli_model_key(backend: str, model: str) -> tuple[str, str | None]:
@@ -783,7 +881,18 @@ class InterviewCopilotLLM:
             worker.stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, worker.stderr_buf))
         return worker
 
-    def prewarm_fast_model(self) -> None:
+    def _spawn_tracked_close(self, workers: list[_CLISessionWorker]) -> None:
+        if not workers:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(_close_workers_shielded(list(workers)))
+        self._closing_tasks.add(task)
+        task.add_done_callback(self._closing_tasks.discard)
+
+    def prewarm_fast_model(self, *, expected_spare_gen: int | None = None) -> None:
         """
         Best-effort pre-spawn of a single disposable warm CLI spare (`agy` or `claude`)
         so the next Live Copilot `D` press skips 2–7s of CLI boot.
@@ -794,13 +903,22 @@ class InterviewCopilotLLM:
         model = (self.config.fast_model or "").strip()
         if not model:
             return
+        if expected_spare_gen is not None and expected_spare_gen != self._warm_spare_generation:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = loop.create_task(self._ensure_warm_spare(backend, model))
+        spare_gen = self._warm_spare_generation
+        task = loop.create_task(self._ensure_warm_spare(backend, model, spare_gen=spare_gen))
         self._warm_spare_tasks.add(task)
-        task.add_done_callback(self._warm_spare_tasks.discard)
+        self._warm_spare_prewarm_tasks.add(task)
+
+        def _done(t: asyncio.Task[Any]) -> None:
+            self._warm_spare_tasks.discard(t)
+            self._warm_spare_prewarm_tasks.discard(t)
+
+        task.add_done_callback(_done)
 
     @staticmethod
     def _cli_format_rule(expect_json: bool) -> str:
@@ -848,12 +966,15 @@ class InterviewCopilotLLM:
 
         task.add_done_callback(_cleanup)
 
-    async def _ensure_warm_spare(self, backend: str, model: str) -> None:
+    async def _ensure_warm_spare(self, backend: str, model: str, *, spare_gen: int | None = None) -> None:
         model_key = self._cli_model_key(backend, model)
         now = time.monotonic()
         stale: _CLISessionWorker | None = None
         async with self._warm_spare_lock:
             gen = self._worker_generation
+            cur_spare_gen = self._warm_spare_generation if spare_gen is None else spare_gen
+            if cur_spare_gen != self._warm_spare_generation:
+                return
             cur = self._warm_spare
             if cur is not None:
                 alive = cur.proc.returncode is None and (now - cur.created_at) < _WARM_SPARE_TTL_SEC
@@ -873,7 +994,11 @@ class InterviewCopilotLLM:
         discard: _CLISessionWorker | None = None
         try:
             async with self._warm_spare_lock:
-                if self._worker_generation != gen or self._warm_spare is not None:
+                if (
+                    self._worker_generation != gen
+                    or self._warm_spare_generation != cur_spare_gen
+                    or self._warm_spare is not None
+                ):
                     discard = worker
                 else:
                     self._warm_spare = worker
@@ -905,7 +1030,8 @@ class InterviewCopilotLLM:
                     self._warm_spare = None
                     expired = worker
             if expired is not None:
-                await _close_workers_shielded([expired])
+                # Hand close to a tracked task so cancelling the reaper timer never strands cleanup.
+                self._spawn_tracked_close([expired])
 
         self._warm_spare_reaper = loop.create_task(_reap_after_ttl())
 
@@ -1005,16 +1131,30 @@ class InterviewCopilotLLM:
         return None
 
     async def release_warm_spare(self) -> None:
-        """Close only the disposable warm spare (leaving active Practice session workers intact)."""
-        stale: _CLISessionWorker | None = None
+        """Close only the disposable warm spare & cancel pending spare prewarms (leaving Practice workers intact)."""
+        to_close: list[_CLISessionWorker] = []
         async with self._warm_spare_lock:
-            stale = self._warm_spare
-            self._warm_spare = None
-            if self._warm_spare_reaper is not None and not self._warm_spare_reaper.done():
-                self._warm_spare_reaper.cancel()
-            self._warm_spare_reaper = None
-        if stale is not None:
-            await _close_workers_shielded([stale])
+            self._warm_spare_generation += 1
+            if self._warm_spare is not None:
+                to_close.append(self._warm_spare)
+                self._warm_spare = None
+            tasks = list(self._warm_spare_prewarm_tasks)
+            self._warm_spare_prewarm_tasks.clear()
+            if self._warm_spare_reaper is not None:
+                tasks.append(self._warm_spare_reaper)
+                self._warm_spare_reaper = None
+        try:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            async with self._warm_spare_lock:
+                if self._warm_spare is not None:
+                    to_close.append(self._warm_spare)
+                    self._warm_spare = None
+        finally:
+            await _close_workers_shielded(to_close)
 
     async def close_session_worker(self, session_key: str) -> None:
         task = self._session_prewarm_tasks.pop(session_key, None)
@@ -1028,15 +1168,17 @@ class InterviewCopilotLLM:
             await _close_workers_shielded([stale])
 
     async def close_all_workers(self) -> None:
+        to_close: list[_CLISessionWorker] = []
         async with self._warm_spare_lock:
             self._worker_generation += 1
+            self._warm_spare_generation += 1
             tasks = list(self._warm_spare_tasks)
             if self._warm_spare_reaper is not None:
                 tasks.append(self._warm_spare_reaper)
                 self._warm_spare_reaper = None
             self._warm_spare_tasks.clear()
+            self._warm_spare_prewarm_tasks.clear()
             self._session_prewarm_tasks.clear()
-            to_close: list[_CLISessionWorker] = []
             if self._warm_spare is not None:
                 to_close.append(self._warm_spare)
                 self._warm_spare = None
@@ -1044,22 +1186,24 @@ class InterviewCopilotLLM:
                 _, w = self._session_workers.popitem(last=False)
                 to_close.append(w)
 
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Drain any worker registered by a task right before cancellation settled
-        async with self._warm_spare_lock:
-            if self._warm_spare is not None:
-                to_close.append(self._warm_spare)
-                self._warm_spare = None
-            while self._session_workers:
-                _, w = self._session_workers.popitem(last=False)
-                to_close.append(w)
-
-        await _close_workers_shielded(to_close)
+        try:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            async with self._warm_spare_lock:
+                if self._warm_spare is not None:
+                    to_close.append(self._warm_spare)
+                    self._warm_spare = None
+                while self._session_workers:
+                    _, w = self._session_workers.popitem(last=False)
+                    to_close.append(w)
+        finally:
+            await _close_workers_shielded(to_close)
+            closing = list(self._closing_tasks)
+            if closing:
+                await asyncio.gather(*closing, return_exceptions=True)
 
     async def invalidate_warm_spare(self) -> None:
         await self.close_all_workers()
@@ -1359,6 +1503,7 @@ class InterviewCopilotLLM:
         format_rule = self._cli_format_rule(expect_json)
         combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
         is_fast_model = self._cli_model_key("agy", model) == self._cli_model_key("agy", self.config.fast_model)
+        spare_gen = self._warm_spare_generation
 
         spare = await self._pop_warm_spare("agy", model) if use_warm_spare else None
         if spare is not None:
@@ -1376,7 +1521,7 @@ class InterviewCopilotLLM:
                     meta_out["mode"] = "warm"
                     meta_out["usage"] = usage_counts
                 if is_fast_model:
-                    self.prewarm_fast_model()
+                    self.prewarm_fast_model(expected_spare_gen=spare_gen)
                 return result
             except _WarmSpareFallbackError as exc:
                 logger.debug("agy warm spare fallback to one-shot: %s", exc)
@@ -1431,7 +1576,7 @@ class InterviewCopilotLLM:
                 if isinstance(raw_usage, dict):
                     meta_out["usage"] = _extract_usage_counts(raw_usage)
             if use_warm_spare and is_fast_model:
-                self.prewarm_fast_model()
+                self.prewarm_fast_model(expected_spare_gen=spare_gen)
             return str(envelope.get("response", stdout)).strip()
 
         # Stream NDJSON events from `agy --output-format stream-json`
@@ -1494,12 +1639,12 @@ class InterviewCopilotLLM:
             resp_text = str(final_result.get("response", "")).strip()
             if resp_text:
                 if use_warm_spare and is_fast_model:
-                    self.prewarm_fast_model()
+                    self.prewarm_fast_model(expected_spare_gen=spare_gen)
                 return resp_text
         if proc.returncode != 0:
             raise RuntimeError(f"agy CLI exited {proc.returncode}: {stderr[:300]}")
         if use_warm_spare and is_fast_model:
-            self.prewarm_fast_model()
+            self.prewarm_fast_model(expected_spare_gen=spare_gen)
         return "".join(streamed_chunks).strip()
 
     async def _call_pi_cli(
@@ -1563,6 +1708,7 @@ class InterviewCopilotLLM:
         )
         sys_prompt = f"{system.strip()}\n\n{format_rule}".strip()
         is_fast_model = self._cli_model_key("claude", model) == self._cli_model_key("claude", self.config.fast_model)
+        spare_gen = self._warm_spare_generation
 
         spare = await self._pop_warm_spare("claude", model) if use_warm_spare else None
         if spare is not None:
@@ -1581,7 +1727,7 @@ class InterviewCopilotLLM:
                     meta_out["mode"] = "warm"
                     meta_out["usage"] = usage_counts
                 if is_fast_model:
-                    self.prewarm_fast_model()
+                    self.prewarm_fast_model(expected_spare_gen=spare_gen)
                 return result
             except _WarmSpareFallbackError as exc:
                 logger.debug("claude warm spare fallback to one-shot: %s", exc)
@@ -1624,7 +1770,7 @@ class InterviewCopilotLLM:
             on_delta=on_delta,
         )
         if use_warm_spare and is_fast_model:
-            self.prewarm_fast_model()
+            self.prewarm_fast_model(expected_spare_gen=spare_gen)
         return result
 
     async def _call_codex_cli(
@@ -1900,11 +2046,8 @@ class InterviewCopilotLLM:
         if on_delta is not None:
             payload["stream"] = True
             parts: list[str] = []
-            stream_usage: dict[str, int | None] = {
-                "input_tokens": None,
-                "output_tokens": None,
-                "cache_read_tokens": None,
-            }
+            stream_usage_raw: dict[str, Any] = {}
+            stop_reason: str | None = None
             async with http.stream("POST", url, **post_kwargs) as resp:
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode("utf-8", errors="replace")
@@ -1923,15 +2066,14 @@ class InterviewCopilotLLM:
                     if ev_type == "message_start":
                         msg_usage = (ev.get("message") or {}).get("usage")
                         if isinstance(msg_usage, dict):
-                            for k, v in _extract_usage_counts(msg_usage).items():
-                                if v is not None:
-                                    stream_usage[k] = v
+                            stream_usage_raw.update(msg_usage)
                     elif ev_type == "message_delta":
+                        delta_obj = ev.get("delta") or {}
+                        if isinstance(delta_obj.get("stop_reason"), str):
+                            stop_reason = delta_obj["stop_reason"]
                         delta_usage = ev.get("usage")
                         if isinstance(delta_usage, dict):
-                            for k, v in _extract_usage_counts(delta_usage).items():
-                                if v is not None:
-                                    stream_usage[k] = v
+                            stream_usage_raw.update(delta_usage)
                     elif ev_type == "content_block_delta":
                         delta_obj = ev.get("delta") or {}
                         txt = delta_obj.get("text")
@@ -1939,15 +2081,21 @@ class InterviewCopilotLLM:
                             parts.append(txt)
                             await on_delta(txt)
             if meta_out is not None:
-                meta_out["usage"] = stream_usage
+                if stream_usage_raw:
+                    meta_out["usage"] = _extract_usage_counts(stream_usage_raw, provider_format="anthropic")
+                if stop_reason:
+                    meta_out["finish_reason"] = stop_reason
             return "".join(parts).strip()
 
         resp = await http.post(url, **post_kwargs)
         if resp.status_code >= 400:
             raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()
-        if meta_out is not None and isinstance(data.get("usage"), dict):
-            meta_out["usage"] = _extract_usage_counts(data["usage"])
+        if meta_out is not None:
+            if isinstance(data.get("usage"), dict):
+                meta_out["usage"] = _extract_usage_counts(data["usage"], provider_format="anthropic")
+            if isinstance(data.get("stop_reason"), str):
+                meta_out["finish_reason"] = data["stop_reason"]
         blocks = data.get("content") or []
         return "".join(
             str(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") == "text"
@@ -2204,7 +2352,10 @@ class InterviewCopilotLLM:
                 kwargs["extra_body"] = extra_body
 
             if on_delta is not None:
-                stream = await client.chat.completions.create(**kwargs, stream=True, timeout=timeout)
+                stream_kwargs = dict(kwargs)
+                if is_openai_direct or self.config.provider == "openrouter":
+                    stream_kwargs["stream_options"] = {"include_usage": True}
+                stream = await client.chat.completions.create(**stream_kwargs, stream=True, timeout=timeout)
                 parts: list[str] = []
                 async for chunk in stream:
                     chunk_usage = getattr(chunk, "usage", None)
@@ -2212,6 +2363,9 @@ class InterviewCopilotLLM:
                         meta["usage"] = _extract_usage_counts(chunk_usage)
                     if not chunk.choices:
                         continue
+                    fr = getattr(chunk.choices[0], "finish_reason", None)
+                    if isinstance(fr, str) and fr:
+                        meta["finish_reason"] = fr
                     delta = chunk.choices[0].delta.content
                     if delta:
                         parts.append(delta)
@@ -2224,10 +2378,14 @@ class InterviewCopilotLLM:
             resp_usage = getattr(resp, "usage", None)
             if resp_usage is not None:
                 meta["usage"] = _extract_usage_counts(resp_usage)
+            fr = getattr(resp.choices[0], "finish_reason", None) if resp.choices else None
+            if isinstance(fr, str) and fr:
+                meta["finish_reason"] = fr
             out = (resp.choices[0].message.content or "").strip()
             ok = True
             return out
         finally:
+            self._last_finish_reason: str | None = meta.get("finish_reason")
             self._record_usage(
                 operation=operation,
                 transport=transport,
@@ -3401,7 +3559,7 @@ class InterviewCopilotLLM:
             try:
                 parsed = _extract_json_object(raw)
             except json.JSONDecodeError as parse_exc:
-                looks_truncated = raw.lstrip().startswith("{") and not raw.rstrip().endswith("}")
+                looks_truncated = _looks_like_truncated_json(raw, getattr(self, "_last_finish_reason", None))
                 retry_max_tokens = min(4800, debrief_max_tokens + 1200) if looks_truncated else debrief_max_tokens
                 logger.warning(
                     "LLM generate_practice_debrief returned malformed JSON (%s; truncated=%s); retrying once at temperature=0.0",
