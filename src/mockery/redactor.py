@@ -119,7 +119,13 @@ _CITY_STATE_RE = re.compile(
 _CITY_STATE_CAPTURE_RE = re.compile(r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)?),[ \t]*[A-Z]{2}\b")
 _CITY_STATE_EXACT_RE = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?,\s*[A-Z]{2}$")
 _HEADER_SPLIT_RE = re.compile(r"\s*[|•·—–]\s*")
+_MD_HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
 _NAME_TOKEN_RE = re.compile(r"^[A-Z][a-zA-Z'.\-]{1,24}$")
+_NAME_PARTICLES = {
+    "al", "ben", "bin", "da", "de", "del", "della", "di", "du",
+    "el", "ibn", "la", "le", "mac", "mc", "van", "von",
+}
+_ZIP_CLEAN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 \-]{3,10}$")
 _EMPTY_PARENS_RE = re.compile(r"\(\s*\)")
 _SEP_SPLIT_RE = re.compile(r"\s*(?:\||—|–|·|•|\t)\s*")
 _WS_RE = re.compile(r"\s+")
@@ -746,7 +752,12 @@ class RampartRedactor:
                 else:
                     prefix, ent = "B", tag
 
-                if prefix == "B" or cur_label != ent or s > cur_end + 1:
+                crossed_newline = (
+                    cur_label is not None
+                    and 0 <= cur_end <= s <= len(norm_text)
+                    and "\n" in norm_text[cur_end:s]
+                )
+                if prefix == "B" or cur_label != ent or s > cur_end + 1 or crossed_newline:
                     _flush()
                     cur_label = ent
                     cur_start = s
@@ -786,7 +797,7 @@ class RampartRedactor:
                     continue
             repaired.append(sp)
 
-        # Normalize single-token GIVEN_NAME/SURNAME and avoid redacting common tech nouns
+        # Normalize single-token GIVEN_NAME/SURNAME and filter obvious uncased-BERT false positives
         cleaned: list[DetectedSpan] = []
         for sp in repaired:
             frag = text[sp.start : sp.end].strip()
@@ -796,8 +807,23 @@ class RampartRedactor:
                 sp.label = "PERSON_NAME"
             elif sp.label in ADDRESS_LABELS:
                 sp.label = "STREET_ADDRESS"
-            if sp.label == "PERSON_NAME" and frag.lower() in _TECH_STOPWORDS:
-                continue
+            if sp.label == "PERSON_NAME":
+                if frag.lower() in _TECH_STOPWORDS:
+                    continue
+                words = frag.split()
+                if (
+                    len(words) >= 2
+                    and words[0][0].islower()
+                    and words[0].lower() not in _NAME_PARTICLES
+                    and any(w[0].isupper() for w in words[1:] if w)
+                ):
+                    continue
+            elif sp.label == "ZIP_CODE":
+                trailing = text[sp.end : sp.end + 1]
+                if "." in frag or trailing == "%" or not _ZIP_CLEAN_RE.match(frag):
+                    continue
+                if sum(ch.isdigit() for ch in frag) < 3:
+                    continue
             cleaned.append(sp)
 
         frozen = tuple((sp.start, sp.end, sp.label, sp.source) for sp in cleaned)
@@ -837,8 +863,10 @@ class RampartRedactor:
 
     def _detect_header_candidate_name(self, text: str) -> list[DetectedSpan]:
         """
-        Resume-specific fallback when Rampart isn't downloaded yet: the very first non-empty line
-        of a resume (2–4 capitalized name tokens without digits/role words) is almost always the candidate's name.
+        Deterministic resume-header name recognizer (always run alongside Rampart):
+        the first non-empty line of a resume (2–4 capitalized name tokens without digits/role words)
+        is reliably the candidate's name, and any exact repeated occurrence of that full name
+        later in the document (e.g. summary or page-2 header) is redacted as well.
         """
         offset = 0
         for line in text.splitlines(keepends=True)[:4]:
@@ -846,8 +874,9 @@ class RampartRedactor:
             if not stripped:
                 offset += len(line)
                 continue
+            cleaned = _MD_HEADING_PREFIX_RE.sub("", stripped)
             # Take prefix before '|' or '•' or '—' if contact info shares line 1
-            head = _HEADER_SPLIT_RE.split(stripped)[0].strip()
+            head = _HEADER_SPLIT_RE.split(cleaned)[0].strip()
             words = head.split()
             if (
                 2 <= len(words) <= 4
@@ -857,14 +886,19 @@ class RampartRedactor:
             ):
                 pos = line.find(head)
                 if pos >= 0:
-                    return [
-                        DetectedSpan(
-                            offset + pos,
-                            offset + pos + len(head),
-                            "PERSON_NAME",
-                            "rules",
-                        )
-                    ]
+                    header_start = offset + pos
+                    header_end = header_start + len(head)
+                    spans = [DetectedSpan(header_start, header_end, "PERSON_NAME", "rules")]
+                    # Propagate exact full-name occurrences elsewhere in the resume
+                    name_pat = re.compile(
+                        r"(?<!\w)" + r"\s+".join(re.escape(w) for w in words) + r"(?!\w)",
+                        re.IGNORECASE,
+                    )
+                    for m in name_pat.finditer(text):
+                        if m.start() == header_start and m.end() == header_end:
+                            continue
+                        spans.append(DetectedSpan(m.start(), m.end(), "PERSON_NAME", "rules"))
+                    return spans
             break
         return []
 
@@ -970,9 +1004,23 @@ class RampartRedactor:
             used_rampart = self._session is not None
 
         rule_spans = self._run_deterministic_rules(text)
-        has_header_name = any(sp.label in NAME_LABELS and sp.start < 160 for sp in rampart_spans)
-        if not has_header_name:
-            rule_spans.extend(self._detect_header_candidate_name(text))
+        # Always run deterministic header-name detection alongside Rampart so a false-positive
+        # or partial Rampart PERSON_NAME early in the resume (e.g. "Francisco" in "San Francisco, CA"
+        # or a surname-only hit) can never suppress redaction of the candidate's full name.
+        rule_spans.extend(self._detect_header_candidate_name(text))
+
+        # Suppress Rampart sub-spans contained inside deterministic city/ZIP locations
+        # (e.g. Rampart tagging "Francisco" inside "San Francisco, CA" as PERSON_NAME).
+        deterministic_loc_ranges = [
+            (sp.start, sp.end) for sp in rule_spans if sp.label in LOCATION_LABELS
+        ]
+        if deterministic_loc_ranges and rampart_spans:
+            rampart_spans = [
+                sp
+                for sp in rampart_spans
+                if sp.label in LOCATION_LABELS
+                or not any(ls <= sp.start and sp.end <= le for ls, le in deterministic_loc_ranges)
+            ]
 
         location_spans = [sp for sp in rampart_spans if sp.label in LOCATION_LABELS]
 
