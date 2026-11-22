@@ -142,6 +142,81 @@ def test_redactor_rampart_onnx_if_cached() -> None:
     assert "Python" in res.redacted_text
     assert "TypeScript" in res.redacted_text
 
+    # Regression: smart scrubber must never miss the candidate's header name when Rampart
+    # emits an early PERSON_NAME (e.g. "Francisco" inside "San Francisco, CA" or a partial/body hit),
+    # must keep "San Francisco, CA" intact when keep_location=True, and must not mis-tag
+    # decimal availability percentages or lowercase+product phrases.
+    sf_resume = (
+        "Jordan Vance\n"
+        "San Francisco, CA | jordan.vance@finscale.io | (415) 555-0194 | https://github.com/jordanvance\n\n"
+        "EXPERIENCE\n"
+        "Staff Backend Engineer, FinScale Payments (2022–Present)\n"
+        "- Architected a multi-region double-entry ledger handling 48,000 TPS at 99.995% availability.\n"
+        "- Led zero-downtime migration from monolithic Postgres settlement tables to sharded Spanner partitions.\n"
+    )
+    sf_res = redactor.redact(
+        sf_resume,
+        keep_location=True,
+        hide_employers_and_schools=False,
+        use_rampart=True,
+    )
+    assert sf_res.engine == "rampart+rules"
+    assert "Jordan Vance" not in sf_res.redacted_text
+    assert sf_res.redacted_text.startswith("[PERSON_NAME_1]\n")
+    assert "San Francisco, CA" in sf_res.redacted_text
+    assert "sharded Spanner" in sf_res.redacted_text
+    assert "99.995%" in sf_res.redacted_text
+
+    # Regression: single-line header contact, Markdown heading, newline boundary, and repeated bio name
+    for sample, must_hide, must_keep in [
+        (
+            "Alex Rivera | alex@example.com | (206) 555-0111\n\nEXPERIENCE\nSoftware Engineer",
+            ["Alex", "Rivera", "alex@example.com"],
+            ["Software Engineer"],
+        ),
+        (
+            "Elena Rostova\nSeattle, WA | elena@example.com\n\nEXPERIENCE\nStaff Engineer",
+            ["Elena", "Rostova", "elena@example.com"],
+            ["Seattle, WA"],
+        ),
+        (
+            "# Jordan Rivera\nAustin, TX | jordan@example.org\n\nSUMMARY\nJordan Rivera is a Staff Engineer.",
+            ["Jordan", "Rivera", "jordan@example.org"],
+            ["Austin, TX", "Staff Engineer"],
+        ),
+    ]:
+        out = redactor.redact(sample, keep_location=True, use_rampart=True)
+        for secret in must_hide:
+            assert secret not in out.redacted_text, f"{secret!r} leaked in {out.redacted_text!r}"
+        for keep in must_keep:
+            assert keep in out.redacted_text, f"{keep!r} unexpectedly scrubbed in {out.redacted_text!r}"
+
+
+def test_redactor_header_name_not_suppressed_by_early_rampart_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even without cached ONNX weights, verify early Rampart hits never suppress header-name redaction."""
+    from mockery.redactor import DetectedSpan
+
+    redactor = RampartRedactor()
+    sample = (
+        "Jordan Vance\n"
+        "San Francisco, CA | jordan.vance@finscale.io | (415) 555-0194\n\n"
+        "SUMMARY\n"
+        "Jordan Vance builds payment ledgers.\n"
+    )
+    monkeypatch.setattr(redactor, "is_downloaded", lambda: True)
+    monkeypatch.setattr(
+        redactor,
+        "_run_rampart_onnx",
+        lambda _text: [DetectedSpan(17, 26, "PERSON_NAME", "rampart")],  # "Francisco"
+    )
+    redactor._session = object()  # mark engine as rampart+rules for test
+
+    res = redactor.redact(sample, keep_location=True, use_rampart=True)
+    assert res.engine == "rampart+rules"
+    assert "Jordan Vance" not in res.redacted_text
+    assert res.redacted_text.count("[PERSON_NAME_1]") == 2
+    assert "San Francisco, CA" in res.redacted_text
+
 
 def test_jd_cleaner_and_ssrf_guard() -> None:
     cleaned = clean_job_listing_text(SYNTHETIC_JD)
