@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from mockery.llm import _extract_json_object
+from mockery.llm import _extract_json_object, _head_tail_excerpt
 from mockery.prompts import (
     practice_tone_instruction,
     probe_guidance_for,
@@ -385,7 +385,7 @@ def build_practice_debrief_user_prompt(example: dict[str, Any]) -> str:
             for t in turns
             if str(t.get("question_id") or "") == qid and t.get("role") in ("interviewer", "candidate")
         ]
-        excerpt = "\n".join(q_lines)[:per_q_budget]
+        excerpt = _head_tail_excerpt("\n".join(q_lines), per_q_budget)
         transcript_sections.append(f"### [{qid}] {q.get('title', 'Question')}\n{excerpt}")
 
     ws_block = ""

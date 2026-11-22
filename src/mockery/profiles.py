@@ -96,8 +96,12 @@ class CandidateProfileStore:
         self.profile_path = self.profiles_dir / "profile.json"
         self.redactor = redactor
         self._lock = threading.Lock()
+        self._prefs_lock = threading.Lock()
         self._resume_revision = 0
         self._state = self._load()
+        self._active_doc_token: str | None = (
+            short_id("doc") if self._state.resume is not None else None
+        )
 
     def _load(self) -> CandidateProfileState:
         if not self.profile_path.is_file():
@@ -162,12 +166,20 @@ class CandidateProfileStore:
         raw_text: str,
         prefs: ResumeRedactionPrefs | None = None,
     ) -> ResumeProfile | None:
+        doc_token = short_id("doc")
         with self._lock:
             self._resume_revision += 1
             rev = self._resume_revision
-            effective_prefs = prefs or (
-                self._state.resume.prefs if self._state.resume is not None else ResumeRedactionPrefs()
-            )
+            if prefs is not None:
+                effective_prefs = prefs
+            elif self._state.resume is not None:
+                # Preserve general redaction preferences across uploads, but never carry
+                # per-document `unredacted_values` overrides onto a newly uploaded resume.
+                effective_prefs = self._state.resume.prefs.model_copy(
+                    update={"unredacted_values": []}
+                )
+            else:
+                effective_prefs = ResumeRedactionPrefs()
 
         res: RedactionResult = self.redactor.redact(
             raw_text,
@@ -194,14 +206,16 @@ class CandidateProfileStore:
                 # A newer upload or delete superseded this redaction pass; do not overwrite/resurrect.
                 return self._state.resume
             self._state.resume = profile
+            self._active_doc_token = doc_token
             self._save_locked()
             return profile
 
-    def update_redaction_prefs(self, prefs: ResumeRedactionPrefs) -> ResumeProfile | None:
+    def _update_redaction_prefs_serialized(self, prefs: ResumeRedactionPrefs) -> ResumeProfile | None:
         with self._lock:
-            if self._state.resume is None:
+            if self._state.resume is None or self._active_doc_token is None:
                 return None
             rev = self._resume_revision
+            doc_token = self._active_doc_token
             filename = self._state.resume.filename
             raw_text = self._state.resume.raw_text
 
@@ -226,38 +240,48 @@ class CandidateProfileStore:
             updated_at_ms=int(time.time() * 1000),
         )
         with self._lock:
-            if self._resume_revision != rev or self._state.resume is None:
+            if (
+                self._resume_revision != rev
+                or self._active_doc_token != doc_token
+                or self._state.resume is None
+            ):
                 return self._state.resume
             self._state.resume = profile
             self._save_locked()
             return profile
 
+    def update_redaction_prefs(self, prefs: ResumeRedactionPrefs) -> ResumeProfile | None:
+        with self._prefs_lock:
+            return self._update_redaction_prefs_serialized(prefs)
+
     def toggle_span_redaction(self, span_id: str) -> ResumeProfile | None:
         """Toggle redaction on/off for a detected span server-side without exposing hidden PII to HTTP callers."""
-        with self._lock:
-            r = self._state.resume
-            if r is None:
-                return None
-            target_span = next((sp for sp in r.spans if sp.get("id") == span_id), None)
-            if target_span is None:
-                return None
-            orig = str(target_span.get("original") or "")
-            target_norm = re.sub(r"\s+", " ", orig.strip()).lower()
-            cur_unredacted = list(r.prefs.unredacted_values)
-            idx = next(
-                (i for i, v in enumerate(cur_unredacted) if re.sub(r"\s+", " ", v.strip()).lower() == target_norm),
-                -1,
-            )
-            if idx >= 0:
-                cur_unredacted.pop(idx)
-            else:
-                cur_unredacted.append(orig)
-            next_prefs = r.prefs.model_copy(update={"unredacted_values": cur_unredacted})
-        return self.update_redaction_prefs(next_prefs)
+        with self._prefs_lock:
+            with self._lock:
+                r = self._state.resume
+                if r is None:
+                    return None
+                target_span = next((sp for sp in r.spans if sp.get("id") == span_id), None)
+                if target_span is None:
+                    return None
+                orig = str(target_span.get("original") or "")
+                target_norm = re.sub(r"\s+", " ", orig.strip()).lower()
+                cur_unredacted = list(r.prefs.unredacted_values)
+                idx = next(
+                    (i for i, v in enumerate(cur_unredacted) if re.sub(r"\s+", " ", v.strip()).lower() == target_norm),
+                    -1,
+                )
+                if idx >= 0:
+                    cur_unredacted.pop(idx)
+                else:
+                    cur_unredacted.append(orig)
+                next_prefs = r.prefs.model_copy(update={"unredacted_values": cur_unredacted})
+            return self._update_redaction_prefs_serialized(next_prefs)
 
     def clear_resume(self) -> None:
         with self._lock:
             self._resume_revision += 1
+            self._active_doc_token = None
             self._state.resume = None
             self._save_locked()
 

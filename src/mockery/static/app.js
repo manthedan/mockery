@@ -224,6 +224,9 @@ function initTheme() {
 
 /* ---------------- Core State Helpers ---------------- */
 
+let _wsHadConnected = false;
+let _wsLostConnection = false;
+
 const wsMachine = createMachine({
   name: "ws_transport",
   initial: "connecting",
@@ -234,9 +237,14 @@ const wsMachine = createMachine({
     state.wsState = next;
     renderConnectionIndicator();
     if (next === "reconnecting" && prev === "connected") {
+      _wsLostConnection = true;
       showToast("Lost the connection. Reconnecting…", 3000);
-    } else if (next === "connected" && prev !== "connecting") {
-      showToast("Reconnected.", 2000);
+    } else if (next === "connected") {
+      if (_wsHadConnected && _wsLostConnection) {
+        showToast("Reconnected.", 2000);
+      }
+      _wsHadConnected = true;
+      _wsLostConnection = false;
     }
   },
 });
@@ -254,15 +262,49 @@ const captureMachine = createMachine({
   },
 });
 
+let _lastModalTrigger = null;
+
+function _modalRootFor(modalName) {
+  if (modalName === "settings") return el("settingsModal");
+  if (modalName === "history") return el("historyModal");
+  if (modalName === "onboarding") return el("onboardingModal");
+  if (modalName === "profile") return el("profileModal");
+  return null;
+}
+
+function _focusableIn(root) {
+  if (!root) return [];
+  return [...root.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )].filter((node) => node.offsetParent !== null && !node.closest(".hidden"));
+}
+
 const modalCtrl = createModalTokenController({
   initial: "none",
   registry: clientMachines,
   onChange: (next, prev) => {
+    if (prev === "none" && next !== "none") {
+      _lastModalTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
     state.modalState = next;
     el("settingsModal")?.classList.toggle("hidden", next !== "settings");
     el("historyModal")?.classList.toggle("hidden", next !== "history");
     el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
     el("profileModal")?.classList.toggle("hidden", next !== "profile");
+    if (next !== "none") {
+      const root = _modalRootFor(next);
+      const focusables = _focusableIn(root);
+      if (focusables.length > 0 && root && !root.contains(document.activeElement)) {
+        focusables[0].focus({ preventScroll: true });
+      }
+    } else if (prev !== "none" && _lastModalTrigger?.isConnected) {
+      try {
+        _lastModalTrigger.focus({ preventScroll: true });
+      } catch {
+        /* ignore */
+      }
+      _lastModalTrigger = null;
+    }
     if (prev === "onboarding" && next !== "onboarding") {
       if (state.onboardStep === "packs") {
         try {
@@ -835,6 +877,14 @@ async function acquireRemoteMeetStreams() {
       stopCaptureSession();
     }
   };
+  for (const micTrack of micStream.getAudioTracks()) {
+    micTrack.onended = () => {
+      if (state.captureState === "streaming") {
+        showToast("Microphone disconnected — saving captured audio.", 3500);
+        stopCaptureSession();
+      }
+    };
+  }
 
   return [
     { ctx: sharedCtx, stream: micStream, channelId: CHANNEL_INTERVIEWER, meterId: "meterYou" },
@@ -853,6 +903,14 @@ async function acquireSingleMicStreams() {
   });
   try {
     const sharedCtx = await ensureSharedAudioContext();
+    for (const micTrack of micStream.getAudioTracks()) {
+      micTrack.onended = () => {
+        if (state.captureState === "streaming") {
+          showToast("Microphone disconnected — saving captured audio.", 3500);
+          stopCaptureSession();
+        }
+      };
+    }
     return [{ ctx: sharedCtx, stream: micStream, channelId: CHANNEL_ROOM_MIC, meterId: "meterYou" }];
   } catch (err) {
     micStream.getTracks().forEach((t) => t.stop());
@@ -4042,13 +4100,13 @@ function initEvents() {
   el("swapAllSpeakersBtn").onclick = triggerSwapAll;
   el("menuSwapSpeakersBtn").onclick = triggerSwapAll;
 
-  el("newSessionBtn").onclick = () => {
+  el("newSessionBtn").onclick = async () => {
     closeAllPopovers();
     state.pendingNewSession = true;
     state.forceWorkspace = false;
     state.activeCitationUttId = null;
     if (state.captureState === "streaming") {
-      stopCaptureSession({ flush: false });
+      await stopCaptureSession({ flush: true });
     }
     state.selectedQaId = null;
     state.baseElapsedMs = 0;
@@ -4458,11 +4516,42 @@ function initEvents() {
     el("manualRoleSelect").value = speaker === "interviewer" ? "candidate" : "interviewer";
   };
 
+  window.addEventListener("beforeunload", (ev) => {
+    const unsavedPractice = Boolean(practiceStudio?.hasUnsavedWork?.());
+    if (state.captureState === "streaming" || unsavedPractice) {
+      ev.preventDefault();
+      ev.returnValue = "";
+    }
+  });
+
   window.addEventListener("keydown", (ev) => {
+    if (state.modalState !== "none" && ev.key === "Tab") {
+      const root = _modalRootFor(state.modalState);
+      const focusables = _focusableIn(root);
+      if (focusables.length > 0) {
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (ev.shiftKey) {
+          if (document.activeElement === first || !root.contains(document.activeElement)) {
+            ev.preventDefault();
+            last.focus();
+          }
+        } else if (document.activeElement === last || !root.contains(document.activeElement)) {
+          ev.preventDefault();
+          first.focus();
+        }
+      }
+      return;
+    }
+
     if (ev.key === "Escape") {
       if (state.modalState !== "none") {
         ev.preventDefault();
         setModalState("none");
+        return;
+      }
+      if (state.practiceActive && practiceStudio?.handleEscape?.()) {
+        ev.preventDefault();
         return;
       }
       closeAllPopovers();
@@ -4476,10 +4565,35 @@ function initEvents() {
     }
 
     const tag = (ev.target?.tagName || "").toUpperCase();
-    const isTyping = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-    if (isTyping || state.modalState !== "none" || state.practiceActive) return;
+    const isTyping =
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      Boolean(ev.target?.isContentEditable);
+    if (isTyping || state.modalState !== "none") return;
 
-    if ((ev.key === "d" || ev.key === "D") && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+    if (state.practiceActive) {
+      if (
+        (ev.key === "m" || ev.key === "M") &&
+        !ev.repeat &&
+        !ev.metaKey &&
+        !ev.ctrlKey &&
+        !ev.altKey &&
+        tag !== "BUTTON" &&
+        tag !== "A"
+      ) {
+        if (practiceStudio?.toggleVoiceShortcut?.()) {
+          ev.preventDefault();
+        }
+      }
+      return;
+    }
+
+    const copilotWorkspaceVisible =
+      el("workspaceGrid") && !el("workspaceGrid").classList.contains("hidden");
+    if (!copilotWorkspaceVisible) return;
+
+    if ((ev.key === "d" || ev.key === "D") && !ev.repeat && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
       ev.preventDefault();
       const qas = state.session?.qa_groups_resolved || [];
       const selectedQa = qas.find((q) => q.id === state.selectedQaId);
@@ -4497,15 +4611,22 @@ function initEvents() {
         ev.preventDefault();
         toggleProbeAsked(key);
       }
-    } else if (ev.key === "n" || ev.key === "N") {
+    } else if ((ev.key === "n" || ev.key === "N") && !ev.repeat && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
       ev.preventDefault();
       if (allowedEventsSet().has("force_new_card")) {
         sendCmd({ type: "force_new_card" });
       }
-    } else if (ev.key === "Tab" && el("modeSelect").value === "in_person") {
-      ev.preventDefault();
-      const next = state.manualSpeaker === "interviewer" ? "candidate" : "interviewer";
-      sendCmd({ type: "set_manual_speaker", speaker: next });
+    } else if (ev.key === "Tab" && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+      const autoDiarize = Boolean(state.session?.config?.auto_diarize ?? true);
+      const diarizerReady = Boolean(state.diarizer?.embedder_ready);
+      const manualMode =
+        el("modeSelect").value === "in_person" &&
+        !(autoDiarize && diarizerReady && !state.diarizer?.manual_override);
+      if (state.captureState === "streaming" && manualMode) {
+        ev.preventDefault();
+        const next = state.manualSpeaker === "interviewer" ? "candidate" : "interviewer";
+        sendCmd({ type: "set_manual_speaker", speaker: next });
+      }
     }
   });
 }

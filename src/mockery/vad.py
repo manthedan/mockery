@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 from typing import Literal
 
 import numpy as np
@@ -27,27 +28,74 @@ class VADEvent:
 
 
 class SileroVADRuntime:
-    """Shared lightweight ONNX runtime for Silero VAD v5 (~2.2MB, CPU-instant)."""
+    """Shared lightweight ONNX runtime for Silero VAD v5 (~2.2MB, CPU-instant, lazy-loaded)."""
 
-    def __init__(self, repo_id: str = "onnx-community/silero-vad", filename: str = "onnx/model.onnx") -> None:
-        try:
-            model_path = hf_hub_download(
-                repo_id=repo_id, filename=filename, local_files_only=True
-            )
-        except Exception:
-            model_path = hf_hub_download(repo_id=repo_id, filename=filename)
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 1
-        opts.inter_op_num_threads = 1
-        self._session = ort.InferenceSession(
-            model_path,
-            sess_options=opts,
-            providers=["CPUExecutionProvider"],
-        )
+    def __init__(
+        self,
+        repo_id: str = "onnx-community/silero-vad",
+        filename: str = "onnx/model.onnx",
+        *,
+        eager: bool = False,
+    ) -> None:
+        self._repo_id = repo_id
+        self._filename = filename
+        self._lock = threading.Lock()
+        self._session: ort.InferenceSession | None = None
+        self._error: str | None = None
         self._sr = np.array(SAMPLE_RATE, dtype=np.int64)
+        if eager:
+            self.ensure_loaded()
+
+    @property
+    def is_ready(self) -> bool:
+        return self._session is not None
+
+    @property
+    def error_message(self) -> str | None:
+        return self._error
+
+    def status_dict(self) -> dict[str, object]:
+        return {
+            "ready": self._session is not None,
+            "error": self._error,
+        }
+
+    def ensure_loaded(self) -> ort.InferenceSession:
+        sess = self._session
+        if sess is not None:
+            return sess
+        with self._lock:
+            if self._session is not None:
+                return self._session
+            try:
+                try:
+                    model_path = hf_hub_download(
+                        repo_id=self._repo_id,
+                        filename=self._filename,
+                        local_files_only=True,
+                    )
+                except Exception:
+                    model_path = hf_hub_download(
+                        repo_id=self._repo_id,
+                        filename=self._filename,
+                    )
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = 1
+                opts.inter_op_num_threads = 1
+                self._session = ort.InferenceSession(
+                    model_path,
+                    sess_options=opts,
+                    providers=["CPUExecutionProvider"],
+                )
+                self._error = None
+                return self._session
+            except Exception as exc:
+                self._error = str(exc)
+                raise
 
     def step(self, frame_with_context: np.ndarray, state: np.ndarray) -> tuple[float, np.ndarray]:
-        out, next_state = self._session.run(
+        session = self.ensure_loaded()
+        out, next_state = session.run(
             None,
             {
                 "input": frame_with_context,

@@ -891,8 +891,13 @@ class LocalTTSEngine:
         worker = threading.Thread(target=_producer, name="phonon-tts-stream", daemon=True)
         worker.start()
 
-        # Pull the very first chunk eagerly (~29ms) so startup errors fall back cleanly before headers are sent
-        kind, payload = await queue.get()
+        # Pull the very first chunk eagerly (~29ms) so startup errors fall back cleanly before headers are sent.
+        # Guard with BaseException so task cancellation during startup always signals stop_event and releases _phonon_lock.
+        try:
+            kind, payload = await queue.get()
+        except BaseException:
+            stop_event.set()
+            raise
         if kind == "error":
             stop_event.set()
             with self._phonon_lock:
@@ -901,32 +906,61 @@ class LocalTTSEngine:
             logger.warning("Phonon-31M stream failed on first chunk; falling back: %s", payload)
             return None
         if kind == "done":
+            stop_event.set()
             return None
 
         first_chunk: bytes = payload
 
-        async def _phonon_gen() -> AsyncIterator[bytes]:
-            collected: list[bytes] = [first_chunk]
-            completed = False
-            try:
-                yield first_chunk
-                while True:
-                    k, val = await queue.get()
-                    if k == "chunk":
-                        collected.append(val)
-                        yield val
-                    elif k == "done":
-                        completed = True
-                        break
-                    else:
-                        logger.warning("Phonon-31M stream errored mid-utterance: %s", val)
-                        break
-            finally:
-                stop_event.set()
-            if completed:
-                self._cache_put(cache_key, b"".join(collected), sr)
+        class _ManagedPhononStream:
+            def __init__(self) -> None:
+                self._closed = False
+                self._gen = self._iterate()
 
-        return sr, _phonon_gen()
+            def close(self) -> None:
+                if not self._closed:
+                    self._closed = True
+                    stop_event.set()
+
+            async def aclose(self) -> None:
+                self.close()
+                await self._gen.aclose()
+
+            def __aiter__(self) -> AsyncIterator[bytes]:
+                return self
+
+            async def __anext__(self) -> bytes:
+                try:
+                    return await self._gen.__anext__()
+                except BaseException:
+                    self.close()
+                    raise
+
+            def __del__(self) -> None:
+                self.close()
+
+            async def _iterate(self) -> AsyncIterator[bytes]:
+                collected: list[bytes] = [first_chunk]
+                completed = False
+                try:
+                    yield first_chunk
+                    while not self._closed:
+                        k, val = await queue.get()
+                        if k == "chunk":
+                            collected.append(val)
+                            yield val
+                        elif k == "done":
+                            completed = True
+                            break
+                        else:
+                            logger.warning("Phonon-31M stream errored mid-utterance: %s", val)
+                            break
+                finally:
+                    self.close()
+                if completed:
+                    self_engine._cache_put(cache_key, b"".join(collected), sr)
+
+        self_engine = self
+        return sr, _ManagedPhononStream()
 
     async def open_pcm_stream(
         self,

@@ -2,7 +2,21 @@ from __future__ import annotations
 
 import os
 import sys
+import tomllib
 from pathlib import Path
+
+
+def _is_mockery_checkout(directory: Path) -> bool:
+    """Return True only when `directory` is an actual Mockery source checkout."""
+    pyproject = directory / "pyproject.toml"
+    if not pyproject.is_file() or not (directory / "src" / "mockery").is_dir():
+        return False
+    try:
+        parsed = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        project = parsed.get("project")
+        return isinstance(project, dict) and str(project.get("name") or "").strip().lower() == "mockery"
+    except Exception:
+        return False
 
 
 def resolve_data_root(explicit_root: Path | None = None) -> Path:
@@ -12,14 +26,16 @@ def resolve_data_root(explicit_root: Path | None = None) -> Path:
     Priority:
       1. Explicit `explicit_root` argument (used by tests and custom callers).
       2. `MOCKERY_HOME` environment variable.
-      3. Local dev checkout detection: if CWD contains `pyproject.toml`,
-         `sessions/`, or `.env.local`, use CWD so developers keep repo-local data.
+      3. Local Mockery dev checkout detection (requires `pyproject.toml` with
+         `project.name == "mockery"` and `src/mockery/`).
       4. Standard OS app-data directory:
          - macOS: `~/Library/Application Support/Mockery`
          - Linux / other: `$XDG_DATA_HOME/mockery` or `~/.local/share/mockery`
     """
     if explicit_root is not None:
-        return Path(explicit_root).expanduser().resolve()
+        root = Path(explicit_root).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
     env_home = os.getenv("MOCKERY_HOME", "").strip()
     if env_home:
@@ -28,7 +44,7 @@ def resolve_data_root(explicit_root: Path | None = None) -> Path:
         return root
 
     cwd = Path.cwd()
-    if (cwd / "pyproject.toml").exists() or (cwd / "sessions").is_dir() or (cwd / ".env.local").exists():
+    if _is_mockery_checkout(cwd):
         return cwd
 
     if sys.platform == "darwin":

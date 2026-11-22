@@ -50,21 +50,35 @@ else
 fi
 
 # 4. Install double-clickable /Applications/Mockery.app
+APP_BUILT=0
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/scripts/build_macos_app.py" ]; then
   info "Building and installing $APP_DEST..."
-  uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/build_macos_app.py" --install
+  if uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/build_macos_app.py" --install; then
+    APP_BUILT=1
+  fi
 else
   info "Creating $APP_DEST..."
   TMP_BUILD="$(mktemp -d)"
   trap 'rm -rf "$TMP_BUILD"' EXIT
-  if command -v git >/dev/null 2>&1; then
-    git clone --depth 1 "$REPO_URL" "$TMP_BUILD/mockery" >/dev/null 2>&1
-    python3 "$TMP_BUILD/mockery/scripts/build_macos_app.py" --install || true
+  # Only run git clone when real git is present (avoid triggering macOS Xcode CLT stub popup)
+  if command -v git >/dev/null 2>&1 && ( [ -x /opt/homebrew/bin/git ] || [ -x /usr/local/bin/git ] || xcode-select -p >/dev/null 2>&1 ); then
+    if git clone --depth 1 "$REPO_URL" "$TMP_BUILD/mockery" >/dev/null 2>&1; then
+      UV_PY="$(uv python find 3.12 2>/dev/null || true)"
+      if [ -n "$UV_PY" ] && "$UV_PY" "$TMP_BUILD/mockery/scripts/build_macos_app.py" --install; then
+        APP_BUILT=1
+      elif uv run --python 3.12 python "$TMP_BUILD/mockery/scripts/build_macos_app.py" --install; then
+        APP_BUILT=1
+      else
+        warn "Could not compile native menu bar app; falling back to shell launcher..."
+      fi
+    fi
   fi
-  # Zero-dependency fallback if python3/git didn't build the .app
-  if [ ! -d "$APP_DEST" ]; then
-    mkdir -p "$APP_DEST/Contents/MacOS" "$APP_DEST/Contents/Resources"
-    cat >"$APP_DEST/Contents/MacOS/Mockery" <<'LAUNCHER'
+  # Zero-dependency fallback when git/Swift build did not produce the .app
+  if [ "$APP_BUILT" -ne 1 ]; then
+    STAGING_APP="/Applications/.Mockery.app.staging"
+    rm -rf "$STAGING_APP"
+    mkdir -p "$STAGING_APP/Contents/MacOS" "$STAGING_APP/Contents/Resources"
+    cat >"$STAGING_APP/Contents/MacOS/Mockery" <<'LAUNCHER'
 #!/bin/bash
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 DATA_DIR="$HOME/Library/Application Support/Mockery"
@@ -77,8 +91,8 @@ if curl -fsS http://127.0.0.1:8765/api/machines >/dev/null 2>&1; then
 fi
 nohup mockery --host 127.0.0.1 --port 8765 --data-dir "$DATA_DIR" >>"$LOG_DIR/server.log" 2>&1 &
 LAUNCHER
-    chmod +x "$APP_DEST/Contents/MacOS/Mockery"
-    cat >"$APP_DEST/Contents/Info.plist" <<'PLIST'
+    chmod +x "$STAGING_APP/Contents/MacOS/Mockery"
+    cat >"$STAGING_APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -100,7 +114,14 @@ LAUNCHER
 </dict>
 </plist>
 PLIST
+    rm -rf "$APP_DEST"
+    mv "$STAGING_APP" "$APP_DEST"
   fi
+fi
+
+if [ ! -x "$APP_DEST/Contents/MacOS/Mockery" ]; then
+  warn "Failed to install a valid $APP_DEST launcher."
+  exit 1
 fi
 
 echo ""
