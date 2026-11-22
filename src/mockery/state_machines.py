@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .models import InterviewSession, QAGroup
+    from .practice import PracticeSession
+    from .profiles import CandidateProfileState
 
 
 class InvalidStateTransitionError(ValueError):
@@ -34,6 +36,7 @@ class InvalidStateTransitionError(ValueError):
             "event": self.event,
             "allowed_events": self.allowed_events,
             "remediation": self.remediation,
+            "message": self.remediation,
         }
 
 
@@ -328,6 +331,424 @@ def validate_session_invariants(session: InterviewSession) -> list[str]:
     return violations
 
 
+# ---------------------------------------------------------------------------
+# 8. AI Practice Session Lifecycle State Machine
+# ---------------------------------------------------------------------------
+
+VALID_CARL_STATUSES: frozenset[str] = frozenset({"missing", "partial", "strong"})
+
+
+class PracticePhase(StrEnum):
+    ACTIVE = "active"  # Interview in progress; candidate answering current question
+    AWAITING_DEBRIEF = "awaiting_debrief"  # All questions finished; waiting to generate CARL debrief
+    DEBRIEFING = "debriefing"  # LLM actively generating structured CARL coaching debrief
+    COMPLETED = "completed"  # Debrief complete; read-only workspace + 45s retry drills enabled
+
+
+PRACTICE_PHASE_TRANSITIONS: dict[PracticePhase, set[PracticePhase]] = {
+    PracticePhase.ACTIVE: {
+        PracticePhase.ACTIVE,
+        PracticePhase.AWAITING_DEBRIEF,
+        PracticePhase.DEBRIEFING,
+    },
+    PracticePhase.AWAITING_DEBRIEF: {
+        PracticePhase.DEBRIEFING,
+    },
+    PracticePhase.DEBRIEFING: {
+        PracticePhase.COMPLETED,
+        PracticePhase.AWAITING_DEBRIEF,
+        PracticePhase.ACTIVE,
+    },
+    PracticePhase.COMPLETED: {
+        PracticePhase.COMPLETED,
+        PracticePhase.DEBRIEFING,
+    },
+}
+
+
+def derive_practice_phase(
+    session: PracticeSession,
+    *,
+    debrief_job: AsyncJobState = AsyncJobState.IDLE,
+) -> PracticePhase:
+    """Deterministically derives canonical `PracticePhase` from domain state + live debrief job."""
+    if debrief_job == AsyncJobState.RUNNING:
+        return PracticePhase.DEBRIEFING
+    if session.debrief is not None or session.phase == PracticePhase.COMPLETED.value:
+        return PracticePhase.COMPLETED
+    if (
+        session.phase == PracticePhase.AWAITING_DEBRIEF.value
+        or not session.questions
+        or session.current_question_index >= len(session.questions)
+        or all(q.status == "completed" for q in session.questions)
+    ):
+        return PracticePhase.AWAITING_DEBRIEF
+    return PracticePhase.ACTIVE
+
+
+def compute_allowed_practice_events(
+    session: PracticeSession,
+    *,
+    phase: PracticePhase,
+) -> tuple[list[str], dict[str, str]]:
+    """Returns `(allowed_events, blocked_reasons)` for Practice Mode UX controls and AX callers."""
+    allowed: list[str] = []
+    blocked: dict[str, str] = {}
+
+    if phase == PracticePhase.DEBRIEFING:
+        msg = "Wait for the CARL Debrief to finish generating."
+        for ev in (
+            "submit_turn",
+            "request_hint",
+            "advance_question",
+            "update_workspace",
+            "generate_debrief",
+            "submit_retry",
+        ):
+            blocked[ev] = msg
+        return allowed, blocked
+
+    if phase == PracticePhase.ACTIVE:
+        if session.current_question() is not None:
+            allowed.extend(["submit_turn", "request_hint", "advance_question"])
+        else:
+            blocked["submit_turn"] = "No active question in this practice session."
+            blocked["request_hint"] = "No active question in this practice session."
+            blocked["advance_question"] = "No remaining active questions in this session."
+        allowed.extend(["update_workspace", "generate_debrief"])
+        blocked["submit_retry"] = "Complete the CARL Debrief before submitting a retry drill."
+        return allowed, blocked
+
+    if phase == PracticePhase.AWAITING_DEBRIEF:
+        allowed.extend(["update_workspace", "generate_debrief"])
+        blocked["submit_turn"] = "All questions are complete — generate your CARL Debrief to continue."
+        blocked["request_hint"] = "Hints are only available while a question is active."
+        blocked["advance_question"] = "No remaining active questions in this session."
+        blocked["submit_retry"] = "Complete the CARL Debrief before submitting a retry drill."
+        return allowed, blocked
+
+    # PracticePhase.COMPLETED
+    allowed.append("generate_debrief")  # idempotent cached debrief read (or recovery if debrief missing)
+    if session.debrief is not None:
+        allowed.append("submit_retry")
+    else:
+        blocked["submit_retry"] = "Complete the CARL Debrief before submitting a retry drill."
+    blocked["submit_turn"] = "This practice session is already completed."
+    blocked["request_hint"] = "Hints are only available while a question is active."
+    blocked["advance_question"] = "No remaining active questions in this session."
+    blocked["update_workspace"] = "Cannot edit workspace after the practice session is completed."
+    return allowed, blocked
+
+
+def validate_practice_invariants(
+    session: PracticeSession,
+    *,
+    debrief_job: AsyncJobState = AsyncJobState.IDLE,
+) -> list[str]:
+    """Verifies canonical PracticeSession structural invariants (empty list == valid)."""
+    violations: list[str] = []
+    phase = derive_practice_phase(session, debrief_job=debrief_job)
+
+    q_ids: set[str] = set()
+    active_q_indices: list[int] = []
+    for idx, q in enumerate(session.questions):
+        if not q.id:
+            violations.append(f"Question at index {idx} has empty id")
+        elif q.id in q_ids:
+            violations.append(f"Duplicate question ID in practice session: {q.id}")
+        q_ids.add(q.id)
+        if q.status == "active":
+            active_q_indices.append(idx)
+        for dim, val in (q.carl_signals or {}).items():
+            if val not in VALID_CARL_STATUSES:
+                violations.append(f"Question {q.id} has invalid CARL status '{val}' for '{dim}'")
+
+    seen_turns: set[str] = set()
+    for t in session.turns:
+        if not t.id:
+            violations.append("Practice turn has empty id")
+        elif t.id in seen_turns:
+            violations.append(f"Duplicate turn ID in practice session: {t.id}")
+        seen_turns.add(t.id)
+        if t.question_id is not None and t.question_id not in q_ids:
+            violations.append(f"Turn {t.id} references unknown question_id '{t.question_id}'")
+
+    if session.questions and not (0 <= session.current_question_index < len(session.questions)):
+        violations.append(
+            f"current_question_index={session.current_question_index} out of bounds for {len(session.questions)} questions"
+        )
+
+    if len(active_q_indices) > 1:
+        violations.append(f"Multiple questions marked active simultaneously: {active_q_indices}")
+
+    if phase == PracticePhase.ACTIVE:
+        if session.questions and 0 <= session.current_question_index < len(session.questions):
+            if session.questions[session.current_question_index].status != "active":
+                violations.append(
+                    f"Active session question[{session.current_question_index}] has status "
+                    f"'{session.questions[session.current_question_index].status}' (expected 'active')"
+                )
+    elif phase in (PracticePhase.AWAITING_DEBRIEF, PracticePhase.COMPLETED):
+        if active_q_indices:
+            violations.append(
+                f"Session in phase '{phase.value}' still has active question(s): {active_q_indices}"
+            )
+    if phase == PracticePhase.COMPLETED and session.debrief is None:
+        violations.append("Session in phase 'completed' is missing debrief payload")
+
+    return violations
+
+
+def serialize_practice_state_machines(
+    session: PracticeSession,
+    *,
+    debrief_job: AsyncJobState = AsyncJobState.IDLE,
+) -> dict[str, Any]:
+    """Canonical `state_machines` payload attached to Practice Mode REST responses."""
+    phase = derive_practice_phase(session, debrief_job=debrief_job)
+    allowed, blocked = compute_allowed_practice_events(session, phase=phase)
+    violations = validate_practice_invariants(session, debrief_job=debrief_job)
+    return {
+        "practice": {
+            "phase": phase.value,
+            "allowed_events": allowed,
+            "blocked_reasons": blocked,
+            "current_question_index": session.current_question_index,
+            "question_count": len(session.questions),
+        },
+        "jobs": {
+            "debrief": debrief_job.value,
+        },
+        "invariants_ok": len(violations) == 0,
+        "invariant_violations": violations,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 9. Add-On Pack Lifecycle State Machine
+# ---------------------------------------------------------------------------
+
+
+class AddonPackState(StrEnum):
+    NOT_INSTALLED = "not_installed"
+    INSTALLING = "installing"
+    INSTALLED = "installed"
+    UNINSTALLING = "uninstalling"
+    ERROR = "error"
+    COMING_SOON = "coming_soon"
+
+
+ADDON_PACK_TRANSITIONS: dict[AddonPackState, set[AddonPackState]] = {
+    AddonPackState.NOT_INSTALLED: {AddonPackState.INSTALLING},
+    AddonPackState.INSTALLING: {AddonPackState.INSTALLED, AddonPackState.ERROR, AddonPackState.NOT_INSTALLED},
+    AddonPackState.INSTALLED: {AddonPackState.UNINSTALLING},
+    AddonPackState.UNINSTALLING: {AddonPackState.NOT_INSTALLED, AddonPackState.ERROR, AddonPackState.INSTALLED},
+    AddonPackState.ERROR: {AddonPackState.INSTALLING, AddonPackState.UNINSTALLING},
+    AddonPackState.COMING_SOON: set(),
+}
+
+
+def derive_addon_pack_state(
+    *,
+    installed: bool,
+    available: bool,
+    installing: bool = False,
+    uninstalling: bool = False,
+    error: str | None = None,
+) -> AddonPackState:
+    if installing:
+        return AddonPackState.INSTALLING
+    if uninstalling:
+        return AddonPackState.UNINSTALLING
+    if not available and not installed:
+        return AddonPackState.COMING_SOON
+    if error:
+        return AddonPackState.ERROR
+    if installed:
+        return AddonPackState.INSTALLED
+    return AddonPackState.NOT_INSTALLED
+
+
+def compute_allowed_addon_pack_events(
+    state: AddonPackState,
+    *,
+    installed: bool,
+    available: bool = True,
+) -> tuple[list[str], dict[str, str]]:
+    allowed: list[str] = []
+    blocked: dict[str, str] = {}
+    if state == AddonPackState.NOT_INSTALLED:
+        allowed.append("install")
+        blocked["uninstall"] = "Pack is not installed."
+    elif state == AddonPackState.INSTALLED:
+        allowed.append("uninstall")
+        blocked["install"] = "Pack is already installed."
+    elif state == AddonPackState.INSTALLING:
+        blocked["install"] = "Installation is already in progress."
+        blocked["uninstall"] = "Wait for installation to finish before removing."
+    elif state == AddonPackState.UNINSTALLING:
+        blocked["install"] = "Wait for removal to finish before installing."
+        blocked["uninstall"] = "Removal is already in progress."
+    elif state == AddonPackState.ERROR:
+        if available:
+            allowed.append("install")
+        else:
+            blocked["install"] = "Not enabled in this build."
+        if installed:
+            allowed.append("uninstall")
+        else:
+            blocked["uninstall"] = "Pack is not installed."
+    else:  # COMING_SOON
+        blocked["install"] = "Not enabled in this build."
+        blocked["uninstall"] = "Pack is not installed."
+    return allowed, blocked
+
+
+# ---------------------------------------------------------------------------
+# 10. Online Two-Speaker Diarizer Enrollment State Machine
+# ---------------------------------------------------------------------------
+
+
+class DiarizerEnrollmentState(StrEnum):
+    UNLOADED = "unloaded"
+    COLD_START = "cold_start"
+    SINGLE_SPEAKER = "single_speaker"
+    TWO_SPEAKERS = "two_speakers"
+    MANUAL_CALIBRATED = "manual_calibrated"
+
+
+DIARIZER_ENROLLMENT_TRANSITIONS: dict[DiarizerEnrollmentState, set[DiarizerEnrollmentState]] = {
+    DiarizerEnrollmentState.UNLOADED: {DiarizerEnrollmentState.COLD_START},
+    DiarizerEnrollmentState.COLD_START: {
+        DiarizerEnrollmentState.SINGLE_SPEAKER,
+        DiarizerEnrollmentState.MANUAL_CALIBRATED,
+    },
+    DiarizerEnrollmentState.SINGLE_SPEAKER: {
+        DiarizerEnrollmentState.TWO_SPEAKERS,
+        DiarizerEnrollmentState.MANUAL_CALIBRATED,
+        DiarizerEnrollmentState.COLD_START,
+    },
+    DiarizerEnrollmentState.TWO_SPEAKERS: {
+        DiarizerEnrollmentState.MANUAL_CALIBRATED,
+        DiarizerEnrollmentState.COLD_START,
+    },
+    DiarizerEnrollmentState.MANUAL_CALIBRATED: {
+        DiarizerEnrollmentState.MANUAL_CALIBRATED,
+        DiarizerEnrollmentState.COLD_START,
+    },
+}
+
+
+def derive_diarizer_enrollment_state(
+    *,
+    embedder_ready: bool,
+    enrolled_count: int,
+    manual_override: bool,
+) -> DiarizerEnrollmentState:
+    if not embedder_ready:
+        return DiarizerEnrollmentState.UNLOADED
+    if manual_override and enrolled_count > 0:
+        return DiarizerEnrollmentState.MANUAL_CALIBRATED
+    if enrolled_count >= 2:
+        return DiarizerEnrollmentState.TWO_SPEAKERS
+    if enrolled_count == 1:
+        return DiarizerEnrollmentState.SINGLE_SPEAKER
+    return DiarizerEnrollmentState.COLD_START
+
+
+def compute_allowed_diarizer_events(
+    state: DiarizerEnrollmentState,
+    *,
+    has_utterance_history: bool = False,
+) -> tuple[list[str], dict[str, str]]:
+    # swap_roles & reset work at any point (including cold-start transcript label flip + manual lock)
+    allowed: list[str] = ["reset", "swap_roles"]
+    blocked: dict[str, str] = {}
+    if state == DiarizerEnrollmentState.UNLOADED:
+        blocked["manual_correction"] = "Speaker diarizer model is not loaded yet."
+    elif has_utterance_history:
+        allowed.append("manual_correction")
+    else:
+        blocked["manual_correction"] = "No voiced utterance embeddings recorded yet for acoustic adaptation."
+    return allowed, blocked
+
+
+# ---------------------------------------------------------------------------
+# 11. Candidate Resume Redaction & Local TTS Backend States
+# ---------------------------------------------------------------------------
+
+
+class ResumeRedactionState(StrEnum):
+    NO_RESUME = "no_resume"
+    REDACTED_RULES_ONLY = "redacted_rules_only"
+    REDACTED_RAMPART = "redacted_rampart"
+
+
+def derive_resume_redaction_state(*, has_resume: bool, engine: str = "") -> ResumeRedactionState:
+    if not has_resume:
+        return ResumeRedactionState.NO_RESUME
+    if "rampart" in (engine or "").lower():
+        return ResumeRedactionState.REDACTED_RAMPART
+    return ResumeRedactionState.REDACTED_RULES_ONLY
+
+
+def validate_profile_invariants(profile_state: CandidateProfileState) -> list[str]:
+    """Verifies candidate profile invariants (unique JD IDs, valid active_jd_id, non-empty redaction)."""
+    violations: list[str] = []
+    jd_ids: set[str] = set()
+    for jd in profile_state.job_listings:
+        if not jd.id:
+            violations.append("Job listing has empty id")
+        elif jd.id in jd_ids:
+            violations.append(f"Duplicate job listing ID: {jd.id}")
+        jd_ids.add(jd.id)
+    if profile_state.active_jd_id is not None and profile_state.active_jd_id not in jd_ids:
+        violations.append(
+            f"active_jd_id '{profile_state.active_jd_id}' does not match any stored job listing"
+        )
+    if profile_state.resume is not None:
+        if profile_state.resume.raw_text.strip() and not profile_state.resume.redacted_text.strip():
+            violations.append("Stored resume has raw_text but empty redacted_text")
+    return violations
+
+
+class TTSBackendState(StrEnum):
+    KOKORO_READY = "kokoro_ready"
+    PHONON_READY = "phonon_ready"
+    KOKORO_FALLBACK_MACOS = "kokoro_fallback_macos"
+    PHONON_FALLBACK_MACOS = "phonon_fallback_macos"
+    MACOS_SAY = "macos_say"
+    BROWSER_FALLBACK = "browser_fallback"
+
+
+def derive_tts_backend_state(
+    *,
+    kokoro_installed: bool,
+    kokoro_runtime: bool,
+    kokoro_error: str | None,
+    macos_say_available: bool,
+    phonon_installed: bool = False,
+    phonon_runtime: bool = False,
+    phonon_error: str | None = None,
+    preferred_engine: str | None = None,
+) -> TTSBackendState:
+    kokoro_ready = kokoro_installed and kokoro_runtime and not kokoro_error
+    phonon_ready = phonon_installed and phonon_runtime and not phonon_error
+    if preferred_engine == "phonon" and phonon_ready:
+        return TTSBackendState.PHONON_READY
+    if kokoro_ready:
+        return TTSBackendState.KOKORO_READY
+    if phonon_ready:
+        return TTSBackendState.PHONON_READY
+    if kokoro_installed and kokoro_runtime and kokoro_error and macos_say_available:
+        return TTSBackendState.KOKORO_FALLBACK_MACOS
+    if phonon_installed and phonon_runtime and phonon_error and macos_say_available:
+        return TTSBackendState.PHONON_FALLBACK_MACOS
+    if macos_say_available:
+        return TTSBackendState.MACOS_SAY
+    return TTSBackendState.BROWSER_FALLBACK
+
+
 def export_machine_specs() -> dict[str, Any]:
     """Machine-readable & Mermaid specification of all state machines for DX and AX introspection."""
     return {
@@ -365,6 +786,60 @@ def export_machine_specs() -> dict[str, Any]:
                     "Monotonic revision (`rev >= 1`) per `Utterance.id`.",
                     "Strict partition: every stored utterance belongs to warmup OR exactly one QAGroup.",
                 ],
+            },
+            "practice_phase": {
+                "states": [s.value for s in PracticePhase],
+                "transitions": {k.value: sorted(v.value for v in vs) for k, vs in PRACTICE_PHASE_TRANSITIONS.items()},
+                "invariants": [
+                    "Unique question and turn IDs; every turn.question_id references an existing question.",
+                    "At most one question has status='active'; zero active questions in awaiting_debrief/completed.",
+                    "Completed practice sessions must have a debrief payload.",
+                ],
+                "mermaid": (
+                    "stateDiagram-v2\n"
+                    "  [*] --> active : start_practice\n"
+                    "  active --> active : submit_turn / advance_question (has_more)\n"
+                    "  active --> awaiting_debrief : advance_question (last)\n"
+                    "  active --> debriefing : generate_debrief (early)\n"
+                    "  awaiting_debrief --> debriefing : generate_debrief\n"
+                    "  debriefing --> completed : debrief_ready\n"
+                    "  debriefing --> active : debrief_error (early)\n"
+                    "  debriefing --> awaiting_debrief : debrief_error\n"
+                    "  completed --> debriefing : recover_debrief\n"
+                    "  completed --> completed : submit_retry"
+                ),
+            },
+            "addon_pack": {
+                "states": [s.value for s in AddonPackState],
+                "transitions": {k.value: sorted(v.value for v in vs) for k, vs in ADDON_PACK_TRANSITIONS.items()},
+                "mermaid": (
+                    "stateDiagram-v2\n"
+                    "  [*] --> not_installed\n"
+                    "  not_installed --> installing : install\n"
+                    "  installing --> installed : ok\n"
+                    "  installing --> error : failed\n"
+                    "  error --> installing : retry_install\n"
+                    "  installed --> uninstalling : uninstall\n"
+                    "  uninstalling --> not_installed : ok\n"
+                    "  uninstalling --> error : failed"
+                ),
+            },
+            "diarizer_enrollment": {
+                "states": [s.value for s in DiarizerEnrollmentState],
+                "transitions": {
+                    k.value: sorted(v.value for v in vs) for k, vs in DIARIZER_ENROLLMENT_TRANSITIONS.items()
+                },
+            },
+            "resume_redaction": {
+                "states": [s.value for s in ResumeRedactionState],
+                "invariants": [
+                    "Actively redacted resume PII spans are masked over HTTP and stripped before LLM prompts; only spans explicitly unhidden by the user are restored.",
+                    "active_jd_id is either None or references an existing job listing.",
+                ],
+            },
+            "tts_backend": {
+                "states": [s.value for s in TTSBackendState],
+                "description": "Local-first TTS engine cascade: Kokoro-82M neural voice -> macOS native say -> browser speech fallback.",
             },
         }
     }

@@ -29,6 +29,13 @@ from .models import (
     Utterance,
     fmt_ms,
 )
+from .prompts import (
+    calibration_rubric_for,
+    practice_tone_instruction,
+    probe_guidance_for,
+    render_prompt,
+    triage_diarize_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -920,14 +927,7 @@ class InterviewCopilotLLM:
             )
 
         probe_guidance = _probe_guidance_for(session.config.interview_type)
-        system_prompt = (
-            "You are a fast, pragmatic real-time mock interview co-pilot helping an interviewer probe deeper. "
-            "Analyze the exchange (including any in-progress candidate answer) and output ONLY valid JSON:\n"
-            '{"quick_read": "<1 crisp sentence on what is solid so far vs where to probe next>", '
-            '"probes": [{"angle": "<2-3 word label>", "question": "<exact natural follow-up under 24 words>", "why": "<6-12 word reason>"}]}\n'
-            f"{probe_guidance}\n"
-            "Keep questions natural and human—do NOT police 'I' vs 'we' pronouns or demand exact numbers where qualitative reasoning makes more sense."
-        )
+        system_prompt = render_prompt("suggest_probes", probe_guidance=probe_guidance)
 
         user_prompt = (
             f"Target Role: {session.config.role_title} | Focus: {session.config.interview_type}\n"
@@ -1020,37 +1020,8 @@ class InterviewCopilotLLM:
             for u in utterances
         ]
 
-        diarize_rules = (
-            "1. SPEAKER DIARIZATION & RAPID HANDOFF SPLITTING (CRITICAL):\n"
-            "   - The audio comes from a single shared mic/track, so `current_speaker` may be wrong AND a single VAD segment may contain BOTH speakers back-to-back without a pause.\n"
-            "   - For each incoming utterance, output `segments`: 1 segment if a single person spoke, OR 2+ segments split cleanly at the exact sentence/clause where the speaker switched (`interviewer` <-> `candidate`).\n"
-            "   - Interviewer cues: introduces the mock, asks primary questions or follow-ups, praises ('Cool, that makes sense...'), transitions ('moving on to the next question').\n"
-            "   - Candidate cues: answers questions in first person, tells stories about past roles/projects, explains technical work.\n"
-            "   - Preserve almost all words verbatim; ONLY fix unmistakable STT proper-noun/domain typos (e.g. 'for deployed' -> 'forward deployed') without paraphrasing.\n"
-            if diarize
-            else "1. SPEAKER LABELS ARE HARDWARE-SEPARATED:\n"
-            "   - Keep `segments` as a single item with the exact `current_speaker` and original `text`.\n"
-        )
-
-        system_prompt = (
-            "You are a fast, precision Interview Turn Triage planner (inspired by operation-log triage).\n"
-            "Given a compact `session_index` and 1+ incoming finalized transcript utterances, emit ONLY valid JSON:\n"
-            '{"plans": [{"utterance_id": "<exact id>", '
-            '"segments": [{"speaker": "interviewer"|"candidate", "text": "<text>"}], '
-            '"card_action": "keep_in_current"|"open_new_card"|"ignore_backchannel", '
-            '"suggested_title": "<5-8 word card title ONLY if open_new_card else empty string>", '
-            '"confidence": "high"|"medium"|"low", '
-            '"rationale": "<short 6-14 word reason>"}]}\n\n'
-            "RULES:\n"
-            f"{diarize_rules}"
-            "2. CARD BOUNDARIES (DO NOT OVER-SPLIT):\n"
-            "   - Use `open_new_card` ONLY when the interviewer introduces a BRAND NEW primary interview question or major design phase.\n"
-            "   - Keep ALL follow-up probes, clarifying questions, and candidate answers inside the current card (`keep_in_current`).\n"
-            "   - Use `ignore_backchannel` only for pure 1-3 word filler ('yeah', 'uh-huh', 'cool') that adds no content.\n"
-            "3. CONFIDENCE CALIBRATION:\n"
-            "   - `high`: Unambiguous speaker role, clear handoff boundary, or explicit new question ('moving on to...').\n"
-            "   - `medium` / `low`: Genuinely ambiguous speaker attribution or borderline new-question vs follow-up pivot.\n"
-        )
+        diarize_rules = triage_diarize_rules(diarize)
+        system_prompt = render_prompt("triage_window", diarize_rules=diarize_rules)
 
         user_prompt = json.dumps(
             {"session_index": index, "incoming_utterances": incoming_payload},
@@ -1140,7 +1111,7 @@ class InterviewCopilotLLM:
         try:
             raw = await self._complete_text(
                 model=self.config.fast_model,
-                system="Classify whether an interview turn pivots to a new unrelated question. Return ONLY valid JSON.",
+                system=render_prompt("classify_topic_shift"),
                 user=prompt,
                 temperature=0.0,
                 max_tokens=90,
@@ -1190,7 +1161,7 @@ class InterviewCopilotLLM:
         try:
             raw = await self._complete_text(
                 model=self.config.fast_model,
-                system="Determine whether INTERVIEWER and CANDIDATE voice labels are globally inverted. Return ONLY valid JSON.",
+                system=render_prompt("check_speaker_role_orientation"),
                 user=prompt,
                 temperature=0.0,
                 max_tokens=200,
@@ -1238,7 +1209,7 @@ class InterviewCopilotLLM:
         try:
             raw = await self._complete_text(
                 model=self.config.fast_model,
-                system="Segment an interview transcript into clean Q&A or phase card boundaries. Return ONLY valid JSON.",
+                system=render_prompt("regroup_cards_full_context"),
                 user=prompt,
                 temperature=0.1,
                 max_tokens=1000,
@@ -1288,31 +1259,10 @@ class InterviewCopilotLLM:
             self_rating_block = "\n".join(rating_lines)
 
         rubric_block = _calibration_rubric_for(session.config.interview_type)
-        system_prompt = (
-            "You are a pragmatic Staff/Principal engineering peer coach and FAANG hiring-committee calibrator evaluating BOTH the interviewer's judgment and the candidate after a live mock interview.\n\n"
-            f"INTERVIEW-TYPE EVALUATION RUBRIC ({session.config.interview_type}):\n"
-            f"{rubric_block}\n\n"
-            "GROUNDING & REALISM RULES:\n"
-            "1. EVERY claim about what the candidate or interviewer said MUST cite exact timestamps and utterance IDs like `[04:12, utt_a1b2c3d4]`.\n"
-            "2. Use ONLY the code-computed timing and word-ratio numbers provided—do not invent arithmetic.\n"
-            "3. Evaluate like a calibrated human hiring committee, NOT an exhaustive textbook checklist or resume scanner:\n"
-            "   - **Respect the 35–45 minute clock & interviewer steering:** A real live interview can only deep-dive 2–3 areas. Separate **explored weaknesses** (mistakes made where the candidate actually spent time or got probed) from **unprobed / out-of-time areas** (topics the interviewer affirmed and moved past, or never steered into). Do NOT downgrade a candidate's hire verdict merely because theoretical bottlenecks went unprobed—flag unprobed areas as missed interviewer probes in Section 3 instead.\n"
-            "   - **Calibrate strictly to the Target Role / Level:** Judge E4/Mid-Level, E5/Senior, and E6/Staff against realistic passing bars for THAT level (do not fail an E4 candidate solely for Senior-depth distributed-systems gaps when core fundamentals and coachability are solid; do not withhold Strong Hire E5 / Hire E6 from a candidate who delivered crisp structure, clear tradeoffs, and clean recovery on every explored deep dive just because other areas were left unasked).\n"
-            "   - **Stay technically sharp, never sycophantic:** Still call out genuine technical errors, over-engineering, missed hints, and even interviewer hint inaccuracies candidly—just weigh them proportionally to the target level and real-world hiring bars.\n"
-            "   - NEVER police `'I'` vs. `'we'` pronouns or treat pronoun ratios as evidence. Normal people say `'we'` in collaborative design exercises and team discussions.\n"
-            "   - NEVER penalize statements merely for lacking exact numbers or memorized statistics when qualitative reasoning, order-of-magnitude intuition, or architectural tradeoffs are what actually matter.\n"
-            "   - Recognize that live spoken interviews include thinking out loud, informal phrasing, minor ASR typos, and self-correction—judge the substance of the candidate's engineering thinking.\n"
-            "   - If the interviewer left optional pre-rating fields (level/rationale/concern) blank, do NOT scold them for leaving fields blank—just calibrate against the hire signal they submitted.\n"
-            "4. Structure your Markdown output into these exact 4 sections:\n"
-            "### 1. Calibration Check: Your Blind Call vs. Transcript Evidence\n"
-            "- Compare the interviewer's pre-submitted call directly against the transcript evidence (or provide an independent level-calibrated hire signal if none was submitted). Clearly separate what the candidate demonstrated on explored areas from what went unprobed, and state both the hire signal at the target level and any clear leveling nuance.\n\n"
-            "### 2. Candidate Signal & Evidence Audit (By Card)\n"
-            "- For each card, give a concise **Strong / Mixed / Weak** read grounded in `[MM:SS, utt_id]` citations using the interview-type rubric above (focus on the real strengths, explored gaps, and decision quality—no filler sub-bullets).\n\n"
-            "### 3. Interviewer Probing & Pacing Retro\n"
-            "- Critique time allocation across cards and talk-to-listen ratio using the provided code metrics.\n"
-            "- **Missed Probing Moments:** Cite 2-3 exact `[MM:SS, utt_id]` moments where a sharper follow-up would have unlocked stronger signal (or gently flag any technically imprecise interviewer hints), and write a natural follow-up question to ask next time.\n\n"
-            "### 4. Constructive Takeaways for Candidate\n"
-            "- 3 concrete, encouraging, high-leverage takeaways the interviewer can share directly with the mock candidate."
+        system_prompt = render_prompt(
+            "calibration_report",
+            interview_type=session.config.interview_type,
+            rubric_block=rubric_block,
         )
 
         user_prompt = (
@@ -1444,73 +1394,712 @@ class InterviewCopilotLLM:
             )
         return "\n".join(lines)
 
+    # ---------------- Milestone 2+: AI Practice Interviewer & Supportive CARL Coach ----------------
 
-def _probe_guidance_for(interview_type: str) -> str:
-    if interview_type == "system_design":
-        return (
-            "This is a SYSTEM DESIGN interview. Return 3 high-leverage follow-up probes covering:\n"
-            "(1) the core architectural bottleneck or data access/fan-out pattern in what they just proposed,\n"
-            "(2) a key design tradeoff or alternative choice (storage, schema, protocol, or abstraction),\n"
-            "(3) a concrete failure mode, consistency edge case, or operational constraint.\n"
-            "Do NOT ask about past resume experience or force back-of-the-envelope arithmetic unless a scale mismatch breaks the design."
+    async def generate_practice_plan(
+        self,
+        *,
+        role_title: str,
+        company: str,
+        interview_type: str,
+        target_level: str,
+        question_source: str,
+        question_count: int,
+        bank_candidates: list[dict[str, Any]],
+        redacted_resume: str = "",
+        jd_text: str = "",
+        selected_question_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """
+        Build the interview question plan and a warm opening greeting.
+        Returns `(questions_list, opening_message)`.
+        Always keeps `redacted_resume` privacy-safe and degrades cleanly to curated banks if unconfigured.
+        """
+        effective_count = 1 if interview_type in ("system_design", "coding") else max(1, min(6, question_count))
+
+        def _to_str_list(val: Any) -> list[str]:
+            if isinstance(val, str):
+                s = val.strip()
+                return [s] if s else []
+            if isinstance(val, (list, tuple)):
+                out: list[str] = []
+                for item in val:
+                    if isinstance(item, str) and item.strip():
+                        out.append(item.strip())
+                    elif isinstance(item, (int, float)) and not isinstance(item, bool):
+                        out.append(str(item))
+                return out
+            return []
+
+        def _bank_to_item(q: dict[str, Any]) -> dict[str, Any]:
+            playbook = q.get("playbook") if isinstance(q.get("playbook"), dict) else {}
+            core_reqs = _to_str_list(q.get("core_requirements")) or _to_str_list(playbook.get("core_requirements"))
+            deep_dives = _to_str_list(q.get("deep_dives")) or _to_str_list(playbook.get("deep_dives"))
+            follow_ups = _to_str_list(q.get("follow_ups")) or _to_str_list(q.get("hints"))
+            return {
+                "bank_question_id": q.get("id"),
+                "source": "bank",
+                "category": q.get("category") or interview_type,
+                "title": q.get("title") or q.get("competency") or "Interview Question",
+                "competency": q.get("competency") or q.get("title") or "",
+                "prompt": q.get("prompt") or "",
+                "carl_focus": q.get("carl_focus") or "",
+                "follow_ups": follow_ups,
+                "core_requirements": core_reqs,
+                "deep_dives": deep_dives,
+                "starter_code": dict(q.get("starter_code")) if isinstance(q.get("starter_code"), dict) else {},
+                "tests": dict(q.get("tests")) if isinstance(q.get("tests"), dict) else {},
+                "difficulty": str(q.get("difficulty") or ""),
+            }
+
+        selected_bank = [_bank_to_item(q) for q in bank_candidates[:effective_count]]
+        pinned_item: dict[str, Any] | None = None
+        if selected_question_id:
+            for item in selected_bank:
+                if item.get("bank_question_id") == selected_question_id:
+                    pinned_item = item
+                    break
+        remaining_bank = [item for item in selected_bank if item is not pinned_item]
+
+        role_label = f"{role_title} at {company}" if company else role_title
+        default_opening = (
+            f"Welcome! Today we're running a supportive {interview_type.replace('_', ' ')} practice session "
+            f"for {role_label} ({target_level}). Take a breath, think out loud whenever helpful, and let's dive right in."
         )
-    if interview_type == "coding":
-        return (
-            "This is a CODING interview. Return 3 high-leverage follow-up probes covering:\n"
-            "(1) subtle edge cases, invariants, or correctness bugs,\n"
-            "(2) time/space complexity tradeoffs or scaling bottlenecks,\n"
-            "(3) code clarity, decomposition, or verification/testing strategy."
+
+        # If bank_only OR LLM not configured OR system_design/coding with a specific bank problem:
+        # For system_design/coding, curated playbooks/test harnesses stay primary, with tailored framing if LLM is available.
+        if not self.config.is_configured or (
+            question_source == "bank_only" and selected_bank
+        ):
+            ordered = ([pinned_item] + remaining_bank) if pinned_item else selected_bank
+            return ordered[:effective_count], default_opening
+
+        # Determine how many tailored questions to ask LLM to generate
+        if interview_type in ("system_design", "coding") and selected_bank:
+            # Keep the rich curated playbook/test-harness item, and ask LLM only for a tailored framing + greeting
+            base = pinned_item or selected_bank[0]
+            if not jd_text.strip() and not redacted_resume.strip():
+                return [base], default_opening
+            sys_p = render_prompt("practice_plan_framing")
+            usr_p = (
+                f"Target Role: {role_label} ({target_level}) | Format: {interview_type}\n"
+                f"Base Problem Title: {base['title']}\nBase Prompt: {base['prompt']}\n\n"
+                f"Target Job Listing excerpt:\n{jd_text[:3000]}\n"
+            )
+            try:
+                raw = await self._complete_text(
+                    model=self.config.fast_model,
+                    system=sys_p,
+                    user=usr_p,
+                    temperature=0.4,
+                    max_tokens=360,
+                    timeout=25.0,
+                    expect_json=True,
+                )
+                parsed = _extract_json_object(raw)
+                opening = str(parsed.get("opening") or "").strip() or default_opening
+                if parsed.get("tailored_prompt"):
+                    base["prompt"] = str(parsed["tailored_prompt"]).strip()
+                return [base], opening
+            except Exception as exc:
+                logger.warning("Practice framing failed (%s); using base bank item", exc)
+                return [base], default_opening
+
+        # Behavioral / General: generate tailored questions from redacted resume + target JD
+        slots_after_pin = effective_count - (1 if pinned_item else 0)
+        if slots_after_pin <= 0 and pinned_item is not None:
+            return [pinned_item], default_opening
+        want_tailored = (
+            slots_after_pin
+            if question_source == "resume_jd_tailored"
+            else max(1, slots_after_pin // 2)
         )
-    if interview_type == "behavioral":
-        return (
-            "This is a BEHAVIORAL interview. Return 3 high-leverage follow-up probes covering:\n"
-            "(1) the specific technical/org decision or piece of the work they drove (naturally, never lecturing on 'I' vs 'we'),\n"
-            "(2) constraints, alternatives considered, or how they navigated disagreement/ambiguity,\n"
-            "(3) concrete outcomes (qualitative or quantitative) and what went wrong or what they'd change in hindsight."
+        bank_slice = (
+            []
+            if question_source == "resume_jd_tailored"
+            else remaining_bank[: max(0, slots_after_pin - want_tailored)]
         )
-    return (
-        "Return 3 high-leverage follow-up probes covering:\n"
-        "(1) deeper technical mechanism ('how does that actually work?'),\n"
-        "(2) key tradeoffs or alternatives ruled out,\n"
-        "(3) realistic edge cases, constraints, or failure modes."
-    )
+
+        sys_p = render_prompt("practice_plan_tailored")
+        usr_p = (
+            f"Target Role: {role_label} ({target_level}) | Format: {interview_type}\n"
+            f"Generate exactly {want_tailored} distinct, tailored interview question(s).\n\n"
+            f"Redacted Candidate Resume:\n{(redacted_resume or 'Not provided')[:4500]}\n\n"
+            f"Target Job Listing:\n{(jd_text or 'Not provided')[:3500]}\n"
+        )
+        try:
+            raw = await self._complete_text(
+                model=self.config.fast_model,
+                system=sys_p,
+                user=usr_p,
+                temperature=0.45,
+                max_tokens=900,
+                timeout=35.0,
+                expect_json=True,
+            )
+            parsed = _extract_json_object(raw)
+            opening = str(parsed.get("opening") or "").strip() or default_opening
+            tailored_items: list[dict[str, Any]] = []
+            raw_qs = parsed.get("questions") if isinstance(parsed.get("questions"), list) else []
+            for item in raw_qs[:want_tailored]:
+                if not isinstance(item, dict):
+                    continue
+                prompt_text = str(item.get("prompt") or "").strip()
+                if not prompt_text:
+                    continue
+                tailored_items.append(
+                    {
+                        "bank_question_id": None,
+                        "source": "tailored",
+                        "category": interview_type,
+                        "title": str(item.get("title") or "Tailored Question").strip(),
+                        "competency": str(item.get("competency") or "Role Fit").strip(),
+                        "prompt": prompt_text,
+                        "carl_focus": str(item.get("carl_focus") or "Clear Context, personal Actions, measurable Result, and Learning.").strip(),
+                        "follow_ups": [str(f).strip() for f in (item.get("follow_ups") or [])[:3] if str(f).strip()],
+                        "core_requirements": [],
+                        "deep_dives": [],
+                        "starter_code": {},
+                        "tests": {},
+                        "difficulty": "",
+                    }
+                )
+            combined: list[dict[str, Any]] = []
+            if pinned_item is not None:
+                combined.append(pinned_item)
+            # Interleave tailored + remaining bank for mixed mode
+            for i in range(max(len(tailored_items), len(bank_slice))):
+                if i < len(tailored_items):
+                    combined.append(tailored_items[i])
+                if i < len(bank_slice):
+                    combined.append(bank_slice[i])
+            return (combined[:effective_count] or selected_bank), opening
+        except Exception as exc:
+            logger.warning("LLM generate_practice_plan failed (%s); falling back to curated banks", exc)
+            ordered = ([pinned_item] + remaining_bank) if pinned_item else selected_bank
+            return ordered[:effective_count], default_opening
+
+    async def generate_practice_interviewer_reply(
+        self,
+        *,
+        role_title: str,
+        company: str,
+        interview_type: str,
+        target_level: str,
+        coach_style: str,
+        current_question: dict[str, Any],
+        next_question: dict[str, Any] | None,
+        recent_turns: list[dict[str, Any]],
+        candidate_answer: str,
+        follow_up_count: int,
+        existing_carl: dict[str, str],
+        workspace_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Generate the AI interviewer's natural next turn + live CARL status + supportive coach nudge.
+        """
+        from .practice import build_heuristic_nudge, estimate_carl_heuristic
+
+        heuristic_carl = estimate_carl_heuristic(candidate_answer, existing_carl)
+        follow_ups = list(current_question.get("follow_ups") or [])
+        max_followups = 3 if interview_type in ("system_design", "coding") else 2
+
+        def _fallback() -> dict[str, Any]:
+            if follow_up_count < len(follow_ups) and follow_up_count < max_followups:
+                reply = f"Thanks for walking through that. {follow_ups[follow_up_count]}"
+                advance = False
+            elif next_question is not None:
+                reply = (
+                    "That gives me a clear picture — thank you! Let's move on to our next question: "
+                    f"{next_question.get('prompt', '')}"
+                )
+                advance = True
+            else:
+                reply = (
+                    "Thank you for sharing that — you covered a lot of thoughtful ground today! "
+                    "Whenever you're ready, click End & CARL Debrief to review your coaching report."
+                )
+                advance = True
+            return {
+                "interviewer_reply": reply,
+                "should_advance": advance,
+                "carl_signals": heuristic_carl,
+                "coach_nudge": build_heuristic_nudge(heuristic_carl, interview_type),
+            }
+
+        if not self.config.is_configured:
+            return _fallback()
+
+        history_lines = [
+            f"{'INTERVIEWER' if t.get('role') == 'interviewer' else 'CANDIDATE'}: {t.get('text', '')}"
+            for t in recent_turns[-8:]
+            if t.get("role") in ("interviewer", "candidate")
+        ]
+        ws_block = ""
+        if workspace_context:
+            if workspace_context.get("diagram_summary"):
+                ws_block += f"\nLIVE SYSTEM DESIGN DIAGRAM STATE:\n{str(workspace_context['diagram_summary'])[:2500]}\n"
+            if workspace_context.get("code"):
+                ws_block += (
+                    f"\nLIVE CODING WORKSPACE ({workspace_context.get('language', 'code')}):\n"
+                    f"```\n{str(workspace_context['code'])[:3000]}\n```\n"
+                )
+            if workspace_context.get("test_output"):
+                ws_block += f"\nLATEST TEST RUN OUTPUT:\n{str(workspace_context['test_output'])[:1200]}\n"
+
+        next_q_block = (
+            f"Next planned question (ONLY introduce if should_advance=true): {next_question.get('prompt')}"
+            if next_question
+            else "This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their CARL Coaching Debrief."
+        )
+
+        tone_instruction = practice_tone_instruction(coach_style)
+        system_prompt = render_prompt(
+            "practice_interviewer_reply",
+            interview_type_label=interview_type.replace("_", " "),
+            role_title=role_title,
+            target_level=target_level,
+            tone_instruction=tone_instruction,
+        )
+        user_prompt = (
+            f"Current Question: {current_question.get('prompt')}\n"
+            f"CARL / Rubric Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
+            f"Follow-ups already asked on this question: {follow_up_count} (advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal).\n"
+            f"Suggested follow-up angles: {follow_ups}\n"
+            f"{next_q_block}\n"
+            f"{ws_block}\n"
+            f"Recent conversation:\n" + "\n".join(history_lines) + "\n\n"
+            f"Candidate's latest answer:\n{candidate_answer}"
+        )
+
+        try:
+            raw = await self._complete_text(
+                model=self.config.fast_model,
+                system=system_prompt,
+                user=user_prompt,
+                temperature=0.4,
+                max_tokens=480,
+                timeout=30.0,
+                expect_json=True,
+            )
+            parsed = _extract_json_object(raw)
+            reply = str(parsed.get("interviewer_reply") or "").strip()
+            if not reply:
+                return _fallback()
+            raw_adv = parsed.get("should_advance", False)
+            if isinstance(raw_adv, bool):
+                should_advance = raw_adv
+            elif isinstance(raw_adv, str):
+                should_advance = raw_adv.strip().lower() in ("true", "1", "yes")
+            else:
+                should_advance = False
+            if follow_up_count >= max_followups:
+                should_advance = True
+
+            raw_carl = parsed.get("carl_signals") if isinstance(parsed.get("carl_signals"), dict) else {}
+            valid = {"strong", "partial", "missing"}
+            rank = {"missing": 0, "partial": 1, "strong": 2}
+            inv_rank = {0: "missing", 1: "partial", 2: "strong"}
+            merged_carl: dict[str, str] = {}
+            for dim in ("context", "action", "result", "learning"):
+                llm_val = str(raw_carl.get(dim, "")).lower()
+                if llm_val not in valid:
+                    llm_val = heuristic_carl[dim]
+                prev_val = existing_carl.get(dim, "missing")
+                merged_carl[dim] = inv_rank[max(rank.get(prev_val, 0), rank.get(llm_val, 0))]
+
+            nudge_raw = parsed.get("coach_nudge") if isinstance(parsed.get("coach_nudge"), dict) else {}
+            nudge_msg = str(nudge_raw.get("message") or "").strip()
+            nudge_tone = "encourage" if nudge_raw.get("tone") == "encourage" else "tip"
+            nudge = (
+                {"tone": nudge_tone, "message": nudge_msg}
+                if nudge_msg
+                else build_heuristic_nudge(merged_carl, interview_type)
+            )
+            return {
+                "interviewer_reply": reply,
+                "should_advance": should_advance,
+                "carl_signals": merged_carl,
+                "coach_nudge": nudge,
+            }
+        except Exception as exc:
+            logger.warning("LLM generate_practice_interviewer_reply failed (%s); using fallback", exc)
+            return _fallback()
+
+    async def generate_practice_hint(
+        self,
+        *,
+        interview_type: str,
+        target_level: str,
+        current_question: dict[str, Any],
+        recent_turns: list[dict[str, Any]],
+        workspace_context: dict[str, Any] | None = None,
+    ) -> str:
+        """Return a supportive, non-spoiler coaching hint when the candidate asks for help."""
+        fallback = (
+            f"Start with a 2-sentence Context, then walk through 2 specific Actions YOU drove "
+            f"(focus on: {current_question.get('carl_focus') or 'your technical decisions & measurable impact'})."
+        )
+        if interview_type == "system_design":
+            reqs = current_question.get("core_requirements") or []
+            fallback = (
+                f"Sketch the core request flow first (Client → API → Storage), then pick one key requirement "
+                f"to nail in detail{': ' + reqs[0] if reqs else ''}."
+            )
+        elif interview_type == "coding":
+            fallback = (
+                "Start with a clear brute-force or invariant statement, verify it on a tiny example, "
+                "and then ask what data structure eliminates the repeated work."
+            )
+
+        if not self.config.is_configured:
+            return fallback
+
+        history = "\n".join(
+            f"{t.get('role', '').upper()}: {t.get('text', '')}"
+            for t in recent_turns[-5:]
+            if t.get("role") in ("interviewer", "candidate")
+        )
+        ws_note = ""
+        if workspace_context:
+            if workspace_context.get("diagram_summary"):
+                ws_note += f"\nCurrent diagram:\n{str(workspace_context['diagram_summary'])[:1500]}"
+            if workspace_context.get("code"):
+                ws_note += f"\nCurrent code:\n{str(workspace_context['code'])[:1500]}"
+
+        sys_p = render_prompt("practice_hint")
+        usr_p = (
+            f"Format: {interview_type} ({target_level})\n"
+            f"Question: {current_question.get('prompt')}\n"
+            f"Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
+            f"Recent exchange:\n{history}{ws_note}"
+        )
+        try:
+            txt = await self._complete_text(
+                model=self.config.fast_model,
+                system=sys_p,
+                user=usr_p,
+                temperature=0.4,
+                max_tokens=160,
+                timeout=20.0,
+                expect_json=False,
+            )
+            return txt.strip() or fallback
+        except Exception:
+            return fallback
+
+    async def generate_practice_debrief(
+        self,
+        *,
+        role_title: str,
+        company: str,
+        interview_type: str,
+        target_level: str,
+        questions: list[dict[str, Any]],
+        turns: list[dict[str, Any]],
+        workspace_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Generate a Supportive CARL Coaching Debrief:
+          - Leads with genuine strengths & confidence-building encouragement
+          - Per-question CARL breakdown + concrete Before -> After reframe
+          - One targeted 45-second Retry Weak Part drill
+        """
+        # Build deterministic fallback debrief first (also guarantees schema safety)
+        q_reviews_fb: list[dict[str, Any]] = []
+        weakest_q: dict[str, Any] | None = None
+        weakest_dim = "result"
+
+        for q in questions:
+            q_turns = [t for t in turns if t.get("question_id") == q.get("id") and t.get("role") == "candidate"]
+            if not q_turns:
+                continue
+            carl = dict(q.get("carl_signals") or {"context": "partial", "action": "partial", "result": "missing", "learning": "missing"})
+            missing_dims = [d for d in ("result", "learning", "action", "context") if carl.get(d) != "strong"]
+            focus_dim = missing_dims[0] if missing_dims else "learning"
+            if weakest_q is None or carl.get(focus_dim) == "missing":
+                weakest_q = q
+                weakest_dim = focus_dim
+            q_reviews_fb.append(
+                {
+                    "question_id": q.get("id"),
+                    "title": q.get("title") or q.get("competency") or "Practice Question",
+                    "prompt": q.get("prompt") or "",
+                    "carl": carl,
+                    "strength": "You engaged thoughtfully with the prompt and kept the story clear and grounded.",
+                    "coaching_tip": f"Next pass, spend 15 extra seconds sharpening your {focus_dim.title()} so a hiring panel immediately hears your {target_level} impact.",
+                    "carl_reframe": (
+                        f"Try closing with: 'As a result, [measurable outcome], and what I carried forward to future projects was [1-sentence learning].'"
+                    ),
+                }
+            )
+
+        fallback_debrief: dict[str, Any] = {
+            "overall_encouragement": (
+                f"Great rep! Practicing out loud for {role_title} ({target_level}) builds real fluency — "
+                "you already have solid instincts, and tightening your CARL finish will make your stories land with even more confidence."
+            ),
+            "top_strengths": [
+                "You stayed composed and communicated your reasoning clearly.",
+                "You provided concrete context rather than speaking only in abstractions.",
+            ],
+            "carl_primer": "CARL = Context (brief setup) → Action (what YOU decided & drove) → Result (measurable outcome) → Learning (what changed afterward).",
+            "question_reviews": q_reviews_fb,
+            "retry_drill": {
+                "question_id": (weakest_q or (questions[0] if questions else {})).get("id"),
+                "focus": f"Sharpen {weakest_dim.title()} in 45 seconds",
+                "prompt": (
+                    f"In 45 seconds, re-deliver just the {weakest_dim.upper()} portion of your answer to: "
+                    f"\"{(weakest_q or (questions[0] if questions else {})).get('prompt', 'your main story')}\""
+                ),
+            },
+        }
+
+        non_retry_turns = [t for t in turns if not t.get("is_retry")]
+        if not self.config.is_configured or not any(t.get("role") == "candidate" for t in non_retry_turns):
+            return fallback_debrief
+
+        answered_ids = {
+            str(t.get("question_id"))
+            for t in non_retry_turns
+            if t.get("role") == "candidate" and t.get("question_id")
+        }
+        answered_questions = [q for q in questions if str(q.get("id")) in answered_ids] or questions[:1]
+        q_by_id = {str(q.get("id")): q for q in questions if q.get("id")}
+        per_q_budget = max(1200, 10_000 // max(1, len(answered_questions)))
+
+        transcript_sections: list[str] = []
+        for q in answered_questions:
+            qid = str(q.get("id") or "")
+            q_lines = [
+                f"{t['role'].upper()}: {t.get('text', '')}"
+                for t in non_retry_turns
+                if str(t.get("question_id") or "") == qid and t.get("role") in ("interviewer", "candidate")
+            ]
+            excerpt = "\n".join(q_lines)[:per_q_budget]
+            transcript_sections.append(f"### [{qid}] {q.get('title', 'Question')}\n{excerpt}")
+
+        ws_block = ""
+        if workspace_context:
+            if workspace_context.get("diagram_summary"):
+                ws_block += f"\nFINAL DIAGRAM:\n{str(workspace_context['diagram_summary'])[:2000]}\n"
+            if workspace_context.get("code"):
+                ws_block += f"\nFINAL CODE:\n{str(workspace_context['code'])[:2500]}\n"
+            if workspace_context.get("test_output"):
+                ws_block += f"\nTEST RESULTS:\n{str(workspace_context['test_output'])[:1000]}\n"
+
+        system_prompt = render_prompt("practice_debrief")
+        user_prompt = (
+            f"Role: {role_title}" + (f" at {company}" if company else "") + f" | Target Level: {target_level} | Format: {interview_type}\n"
+            f"Answered Questions:\n"
+            + "\n".join(f"- {q.get('id')}: {q.get('title')} — {q.get('prompt')}" for q in answered_questions)
+            + "\n\nPer-Question Transcript Excerpts:\n"
+            + "\n\n".join(transcript_sections)
+            + ws_block
+        )
+
+        valid_carl_vals = {"strong", "partial", "missing"}
+
+        def _norm_carl(raw_c: Any, default_c: dict[str, str]) -> dict[str, str]:
+            src = raw_c if isinstance(raw_c, dict) else {}
+            out: dict[str, str] = {}
+            for dim in ("context", "action", "result", "learning"):
+                v = str(src.get(dim, "")).strip().lower()
+                out[dim] = v if v in valid_carl_vals else default_c.get(dim, "missing")
+            return out
+
+        try:
+            debrief_model = self.config.calibration_model or self.config.fast_model
+            raw = await self._complete_text(
+                model=debrief_model,
+                system=system_prompt,
+                user=user_prompt,
+                temperature=0.35,
+                max_tokens=1600,
+                timeout=45.0,
+                expect_json=True,
+                disable_fast_thinking=False,
+            )
+            try:
+                parsed = _extract_json_object(raw)
+            except json.JSONDecodeError as parse_exc:
+                logger.warning(
+                    "LLM generate_practice_debrief returned malformed JSON (%s); retrying once at temperature=0.0",
+                    parse_exc,
+                )
+                raw_retry = await self._complete_text(
+                    model=debrief_model,
+                    system=system_prompt,
+                    user=(
+                        user_prompt
+                        + "\n\nIMPORTANT: Your previous response had invalid JSON syntax. "
+                        "Return ONLY one strictly valid raw JSON object matching the schema. "
+                        "Use single quotes inside string values instead of unescaped double quotes."
+                    ),
+                    temperature=0.0,
+                    max_tokens=1600,
+                    timeout=45.0,
+                    expect_json=True,
+                    disable_fast_thinking=False,
+                )
+                parsed = _extract_json_object(raw_retry)
+            overall = str(parsed.get("overall_encouragement") or "").strip()
+            raw_reviews = parsed.get("question_reviews")
+            if not overall or not isinstance(raw_reviews, list):
+                return fallback_debrief
+
+            clean_reviews: list[dict[str, Any]] = []
+            for qr in raw_reviews:
+                if not isinstance(qr, dict):
+                    continue
+                qid = str(qr.get("question_id") or "").strip()
+                matched_q = q_by_id.get(qid)
+                if matched_q is None and len(answered_questions) == 1:
+                    matched_q = answered_questions[0]
+                    qid = str(matched_q.get("id") or "")
+                if matched_q is None:
+                    continue
+                default_carl = dict(matched_q.get("carl_signals") or {})
+                clean_reviews.append(
+                    {
+                        "question_id": qid,
+                        "title": str(qr.get("title") or matched_q.get("title") or "Practice Question").strip(),
+                        "prompt": str(qr.get("prompt") or matched_q.get("prompt") or "").strip(),
+                        "carl": _norm_carl(qr.get("carl"), default_carl),
+                        "strength": str(qr.get("strength") or "").strip(),
+                        "coaching_tip": str(qr.get("coaching_tip") or "").strip(),
+                        "carl_reframe": str(qr.get("carl_reframe") or "").strip(),
+                    }
+                )
+            if not clean_reviews:
+                return fallback_debrief
+
+            raw_strengths = parsed.get("top_strengths") if isinstance(parsed.get("top_strengths"), list) else []
+            clean_strengths = [str(s).strip() for s in raw_strengths if isinstance(s, str) and s.strip()][:5]
+            if not clean_strengths:
+                clean_strengths = list(fallback_debrief["top_strengths"])
+
+            raw_drill = parsed.get("retry_drill") if isinstance(parsed.get("retry_drill"), dict) else {}
+            drill_qid = str(raw_drill.get("question_id") or "").strip()
+            drill_prompt = str(raw_drill.get("prompt") or "").strip()
+            if not drill_prompt or drill_qid not in q_by_id:
+                clean_drill = dict(fallback_debrief["retry_drill"])
+            else:
+                clean_drill = {
+                    "question_id": drill_qid,
+                    "focus": str(raw_drill.get("focus") or "Sharpen CARL clarity in 45 seconds").strip(),
+                    "prompt": drill_prompt,
+                }
+
+            return {
+                "overall_encouragement": overall,
+                "top_strengths": clean_strengths,
+                "carl_primer": str(parsed.get("carl_primer") or fallback_debrief["carl_primer"]).strip(),
+                "question_reviews": clean_reviews,
+                "retry_drill": clean_drill,
+            }
+        except Exception as exc:
+            logger.warning("LLM generate_practice_debrief failed (%s); using heuristic debrief", exc)
+            return fallback_debrief
+
+    async def evaluate_practice_retry(
+        self,
+        *,
+        role_title: str,
+        target_level: str,
+        drill_focus: str,
+        drill_prompt: str,
+        original_answer: str,
+        retry_answer: str,
+    ) -> dict[str, Any]:
+        """Give immediate, encouraging before-vs-after coaching on a 45-second Retry Weak Part drill."""
+        from .practice import estimate_carl_heuristic
+
+        rank = {"missing": 0, "partial": 1, "strong": 2}
+        carl_before = estimate_carl_heuristic(original_answer)
+        carl_after = estimate_carl_heuristic(retry_answer)
+        improved_dims = [
+            dim.title()
+            for dim in ("context", "action", "result", "learning")
+            if rank[carl_after[dim]] > rank[carl_before[dim]]
+        ]
+        missing_after = [
+            dim.title()
+            for dim in ("result", "learning", "action", "context")
+            if carl_after[dim] != "strong"
+        ]
+
+        if improved_dims:
+            encourage_fb = f"Great rep — you clearly leveled up {', '.join(improved_dims)} in this 45-second pass!"
+            improved_fb = (
+                f"Compared to your first answer, {', '.join(improved_dims)} moved up in CARL signal "
+                "and reads much tighter for a panel."
+            )
+        elif sum(rank[v] for v in carl_after.values()) >= 6:
+            encourage_fb = "Strong, crisp delivery — you kept your CARL signal intact in a tight 45-second window!"
+            improved_fb = "You maintained clear ownership and measurable impact while keeping the pacing focused."
+        else:
+            encourage_fb = "Good effort getting another rep in — let's sharpen one concrete detail on the next pass."
+            improved_fb = (
+                "The retry stayed close to your original CARL coverage; adding a concrete metric or explicit takeaway "
+                "will create a bigger before → after jump."
+            )
+        polish_fb = (
+            f"For one final polish, add a crisp sentence strengthening {missing_after[0]}."
+            if missing_after
+            else "Lock this phrasing in — it's concise, owned, quantified, and reflective."
+        )
+
+        fallback = {
+            "encouragement": encourage_fb,
+            "what_improved": improved_fb,
+            "one_more_polish": polish_fb,
+            "carl_after": carl_after,
+        }
+        if not self.config.is_configured:
+            return fallback
+
+        sys_p = render_prompt("practice_retry_eval")
+        usr_p = (
+            f"Role: {role_title} ({target_level})\n"
+            f"Retry Drill Focus: {drill_focus}\nDrill Prompt: {drill_prompt}\n\n"
+            f"Original Answer:\n{original_answer[:2500]}\n\n"
+            f"45-Second Retry Answer:\n{retry_answer[:2500]}"
+        )
+        try:
+            raw = await self._complete_text(
+                model=self.config.fast_model,
+                system=sys_p,
+                user=usr_p,
+                temperature=0.35,
+                max_tokens=380,
+                timeout=25.0,
+                expect_json=True,
+            )
+            parsed = _extract_json_object(raw)
+            enc = str(parsed.get("encouragement") or "").strip()
+            if not enc:
+                return fallback
+            raw_ca = parsed.get("carl_after") if isinstance(parsed.get("carl_after"), dict) else {}
+            valid = {"strong", "partial", "missing"}
+            norm_ca = {
+                dim: (str(raw_ca.get(dim, "")).lower() if str(raw_ca.get(dim, "")).lower() in valid else carl_after[dim])
+                for dim in ("context", "action", "result", "learning")
+            }
+            return {
+                "encouragement": enc,
+                "what_improved": str(parsed.get("what_improved") or improved_fb).strip(),
+                "one_more_polish": str(parsed.get("one_more_polish") or polish_fb).strip(),
+                "carl_after": norm_ca,
+            }
+        except Exception as exc:
+            logger.warning("LLM evaluate_practice_retry failed (%s); using fallback", exc)
+            return fallback
 
 
-def _calibration_rubric_for(interview_type: str) -> str:
-    if interview_type == "system_design":
-        return (
-            "- This is a collaborative **System Design** exercise, NOT a resume review. Never audit past-job credentials or `'I'` vs `'we'` ownership.\n"
-            "- Judge signal on:\n"
-            "  1. **Scoping & prioritization**: clarifying core requirements and moving smoothly into the high-level design and explored deep dives.\n"
-            "  2. **Architecture & data/access patterns**: coherent end-to-end flows, clean data modeling/abstractions, sensible storage & transport choices.\n"
-            "  3. **Scale intuition & bottlenecks (on explored areas)**: recognizing where the design breaks when probed or when scale is central (e.g., large-channel fan-out, hot keys, delivery guarantees, disconnects). Value clear qualitative reasoning about orders of magnitude and bottlenecks—do NOT ding them for skipping whiteboard arithmetic or for bottlenecks the interviewer never steered into during a 35–45 minute clock.\n"
-            "  4. **Tradeoffs & collaboration**: articulating problem → options → tradeoffs → decision clearly, and defending or revising choices cleanly when probed.\n"
-            "- **Level-Calibrated Passing Bars (35–45 min live interview):**\n"
-            "  - **Mid-Level (E4 / L4):** Passing (`hire`) = clean requirements & scoping, coherent end-to-end HLD, sensible baseline DB/transport choices, and strong coachability. Technical mistakes at Senior depth (e.g., hot-key sharding at 100M+ scale, stateful socket ownership internals, complex race recovery) or mild over-engineering are *growth areas to flag*, not automatic No Hires if fundamentals and coachability are solid.\n"
-            "  - **Senior (E5 / L5):** Passing (`hire`) = drives structure independently, clearly weighs tradeoffs across options, and lands solid correctness/scaling answers on the 2–3 deep dives actually explored. `strong_hire` at E5 = crisp pacing, unprompted problem→options→decision loops, clean correctness, and rapid recovery on extensions—does NOT require exhaustively covering unasked theoretical failure modes.\n"
-            "  - **Staff (E6 / L6):** Passing (`hire`) = crisp end-to-end mastery, proactive bottleneck framing, production-grade tradeoff depth, and clean adaptation on hard extensions. If the interviewer paced the 35–40 min loop like a Senior interview and affirmed sections without pushing into Staff-only depth, distinguish demonstrated `strong_hire` (E5) / `hire` (E6) signal from unprobed Staff topics instead of defaulting to Below Bar."
-        )
-    if interview_type == "coding":
-        return (
-            "- This is a **Coding** interview, NOT a resume review. Never audit `'I'` vs `'we'` ownership or past-job metrics.\n"
-            "- Judge signal on:\n"
-            "  1. **Problem decomposition & clarity**: understanding requirements and structuring a clean approach before diving in.\n"
-            "  2. **Algorithmic & data-structure judgment**: choosing appropriate abstractions and understanding complexity tradeoffs.\n"
-            "  3. **Correctness & edge cases**: catching boundary conditions, tracing/testing thoughtfully, and debugging methodically.\n"
-            "  4. **Communication**: explaining reasoning clearly and responding well to hints or probes."
-        )
-    if interview_type == "behavioral":
-        return (
-            "- This is a **Behavioral** interview focused on real past work, judgment, and collaboration.\n"
-            "- Judge signal on:\n"
-            "  1. **Clarity of role & impact**: can we understand what the candidate actually drove, built, or decided? (Normal people say `'we'` about team efforts—only flag ownership as unclear if their personal contribution stays genuinely ambiguous, never count pronouns.)\n"
-            "  2. **Decision quality & tradeoffs**: navigating ambiguity, weighing alternatives, handling pushback or cross-team alignment.\n"
-            "  3. **Outcomes & reflection**: concrete results (qualitative impact, shipped capabilities, team/customer outcomes, or rough scale are all valid—do NOT penalize a candidate just because they don't recall exact percentages or metrics from years ago) and honest lessons learned."
-        )
-    return (
-        "- Evaluate technical depth, clarity of reasoning, tradeoff awareness, and communication matched to the actual topics discussed.\n"
-        "- Judge the substance of engineering thinking and decision quality—do NOT police pronouns or penalize missing exact numbers where qualitative reasoning fits."
-    )
+_probe_guidance_for = probe_guidance_for
+_calibration_rubric_for = calibration_rubric_for
 
 
 THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)

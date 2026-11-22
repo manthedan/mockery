@@ -1,3 +1,17 @@
+import { createProfileAddonsController } from "./profile_addons.js";
+import { createPracticeStudioController } from "./practice_studio.js";
+import { createSystemDesignStudioPlugin } from "./design_studio.js";
+import { createCodingStudioPlugin } from "./coding_studio.js";
+import {
+  createMachine,
+  createMachineRegistry,
+  createModalTokenController,
+  createPackOpTracker,
+  deriveAppAllowedActions,
+  deriveAppRoute,
+  formatApiDetail,
+} from "./state_machines.js";
+
 const CHANNEL_INTERVIEWER = 0x01;
 const CHANNEL_CANDIDATE = 0x02;
 const CHANNEL_ROOM_MIC = 0x03;
@@ -61,10 +75,14 @@ const CAPTURE_TRANSITIONS = {
   stopping: new Set(["idle"]),
 };
 
+const clientMachines = createMachineRegistry({ maxTransitions: 40 });
+const packOps = createPackOpTracker(clientMachines);
+
 const state = {
   wsState: "connecting",
   captureState: "idle",
   modalState: "none",
+  route: "launchpad",
   rightTab: "probes",
   wideCopilot: false,
   editingSelfRating: false,
@@ -73,8 +91,10 @@ const state = {
   forceWorkspace: false,
 
   ws: null,
+  wsReconnectTimer: null,
   outbox: [],
   session: null,
+  optimisticBackup: null,
   selectedQaId: null,
   asr: { state: "loading", generation: 0, last_inference_ms: 0 },
   diarizer: null,
@@ -90,6 +110,8 @@ const state = {
   navLockUntil: 0,
   pendingNewSession: false,
   pendingQARerender: false,
+  savingSettings: false,
+  loadingSavedSession: false,
 
   sharedAudioCtx: null,
   audioCleanupFns: [],
@@ -102,14 +124,29 @@ const state = {
   discovery: null,
   onboardingChecked: false,
   onboardProvider: "gemini",
+  onboardStep: "ai", // "ai" | "packs"
+  addons: null,
+  tts: null,
+  profileSummary: null,
+  practiceActive: false,
+  clientMachines,
+  packOps,
 };
+
+let profileAddons = null;
+let practiceStudio = null;
 
 const _mockeryStateDescriptor = {
   get() {
+    const regSnap = clientMachines.snapshot();
+    const practiceSnap = practiceStudio?.getStateSnapshot?.() || null;
+    const serverMachines = state.session?.state_machines || null;
+    const serverAllowedEvents = serverMachines?.session?.allowed_events || [];
     return {
       wsState: state.wsState,
       captureState: state.captureState,
       modalState: state.modalState,
+      onboardStep: state.onboardStep,
       rightTab: state.rightTab,
       wideCopilot: state.wideCopilot,
       selectedQaId: state.selectedQaId,
@@ -117,7 +154,25 @@ const _mockeryStateDescriptor = {
       theme: document.documentElement.getAttribute("data-theme"),
       asr: state.asr,
       diarizer: state.diarizer,
-      serverMachines: state.session?.state_machines || null,
+      addons: state.addons,
+      tts: state.tts,
+      profileSummary: state.profileSummary,
+      practiceActive: state.practiceActive,
+      serverMachines,
+      route: state.route,
+      practice: practiceSnap,
+      profileAddons: profileAddons?.getStateSnapshot?.() || null,
+      activeOps: regSnap.activeOps,
+      recentTransitions: regSnap.recentTransitions,
+      clientMachines: regSnap.machines,
+      allowedActions: deriveAppAllowedActions({
+        route: state.route,
+        modalState: state.modalState,
+        captureState: state.captureState,
+        wsState: state.wsState,
+        serverAllowedEvents,
+        practice: practiceSnap,
+      }),
     };
   },
 };
@@ -169,36 +224,70 @@ function initTheme() {
 
 /* ---------------- Core State Helpers ---------------- */
 
-function setWsState(next) {
-  if (next === state.wsState) return;
-  if (!WS_TRANSITIONS[state.wsState]?.has(next)) {
-    console.warn(`Unexpected WS transition: ${state.wsState} -> ${next}`);
-  }
-  const prev = state.wsState;
-  state.wsState = next;
-  renderConnectionIndicator();
-  if (next === "reconnecting" && prev === "connected") {
-    showToast("Lost the connection. Reconnecting…", 3000);
-  } else if (next === "connected" && prev !== "connecting") {
-    showToast("Reconnected.", 2000);
-  }
+const wsMachine = createMachine({
+  name: "ws_transport",
+  initial: "connecting",
+  transitions: WS_TRANSITIONS,
+  registry: clientMachines,
+  strict: false,
+  onTransition: (next, prev) => {
+    state.wsState = next;
+    renderConnectionIndicator();
+    if (next === "reconnecting" && prev === "connected") {
+      showToast("Lost the connection. Reconnecting…", 3000);
+    } else if (next === "connected" && prev !== "connecting") {
+      showToast("Reconnected.", 2000);
+    }
+  },
+});
+
+const captureMachine = createMachine({
+  name: "copilot_capture",
+  initial: "idle",
+  transitions: CAPTURE_TRANSITIONS,
+  registry: clientMachines,
+  strict: true,
+  onTransition: (next) => {
+    state.captureState = next;
+    renderCaptureControls();
+    renderWorkspaceMode();
+  },
+});
+
+const modalCtrl = createModalTokenController({
+  initial: "none",
+  registry: clientMachines,
+  onChange: (next, prev) => {
+    state.modalState = next;
+    el("settingsModal")?.classList.toggle("hidden", next !== "settings");
+    el("historyModal")?.classList.toggle("hidden", next !== "history");
+    el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
+    el("profileModal")?.classList.toggle("hidden", next !== "profile");
+    if (prev === "onboarding" && next !== "onboarding") {
+      if (state.onboardStep === "packs") {
+        try {
+          window.localStorage?.setItem("mockery_onboard_packs_seen", "1");
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!practiceStudio?.isPracticeActive?.()) {
+        practiceStudio?.stopSpeaking?.();
+      }
+    }
+  },
+});
+
+function setWsState(next, event = null) {
+  wsMachine.transition(next, { event });
 }
 
-function setCaptureState(next) {
-  if (next === state.captureState) return;
-  if (!CAPTURE_TRANSITIONS[state.captureState]?.has(next)) {
-    throw new Error(`Illegal client capture transition: ${state.captureState} -> ${next}`);
-  }
-  state.captureState = next;
-  renderCaptureControls();
-  renderWorkspaceMode();
+function setCaptureState(next, event = null) {
+  captureMachine.transition(next, { event });
 }
 
-function setModalState(next) {
-  state.modalState = next;
-  el("settingsModal").classList.toggle("hidden", next !== "settings");
-  el("historyModal").classList.toggle("hidden", next !== "history");
-  el("onboardingModal")?.classList.toggle("hidden", next !== "onboarding");
+function setModalState(next, opts = {}) {
+  return modalCtrl.set(next, opts);
 }
 
 function closeAllPopovers() {
@@ -262,31 +351,88 @@ function allowedEventsSet() {
 
 /* ---------------- WebSocket Transport State Machine ---------------- */
 
+function saveOptimisticBackup() {
+  const sm = state.session?.state_machines;
+  if (!sm || state.optimisticBackup) return;
+  state.optimisticBackup = {
+    sessionId: state.session.id,
+    phase: sm.session?.phase,
+    allowed_events: Array.isArray(sm.session?.allowed_events) ? [...sm.session.allowed_events] : [],
+    jobs: sm.jobs ? { ...sm.jobs } : {},
+  };
+}
+
+function rollbackOptimisticState() {
+  const b = state.optimisticBackup;
+  state.optimisticBackup = null;
+  if (!b || !state.session || state.session.id !== b.sessionId || !state.session.state_machines) {
+    return;
+  }
+  const sm = state.session.state_machines;
+  if (sm.session) {
+    sm.session.phase = b.phase;
+    sm.session.allowed_events = b.allowed_events;
+  }
+  if (sm.jobs) {
+    sm.jobs = { ...sm.jobs, ...b.jobs };
+  }
+  renderPhaseAndControls();
+  renderQAList();
+  renderCalibrationPanel();
+}
+
 function connectWS() {
-  setWsState(state.wsState === "reconnecting" ? "connecting" : state.wsState);
+  if (state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+  }
+  if (state.wsState === "reconnecting") {
+    setWsState("connecting", "ws_reconnect");
+  }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws/session`);
   ws.binaryType = "arraybuffer";
   state.ws = ws;
 
   ws.onopen = () => {
-    setWsState("connected");
-    while (state.outbox.length > 0 && ws.readyState === WebSocket.OPEN) {
-      ws.send(state.outbox.shift());
+    if (state.ws !== ws) return;
+    if (state.wsReconnectTimer) {
+      clearTimeout(state.wsReconnectTimer);
+      state.wsReconnectTimer = null;
     }
-    if (state.captureState === "streaming") {
+    setWsState("connected", "ws_open");
+    let flushedStart = false;
+    while (state.outbox.length > 0 && ws.readyState === WebSocket.OPEN) {
+      const raw = state.outbox.shift();
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.type === "start_capture") flushedStart = true;
+      } catch {
+        /* ignore */
+      }
+      ws.send(raw);
+    }
+    if (state.captureState === "streaming" && !flushedStart) {
       sendCmd({ type: "start_capture" });
     }
   };
 
   ws.onmessage = (ev) => {
+    if (state.ws !== ws) return;
     const msg = JSON.parse(ev.data);
     handleServerMessage(msg);
   };
 
   ws.onclose = () => {
-    setWsState("reconnecting");
-    setTimeout(connectWS, 1400);
+    if (state.ws !== ws) return;
+    state.pendingNewSession = false;
+    rollbackOptimisticState();
+    setWsState("reconnecting", "ws_close");
+    if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = setTimeout(() => {
+      state.wsReconnectTimer = null;
+      connectWS();
+    }, 1400);
   };
 }
 
@@ -320,11 +466,15 @@ function handleServerMessage(msg) {
   }
 
   if (msg.type === "transition_rejected") {
-    showToast(`${msg.remediation || "That isn't available right now."}`);
+    state.pendingNewSession = false;
+    rollbackOptimisticState();
+    showToast(`${msg.remediation || msg.message || "That isn't available right now."}`);
     return;
   }
 
   if (msg.type === "error") {
+    state.pendingNewSession = false;
+    rollbackOptimisticState();
     showToast(msg.message || "Something went wrong.");
     return;
   }
@@ -357,6 +507,7 @@ function handleServerMessage(msg) {
 
   if (msg.type === "regroup_loading") {
     if (state.session?.state_machines?.jobs) {
+      saveOptimisticBackup();
       state.session.state_machines.jobs.regroup = "running";
       state.session.state_machines.session.allowed_events =
         state.session.state_machines.session.allowed_events.filter(
@@ -375,6 +526,7 @@ function handleServerMessage(msg) {
       state.calibrationStreamRaf = null;
     }
     if (state.session?.state_machines) {
+      saveOptimisticBackup();
       state.session.state_machines.jobs.calibration = "running";
       state.session.state_machines.session.phase = "calibrating";
       state.editingSelfRating = false;
@@ -402,6 +554,7 @@ function handleServerMessage(msg) {
   }
 
   if (msg.type === "calibration_ready") {
+    state.optimisticBackup = null;
     state.streamingCalibrationMd = "";
     if (state.calibrationStreamRaf) {
       cancelAnimationFrame(state.calibrationStreamRaf);
@@ -421,6 +574,7 @@ function handleServerMessage(msg) {
   }
 
   if (msg.type === "session_state") {
+    state.optimisticBackup = null;
     const prevSelected = state.selectedQaId;
     const prevSessionId = state.session?.id;
     state.session = msg.session;
@@ -595,12 +749,17 @@ async function ensureSharedAudioContext() {
 
 async function startCapture() {
   if (state.captureState !== "idle") return;
+  if (state.practiceActive || practiceStudio?.isPracticeStartingOrActive?.()) {
+    showToast("Exit Practice Mode before starting live recording.", 3000);
+    return;
+  }
 
   const mode = el("modeSelect").value;
   pushSessionConfig();
   closeAllPopovers();
+  const prevForceWorkspace = state.forceWorkspace;
   state.forceWorkspace = true;
-  setCaptureState("requesting_permissions");
+  setCaptureState("requesting_permissions", "start_capture");
 
   try {
     let streamsToAttach;
@@ -612,7 +771,7 @@ async function startCapture() {
 
     sendCmd({ type: "start_capture" });
     state.localSegmentStartedAt = Date.now();
-    setCaptureState("streaming");
+    setCaptureState("streaming", "permissions_granted");
 
     for (const item of streamsToAttach) {
       attachStreamToSharedContext(item.ctx, item.stream, item.channelId, item.meterId);
@@ -622,7 +781,8 @@ async function startCapture() {
     state.timerHandle = setInterval(updateTimer, 500);
   } catch (err) {
     stopAudioStreamsOnly();
-    setCaptureState("idle");
+    state.forceWorkspace = prevForceWorkspace;
+    setCaptureState("idle", "permissions_failed");
     sendCmd({ type: "cancel_capture" });
     showToast(`Could not start recording: ${err.message || err}`, 5500);
   }
@@ -874,8 +1034,32 @@ function renderWorkspaceMode() {
   const qas = state.session?.qa_groups_resolved || [];
   const warmup = state.session?.warmup_resolved || [];
   const hasContent = qas.length > 0 || warmup.length > 0;
-  const isCapturing = state.captureState !== "idle";
-  const showLaunchpad = !hasContent && !isCapturing && !state.forceWorkspace;
+  const nextRoute = deriveAppRoute({
+    practiceActive: state.practiceActive,
+    captureState: state.captureState,
+    forceWorkspace: state.forceWorkspace,
+    hasCopilotContent: hasContent,
+  });
+  if (nextRoute !== state.route) {
+    clientMachines.recordTransition({
+      machine: "app_route",
+      from: state.route,
+      to: nextRoute,
+      event: "render_workspace_mode",
+      reason: null,
+    });
+    state.route = nextRoute;
+  }
+
+  if (nextRoute === "practice") {
+    el("appShell").classList.remove("setup-mode");
+    el("setupLaunchpad").classList.add("hidden");
+    el("workspaceGrid").classList.add("hidden");
+    state.homeVisible = false;
+    return;
+  }
+
+  const showLaunchpad = nextRoute === "launchpad";
 
   el("appShell").classList.toggle("setup-mode", showLaunchpad);
   el("setupLaunchpad").classList.toggle("hidden", !showLaunchpad);
@@ -892,6 +1076,7 @@ function renderWorkspaceMode() {
   }
   if (showLaunchpad && !state.homeVisible) {
     refreshHomeSessions();
+    practiceStudio?.refreshPracticeHistory();
   }
   state.homeVisible = showLaunchpad;
 
@@ -1076,8 +1261,10 @@ function updateContextSummaryChip() {
   el("contextRoleSummary").textContent = role;
   el("contextTypeSummary").textContent = TYPE_SHORT_LABELS[typeVal] || typeVal;
 
-  for (const btn of document.querySelectorAll("#setupTypePills [data-setup-type]")) {
-    btn.classList.toggle("active", btn.getAttribute("data-setup-type") === typeVal);
+  if (!practiceStudio?.isHomePracticeMode?.()) {
+    for (const btn of document.querySelectorAll("#setupTypePills [data-setup-type]")) {
+      btn.classList.toggle("active", btn.getAttribute("data-setup-type") === typeVal);
+    }
   }
   const modeVal = el("modeSelect").value || "remote_meet";
   for (const btn of document.querySelectorAll("#setupModePills [data-setup-mode]")) {
@@ -1093,7 +1280,7 @@ function syncConfigInputsFromSession() {
   if (document.activeElement !== el("roleInput")) {
     el("roleInput").value = cfg.role_title;
   }
-  if (document.activeElement !== el("setupRoleInput")) {
+  if (!practiceStudio?.isHomePracticeMode?.() && document.activeElement !== el("setupRoleInput")) {
     el("setupRoleInput").value = cfg.role_title;
   }
   if (document.activeElement !== el("typeSelect")) {
@@ -1830,7 +2017,7 @@ function renderProbesPanel() {
   if (pState === "loading") {
     setState("");
     setDiveBtn("Thinking…", { disabled: true });
-    content.innerHTML = `<p class="probe-thinking">Thinking of follow-ups…</p>`;
+    content.innerHTML = `<p class="probe-thinking"><span class="typing-dots" aria-hidden="true"><span></span><span></span><span></span></span><span>Thinking of follow-ups…</span></p>`;
     return;
   }
 
@@ -2517,8 +2704,11 @@ function renderCalibrationPanel() {
   const reportMd = state.session?.calibration_markdown || "";
   const hasReport = Boolean(reportMd);
 
-  el("runCalibrationBtn").disabled = !allowed.has("generate_calibration") || calibRunning;
-  el("runCalibrationBtn").textContent = calibRunning ? "Reading the transcript…" : "Reveal the audit";
+  const calibBtn = el("runCalibrationBtn");
+  calibBtn.disabled = !allowed.has("generate_calibration") || calibRunning;
+  calibBtn.classList.toggle("is-loading", calibRunning);
+  calibBtn.setAttribute("aria-busy", calibRunning ? "true" : "false");
+  calibBtn.textContent = calibRunning ? "Reading the transcript…" : "Reveal the audit";
   const blindNote = el("blindCallNote");
   if (blindNote) {
     const blockedWhy = sm?.session?.blocked_reasons?.generate_calibration || "";
@@ -2567,7 +2757,7 @@ function renderCalibrationPanel() {
       outputEl.innerHTML = renderMarkdownSafe(streamingMd);
     } else {
       outputEl.classList.add("empty-report");
-      outputEl.textContent = "Reading the whole transcript against your call…";
+      outputEl.innerHTML = `<p class="probe-thinking" role="status" aria-live="polite"><span class="typing-dots" aria-hidden="true"><span></span><span></span><span></span></span><span>Reading the whole transcript against your call…</span></p>`;
     }
   } else if (hasReport) {
     const insights = parseCalibrationInsights(reportMd);
@@ -2672,10 +2862,23 @@ function showInlineTestResult(targetEl, resObj) {
 
 async function openSettingsModal() {
   closeAllPopovers();
-  const [statusRes, disc] = await Promise.all([fetch("/api/status"), fetchDiscovery()]);
+  const reqToken = modalCtrl.beginRequest();
+  let statusRes;
+  let disc;
+  try {
+    [statusRes, disc] = await Promise.all([fetch("/api/status"), fetchDiscovery()]);
+  } catch (err) {
+    if (modalCtrl.isCurrent(reqToken)) {
+      showToast(`Could not load settings: ${err.message || "network error"}`);
+    }
+    return;
+  }
   const data = await statusRes.json();
+  if (!modalCtrl.isCurrent(reqToken)) return;
   state.llm = data.llm;
   syncHomeAiPrompt(data.llm);
+  profileAddons?.applyStatusSnapshot(data);
+  profileAddons?.renderAddonsSection();
 
   const testResultEl = el("testLlmResult");
   if (testResultEl) {
@@ -2887,13 +3090,15 @@ async function openSettingsModal() {
     syncModelChoosers({ redetect: true });
   };
 
-  setModalState("settings");
+  setModalState("settings", { reqToken, event: "open_settings" });
 }
 
 async function testSettingsConnection() {
   const btn = el("testLlmBtn");
   const out = el("testLlmResult");
   btn.disabled = true;
+  btn.classList.add("is-loading");
+  btn.setAttribute("aria-busy", "true");
   const origLabel = btn.textContent;
   btn.textContent = "Testing…";
   out.classList.remove("hidden", "is-ok", "is-err");
@@ -2917,6 +3122,8 @@ async function testSettingsConnection() {
     showInlineTestResult(out, { ok: false, error: err.message || "Network error" });
   } finally {
     btn.disabled = false;
+    btn.classList.remove("is-loading");
+    btn.setAttribute("aria-busy", "false");
     btn.textContent = origLabel;
   }
 }
@@ -2926,7 +3133,7 @@ async function openDataDirectory() {
     const res = await fetch("/api/open-data-dir", { method: "POST" });
     const data = await res.json();
     if (!res.ok || !data.ok) {
-      showToast(data.detail || `Sessions folder: ${data.path || "local"}`, 3500);
+      showToast(formatApiDetail(data.detail, `Sessions folder: ${data.path || "local"}`), 3500);
     }
   } catch (err) {
     showToast(`Could not open folder: ${err.message || "network error"}`);
@@ -2934,6 +3141,16 @@ async function openDataDirectory() {
 }
 
 async function saveSettings() {
+  if (state.savingSettings) return;
+  state.savingSettings = true;
+  const settingsOpenToken = modalCtrl.currentToken;
+  clientMachines.beginOp("save_settings");
+  const saveBtn = el("saveSettingsBtn");
+  const origLabel = saveBtn?.textContent || "Save";
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving…";
+  }
   const payload = {
     provider: el("llmPresetSelect").value,
     base_url: el("llmBaseUrlInput").value,
@@ -2942,42 +3159,268 @@ async function saveSettings() {
     api_key: el("llmApiKeyInput").value || null,
     parakeet_model: el("parakeetModelSelect").value,
   };
-  let res;
   try {
-    res = await fetch("/api/settings/llm", {
+    const res = await fetch("/api/settings/llm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(formatApiDetail(err.detail, `Could not save settings (${res.status}).`));
+      return;
+    }
+    const data = await res.json();
+    if (data.llm) {
+      state.llm = data.llm;
+      syncHomeAiPrompt(data.llm);
+    }
+    if (data.asr) {
+      state.asr = data.asr;
+      renderAsrBadge();
+    }
+    showToast("Settings saved.", 2200);
+    modalCtrl.closeIf("settings", settingsOpenToken);
   } catch (err) {
     showToast(`Failed to save settings: ${err.message || "network error"}`);
-    return;
+  } finally {
+    state.savingSettings = false;
+    clientMachines.endOp("save_settings");
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = origLabel;
+    }
   }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const msg = typeof err.detail === "string" ? err.detail : err.detail?.message;
-    showToast(msg || `Could not save settings (${res.status}).`);
-    return;
-  }
-  const data = await res.json();
-  if (data.llm) {
-    state.llm = data.llm;
-    syncHomeAiPrompt(data.llm);
-  }
-  if (data.asr) {
-    state.asr = data.asr;
-    renderAsrBadge();
-  }
-  showToast("Settings saved.", 2200);
-  setModalState("none");
 }
 
-async function openOnboardingModal(statusData = null) {
-  const [data, disc] = await Promise.all([
-    statusData ? Promise.resolve(statusData) : fetch("/api/status").then((r) => r.json()),
-    fetchDiscovery(),
-  ]);
+function shouldPromptVoiceStep() {
+  if (state.tts) {
+    const anyInstalled = Boolean(
+      state.tts.neural_installed || state.tts.kokoro_installed || state.tts.phonon_installed
+    );
+    const anyAvailable = Boolean(state.tts.kokoro_available || state.tts.phonon_available);
+    return anyAvailable && !anyInstalled;
+  }
+  const packs = state.addons?.packs || [];
+  const voicePacks = packs.filter((p) => p.id === "phonon_tts" || p.id === "kokoro_tts");
+  const anyInstalled = voicePacks.some((p) => p.installed);
+  const anyAvailable = voicePacks.some((p) => p.available);
+  return anyAvailable && !anyInstalled;
+}
+
+function isCloudLlmActive() {
+  const prov = state.llm?.provider || "";
+  return ["gemini", "anthropic", "openai", "deepseek", "openrouter"].includes(prov);
+}
+
+function renderOnboardingPacksStep() {
+  const packs = state.addons?.packs || [];
+  const ttsEngines = state.tts?.engines || {};
+
+  const renderVoiceCard = ({
+    packId,
+    cardId,
+    badgeId,
+    previewBtnId,
+    installBtnId,
+    errId,
+    shortName,
+    defaultSize,
+    ttsInstalled,
+    ttsAvailable,
+    ttsError,
+  }) => {
+    const pack = packs.find((p) => p.id === packId) || null;
+    const op = packOps.get(packId);
+    const installed = Boolean(ttsInstalled || pack?.installed);
+    const available =
+      ttsAvailable !== undefined ? Boolean(ttsAvailable) : pack?.available !== false;
+    const size = pack?.size_mb || defaultSize;
+
+    const cardEl = el(cardId);
+    const badgeEl = el(badgeId);
+    const previewBtn = el(previewBtnId);
+    const installBtn = el(installBtnId);
+    const errEl = el(errId);
+
+    if (cardEl) {
+      cardEl.classList.toggle("is-installed", installed);
+    }
+    if (badgeEl) badgeEl.classList.toggle("hidden", !installed);
+    if (previewBtn) {
+      previewBtn.classList.toggle("hidden", !installed);
+    }
+    if (installBtn) {
+      installBtn.classList.toggle("hidden", installed || !available);
+      const busy = op === "installing" || op === "uninstalling";
+      installBtn.disabled = busy;
+      // Size lives once, in the card's description line — never repeated on the button.
+      installBtn.textContent =
+        op === "installing"
+          ? "Downloading…"
+          : op === "uninstalling"
+            ? "Removing…"
+            : pack?.state === "error"
+              ? `Retry ${shortName}`
+              : `Install ${shortName}`;
+      installBtn.classList.toggle("is-loading", op === "installing");
+      installBtn.title = `${shortName} · ${size} MB download, then fully offline`;
+    }
+    if (errEl) {
+      const errMsg = pack?.error || ttsError || "";
+      errEl.textContent = errMsg;
+      errEl.classList.toggle("hidden", !errMsg);
+    }
+    return installed;
+  };
+
+  const phononInstalled = renderVoiceCard({
+    packId: "phonon_tts",
+    cardId: "onboardPhononCard",
+    badgeId: "onboardPhononBadge",
+    previewBtnId: "onboardPhononPreviewBtn",
+    installBtnId: "onboardPhononInstallBtn",
+    errId: "onboardPhononError",
+    shortName: "Phonon",
+    defaultSize: 62,
+    ttsInstalled: state.tts?.phonon_installed ?? ttsEngines.phonon?.installed,
+    ttsAvailable: state.tts?.phonon_available ?? ttsEngines.phonon?.available,
+    ttsError: ttsEngines.phonon?.error,
+  });
+
+  const kokoroInstalled = renderVoiceCard({
+    packId: "kokoro_tts",
+    cardId: "onboardKokoroCard",
+    badgeId: "onboardKokoroBadge",
+    previewBtnId: "onboardKokoroPreviewBtn",
+    installBtnId: "onboardKokoroInstallBtn",
+    errId: "onboardKokoroError",
+    shortName: "Kokoro",
+    defaultSize: 183,
+    ttsInstalled: state.tts?.kokoro_installed ?? ttsEngines.kokoro?.installed,
+    ttsAvailable: state.tts?.kokoro_available ?? ttsEngines.kokoro?.available,
+    ttsError: ttsEngines.kokoro?.error,
+  });
+
+  const anyVoiceInstalled = phononInstalled || kokoroInstalled;
+  const doneBtn = el("onboardDoneBtn");
+  if (doneBtn) {
+    doneBtn.textContent = anyVoiceInstalled ? "Start using Mockery" : "Continue with macOS voice";
+    // One filled CTA per step: until a neural voice is in, that is "Install Phonon".
+    doneBtn.classList.toggle("btn-primary", anyVoiceInstalled);
+    doneBtn.classList.toggle("btn-outline", !anyVoiceInstalled);
+  }
+
+  const optList = el("onboardOptionalPacksList");
+  if (optList) {
+    const cloudActive = isCloudLlmActive();
+    const optionalIds = ["rampart_pii", "pyodide_python"];
+    const optionalPacks = optionalIds
+      .map((id) => packs.find((p) => p.id === id))
+      .filter(Boolean);
+
+    // Pack names come from the catalog, so every surface says the same thing;
+    // onboarding only shortens the description and states the size once.
+    const shortDesc = {
+      rampart_pii: "Hides names and contact details before anything reaches a cloud AI",
+      pyodide_python: "Runs your Python tests on this Mac",
+    };
+
+    optList.innerHTML = optionalPacks
+      .map((pk) => {
+        const desc = [shortDesc[pk.id] || pk.description, pk.size_mb ? `${pk.size_mb} MB` : ""]
+          .filter(Boolean)
+          .join(" · ");
+        const op = packOps.get(pk.id);
+        const isInstalling = op === "installing" || pk.state === "installing";
+        const isUninstalling = op === "uninstalling" || pk.state === "uninstalling";
+        const recTag =
+          pk.id === "rampart_pii" && cloudActive
+            ? `<span class="addon-size-pill is-rec">Recommended with cloud AI</span>`
+            : "";
+        let actionHtml = "";
+        if (isInstalling) {
+          actionHtml = `<span class="addon-state-badge is-busy">Downloading…</span>`;
+        } else if (isUninstalling) {
+          actionHtml = `<span class="addon-state-badge is-busy">Removing…</span>`;
+        } else if (pk.installed) {
+          actionHtml = `<span class="addon-state-badge is-ok">Installed</span>`;
+        } else {
+          actionHtml = `<button type="button" class="btn btn-outline btn-sm" data-onboard-install="${escapeHtml(
+            pk.id
+          )}">Install</button>`;
+        }
+        return `
+          <div class="onboard-pack-row">
+            <div class="onboard-pack-main">
+              <div class="onboard-pack-title">
+                ${escapeHtml(pk.name)}
+                ${recTag}
+              </div>
+              <div class="onboard-pack-desc">${escapeHtml(desc)}</div>
+              ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
+            </div>
+            <div class="onboard-pack-actions">${actionHtml}</div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+}
+
+function setOnboardStep(step) {
+  const nextStep = step === "packs" ? "packs" : "ai";
+  state.onboardStep = nextStep;
+  el("onboardStepAi")?.classList.toggle("hidden", nextStep !== "ai");
+  el("onboardStepPacks")?.classList.toggle("hidden", nextStep !== "packs");
+
+  for (const pill of document.querySelectorAll("[data-onboard-step]")) {
+    const active = pill.getAttribute("data-onboard-step") === nextStep;
+    pill.classList.toggle("active", active);
+    pill.classList.toggle(
+      "is-done",
+      nextStep === "packs" && pill.getAttribute("data-onboard-step") === "ai"
+    );
+    pill.setAttribute("aria-selected", active ? "true" : "false");
+    if (active) pill.setAttribute("aria-current", "step");
+    else pill.removeAttribute("aria-current");
+  }
+
+  el("onboardSkipBtn")?.classList.toggle("hidden", nextStep !== "ai");
+  el("onboardBackBtn")?.classList.toggle("hidden", nextStep !== "packs");
+  el("onboardNextStepBtn")?.classList.toggle("hidden", nextStep !== "ai");
+  el("onboardDoneBtn")?.classList.toggle("hidden", nextStep !== "packs");
+
+  if (nextStep === "packs") {
+    renderOnboardingPacksStep();
+  }
+}
+
+async function openOnboardingModal(statusData = null, { initialStep = null } = {}) {
+  const reqToken = modalCtrl.beginRequest();
+  let data;
+  let disc;
+  try {
+    [data, disc] = await Promise.all([
+      statusData ? Promise.resolve(statusData) : fetch("/api/status").then((r) => r.json()),
+      fetchDiscovery(),
+    ]);
+  } catch (err) {
+    if (modalCtrl.isCurrent(reqToken)) {
+      showToast(`Could not load AI setup: ${err.message || "network error"}`);
+    }
+    return;
+  }
+  if (!modalCtrl.isCurrent(reqToken)) return;
   state.llm = data.llm;
+  if (data.addons) {
+    state.addons = data.addons;
+    profileAddons?.applyStatusSnapshot({ addons: data.addons });
+  }
+  if (data.tts) {
+    state.tts = data.tts;
+    practiceStudio?.applyStatusSnapshot({ tts: data.tts });
+  }
   const presets = data.llm.presets || {};
 
   // 1. Detected local CLIs & running local LLM servers (1-click activation!)
@@ -3048,8 +3491,13 @@ async function openOnboardingModal(statusData = null) {
         const saved = await res.json();
         state.llm = saved.llm;
         syncHomeAiPrompt(saved.llm);
-        setModalState("none");
         showToast(`Connected ${chosen.label}.`, 2600);
+        if (shouldPromptVoiceStep()) {
+          btn.disabled = false;
+          setOnboardStep("packs");
+        } else {
+          setModalState("none");
+        }
       } else {
         btn.disabled = false;
         showToast("Could not activate provider.");
@@ -3087,10 +3535,12 @@ async function openOnboardingModal(statusData = null) {
 
   el("onboardApiKeyInput").value = "";
   el("onboardStatus").classList.add("hidden");
-  setModalState("onboarding");
+  setOnboardStep(initialStep || "ai");
+  setModalState("onboarding", { reqToken, event: "open_onboarding" });
 }
 
 async function testAndSaveOnboardingKey() {
+  const onboardToken = modalCtrl.currentToken;
   const provKey = state.onboardProvider || "gemini";
   const presets = state.llm?.presets || {};
   const p = presets[provKey] || {};
@@ -3102,6 +3552,8 @@ async function testAndSaveOnboardingKey() {
   }
   const btn = el("onboardTestSaveBtn");
   btn.disabled = true;
+  btn.classList.add("is-loading");
+  btn.setAttribute("aria-busy", "true");
   btn.textContent = "Testing…";
   statusEl.classList.remove("hidden", "is-ok", "is-err");
   statusEl.textContent = `Testing ${p.label || provKey}…`;
@@ -3137,14 +3589,21 @@ async function testAndSaveOnboardingKey() {
       state.llm = saved.llm;
       syncHomeAiPrompt(saved.llm);
       setTimeout(() => {
-        setModalState("none");
+        if (!modalCtrl.isCurrent(onboardToken) || state.modalState !== "onboarding") return;
         showToast(`${p.label || provKey} connected and ready.`, 2600);
+        if (shouldPromptVoiceStep()) {
+          setOnboardStep("packs");
+        } else {
+          modalCtrl.closeIf("onboarding", onboardToken);
+        }
       }, 450);
     }
   } catch (err) {
     showInlineTestResult(statusEl, { ok: false, error: err.message || "Network error" });
   } finally {
     btn.disabled = false;
+    btn.classList.remove("is-loading");
+    btn.setAttribute("aria-busy", "false");
     btn.textContent = "Test & Save";
   }
 }
@@ -3181,9 +3640,28 @@ async function checkInitialOnboarding() {
     if (!res.ok) return;
     const data = await res.json();
     state.llm = data.llm;
+    state.addons = data.addons || state.addons;
+    state.tts = data.tts || state.tts;
     syncHomeAiPrompt(data.llm);
+    profileAddons?.applyStatusSnapshot(data);
+    practiceStudio?.applyStatusSnapshot(data);
+    practiceStudio?.refreshPracticeHistory();
     if (data.llm?.needs_onboarding && state.modalState === "none") {
-      await openOnboardingModal(data);
+      await openOnboardingModal(data, { initialStep: "ai" });
+    } else if (
+      (data.tts?.kokoro_available || data.tts?.phonon_available) &&
+      !(data.tts?.neural_installed || data.tts?.kokoro_installed || data.tts?.phonon_installed) &&
+      state.modalState === "none"
+    ) {
+      let seenPacks = false;
+      try {
+        seenPacks = window.localStorage?.getItem("mockery_onboard_packs_seen") === "1";
+      } catch {
+        seenPacks = false;
+      }
+      if (!seenPacks) {
+        await openOnboardingModal(data, { initialStep: "packs" });
+      }
     }
   } catch {
     /* ignore */
@@ -3251,7 +3729,7 @@ async function refreshHomeSessions() {
     return;
   }
   if (!sessions.length) {
-    list.innerHTML = `<div class="home-empty">Interviews you run are kept here, with their transcript and calibration.</div>`;
+    list.innerHTML = `<div class="home-empty">Interviews you run are kept here.</div>`;
     return;
   }
   let lastDay = null;
@@ -3278,7 +3756,17 @@ async function refreshHomeSessions() {
 
 async function openHistoryModal() {
   closeAllPopovers();
-  const sessions = await fetchSavedSessions();
+  const reqToken = modalCtrl.beginRequest();
+  let sessions;
+  try {
+    sessions = await fetchSavedSessions();
+  } catch (err) {
+    if (modalCtrl.isCurrent(reqToken)) {
+      showToast(`Could not load interview history: ${err.message || "network error"}`);
+    }
+    return;
+  }
+  if (!modalCtrl.isCurrent(reqToken)) return;
   const list = el("historyList");
   if (!sessions.length) {
     list.innerHTML = `<div class="history-empty">No interviews saved yet.</div>`;
@@ -3304,44 +3792,56 @@ async function openHistoryModal() {
       })
       .join("");
   }
-  setModalState("history");
+  setModalState("history", { reqToken, event: "open_history" });
 }
 
 async function loadSavedSession(id) {
-  if (!id) return;
+  if (!id || state.loadingSavedSession) return;
   if (!allowedEventsSet().has("load_historical_session") || state.captureState !== "idle") {
     showToast("End the recording before opening another interview.");
     return;
   }
-  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/load`, { method: "POST" });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const msg = typeof err.detail === "string" ? err.detail : err.detail?.message;
-    showToast(msg || "Could not open that interview.");
-    return;
+  state.loadingSavedSession = true;
+  clientMachines.beginOp("load_saved_session", { sessionId: id });
+  try {
+    if (state.practiceActive && practiceStudio?.exitPracticeToHome) {
+      await practiceStudio.exitPracticeToHome();
+    }
+    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/load`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(formatApiDetail(err.detail, "Could not open that interview."));
+      return;
+    }
+    const data = await res.json();
+    state.session = data.session;
+    state.optimisticBackup = null;
+    state.activeCitationUttId = null;
+    state.editingSelfRating = false;
+    state.baseElapsedMs = data.session.live_elapsed_ms || 0;
+    renderTimerPill(state.baseElapsedMs / 1000);
+    const qas = state.session.qa_groups_resolved || [];
+    state.selectedQaId = qas.length ? qas[0].id : null;
+    syncConfigInputsFromSession();
+    renderWorkspaceMode();
+    renderSpeakerToggle();
+    renderPhaseAndControls();
+    renderQAList();
+    // A reopened interview starts on its first phase, so show the top of the transcript to match
+    // the highlighted phase tab (and the phase table in Calibration).
+    el("qaList").scrollTop = 0;
+    updateJumpToBottomVisibility();
+    renderProbesPanel();
+    renderCalibrationPanel();
+    renderMetricsBar();
+    activateRightTab(state.session.calibration_markdown ? "calibration" : "probes");
+    setModalState("none", { event: "loaded_saved_session" });
+  } catch (err) {
+    showToast(`Could not open that interview: ${err.message || "network error"}`);
+  } finally {
+    state.loadingSavedSession = false;
+    clientMachines.endOp("load_saved_session");
   }
-  const data = await res.json();
-  state.session = data.session;
-  state.activeCitationUttId = null;
-  state.editingSelfRating = false;
-  state.baseElapsedMs = data.session.live_elapsed_ms || 0;
-  renderTimerPill(state.baseElapsedMs / 1000);
-  const qas = state.session.qa_groups_resolved || [];
-  state.selectedQaId = qas.length ? qas[0].id : null;
-  syncConfigInputsFromSession();
-  renderWorkspaceMode();
-  renderSpeakerToggle();
-  renderPhaseAndControls();
-  renderQAList();
-  // A reopened interview starts on its first phase, so show the top of the transcript to match
-  // the highlighted phase tab (and the phase table in Calibration).
-  el("qaList").scrollTop = 0;
-  updateJumpToBottomVisibility();
-  renderProbesPanel();
-  renderCalibrationPanel();
-  renderMetricsBar();
-  activateRightTab(state.session.calibration_markdown ? "calibration" : "probes");
-  setModalState("none");
 }
 
 /* ---------------- Event Listeners & Hotkeys ---------------- */
@@ -3382,6 +3882,56 @@ function selectAndJumpToQa(qaId) {
   }
 }
 
+/* The Home role headline is a title that wraps instead of truncating. Enter commits
+   rather than breaking the line, pasted line breaks collapse to spaces, and a very long
+   title steps the type down so it still settles in two lines. Scripted writes go
+   through the same path, so every caller keeps assigning `.value` as before. */
+function bindRoleHeadline(field) {
+  if (!field) return;
+  const native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+  const sizesItself = typeof CSS !== "undefined" && CSS.supports?.("field-sizing", "content");
+
+  const fit = () => {
+    const len = native.get.call(field).trim().length;
+    const tier = len > 84 ? "sm" : len > 60 ? "md" : "";
+    if (tier) field.dataset.fit = tier;
+    else delete field.dataset.fit;
+    if (sizesItself) return;
+    // Browsers without field-sizing: measure the wrapped text (skipped while Home is hidden).
+    field.style.height = "auto";
+    field.style.height = field.scrollHeight ? `${field.scrollHeight}px` : "";
+  };
+
+  Object.defineProperty(field, "value", {
+    configurable: true,
+    get: () => native.get.call(field),
+    set: (next) => {
+      native.set.call(field, String(next ?? "").replace(/\s*[\r\n]+\s*/g, " "));
+      fit();
+    },
+  });
+
+  field.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" || ev.isComposing) return;
+    ev.preventDefault();
+    field.blur();
+  });
+  field.addEventListener("input", () => {
+    const raw = native.get.call(field);
+    if (/[\r\n]/.test(raw)) {
+      const caret = field.selectionStart;
+      field.value = raw;
+      field.setSelectionRange(caret, caret);
+    } else {
+      fit();
+    }
+  });
+  if (!sizesItself && typeof ResizeObserver === "function") {
+    new ResizeObserver(fit).observe(field.parentElement || field);
+  }
+  fit();
+}
+
 function initEvents() {
   el("startCaptureBtn").onclick = startCapture;
   el("setupStartBtn").onclick = startCapture;
@@ -3396,12 +3946,17 @@ function initEvents() {
     el("manualTextInput").focus();
   };
 
-  // Sync Setup Launchpad inputs <-> Topbar Popover inputs
+  // Sync Setup Launchpad inputs <-> Topbar Popover inputs (only mutate Copilot config in Copilot mode)
+  bindRoleHeadline(el("setupRoleInput"));
   el("setupRoleInput").oninput = () => {
+    if (practiceStudio?.isHomePracticeMode?.()) return;
     el("roleInput").value = el("setupRoleInput").value;
     updateContextSummaryChip();
   };
-  el("setupRoleInput").onchange = pushSessionConfig;
+  el("setupRoleInput").onchange = () => {
+    if (practiceStudio?.isHomePracticeMode?.()) return;
+    pushSessionConfig();
+  };
 
   el("roleInput").oninput = () => {
     el("setupRoleInput").value = el("roleInput").value;
@@ -3421,6 +3976,13 @@ function initEvents() {
   el("setupTypePills").onclick = (ev) => {
     const btn = ev.target.closest("[data-setup-type]");
     if (!btn) return;
+    if (practiceStudio?.isHomePracticeMode?.()) {
+      for (const opt of document.querySelectorAll("#setupTypePills [data-setup-type]")) {
+        opt.classList.toggle("active", opt === btn);
+        opt.setAttribute("aria-pressed", opt === btn ? "true" : "false");
+      }
+      return;
+    }
     el("typeSelect").value = btn.getAttribute("data-setup-type");
     pushSessionConfig();
   };
@@ -3745,12 +4307,38 @@ function initEvents() {
     }
   };
 
-  // First-Run Onboarding Modal
+  // First-Run Onboarding Modal (2-step wizard)
   el("homeSetupAiBtn")?.addEventListener("click", () => openOnboardingModal());
   el("closeOnboardingBtn")?.addEventListener("click", () => setModalState("none"));
   el("onboardTestSaveBtn")?.addEventListener("click", testAndSaveOnboardingKey);
   el("onboardSkipBtn")?.addEventListener("click", skipOnboardingTranscriptOnly);
   el("onboardMoreBtn")?.addEventListener("click", () => openSettingsModal());
+  el("onboardNextStepBtn")?.addEventListener("click", () => setOnboardStep("packs"));
+  el("onboardBackBtn")?.addEventListener("click", () => setOnboardStep("ai"));
+  el("onboardDoneBtn")?.addEventListener("click", () => setModalState("none"));
+  el("onboardPhononInstallBtn")?.addEventListener("click", () => {
+    profileAddons?.installPack("phonon_tts");
+  });
+  el("onboardPhononPreviewBtn")?.addEventListener("click", () => {
+    practiceStudio?.previewVoice?.({ engine: "phonon" });
+  });
+  el("onboardKokoroInstallBtn")?.addEventListener("click", () => {
+    profileAddons?.installPack("kokoro_tts");
+  });
+  el("onboardKokoroPreviewBtn")?.addEventListener("click", () => {
+    practiceStudio?.previewVoice?.({ engine: "kokoro" });
+  });
+  el("onboardOptionalPacksList")?.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-onboard-install]");
+    if (btn) {
+      profileAddons?.installPack(btn.getAttribute("data-onboard-install"));
+    }
+  });
+  for (const stepBtn of document.querySelectorAll("[data-onboard-step]")) {
+    stepBtn.addEventListener("click", () => {
+      setOnboardStep(stepBtn.getAttribute("data-onboard-step"));
+    });
+  }
   el("onboardApiKeyInput")?.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
@@ -3904,7 +4492,7 @@ function initEvents() {
 
     const tag = (ev.target?.tagName || "").toUpperCase();
     const isTyping = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-    if (isTyping || state.modalState !== "none") return;
+    if (isTyping || state.modalState !== "none" || state.practiceActive) return;
 
     if ((ev.key === "d" || ev.key === "D") && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
       ev.preventDefault();
@@ -3939,6 +4527,81 @@ function initEvents() {
 
 initTheme();
 initEvents();
+profileAddons = createProfileAddonsController({
+  state,
+  el,
+  escapeHtml,
+  showToast,
+  setModalState,
+  clientMachines,
+  packOps,
+  onPracticeQuestion: async (q) => {
+    const ok = await practiceStudio?.selectBankQuestion(q);
+    if (ok) setModalState("none");
+    return ok;
+  },
+  onRoleApply: (jd) => {
+    if (!jd?.title) return;
+    const roleLabel = jd.company ? `${jd.title} (${jd.company})` : jd.title;
+    el("setupRoleInput").value = roleLabel;
+    el("roleInput").value = roleLabel;
+    if (el("contextRoleSummary")) {
+      el("contextRoleSummary").textContent = roleLabel;
+    }
+    pushSessionConfig();
+    // The level pill follows the JD too; setTargetLevel refreshes the question picker itself.
+    if (!practiceStudio?.setTargetLevel(jd.target_level)) {
+      practiceStudio?.refreshQuestionPicker();
+    }
+  },
+  onLevelApply: (level, opts) => practiceStudio?.setTargetLevel(level, opts),
+  isPracticeHome: () => Boolean(practiceStudio?.isHomePracticeMode?.()),
+  onAddonsChange: (addons, tts = null) => {
+    state.addons = addons;
+    if (tts) state.tts = tts;
+    practiceStudio?.applyStatusSnapshot(tts ? { addons, tts } : { addons });
+    if (state.modalState === "onboarding" && state.onboardStep === "packs") {
+      renderOnboardingPacksStep();
+    }
+  },
+});
+practiceStudio = createPracticeStudioController({
+  state,
+  el,
+  escapeHtml,
+  showToast,
+  clientMachines,
+  packOps,
+  onInstallPack: (packId) => profileAddons?.installPack(packId),
+  onPracticeActiveChange: () => {
+    renderWorkspaceMode();
+  },
+  onHomeModeChange: () => profileAddons?.syncHomeJdTarget(),
+});
+packOps.subscribe(() => {
+  if (state.modalState === "onboarding" && state.onboardStep === "packs") {
+    renderOnboardingPacksStep();
+  }
+});
+practiceStudio.registerStudioPlugin(
+  "system_design",
+  createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMachines })
+);
+practiceStudio.registerStudioPlugin(
+  "coding",
+  createCodingStudioPlugin({
+    escapeHtml,
+    showToast,
+    clientMachines,
+    packOps,
+    getAddons: () => state.addons || profileAddons.getAddons(),
+    onAddonsUpdated: (addons) => {
+      state.addons = addons;
+      profileAddons.applyStatusSnapshot({ addons });
+      practiceStudio.applyStatusSnapshot({ addons });
+    },
+  })
+);
 renderSpeakerToggle();
 renderCaptureControls();
 connectWS();
