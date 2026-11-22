@@ -295,8 +295,8 @@ export function createProfileAddonsController({
         : uninstalling
           ? "Removing…"
           : rampart.installed
-            ? "Retry Resume Privacy Scrubber"
-            : "Add Resume Privacy Scrubber · 15 MB";
+            ? "Retry scrubber"
+            : "Add scrubber · 15 MB";
     }
 
     const emptyWrap = el("resumeEmptyState");

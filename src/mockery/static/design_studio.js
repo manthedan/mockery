@@ -525,9 +525,11 @@ export function placeEdgeLabel(pts, w, h, { boxes = [], labels = [], lines = [] 
   }
   // 2. Beside the line, when no leg can carry the pill without swallowing the arrow —
   //    stepping further out when the gap the line runs through is narrower than the pill.
-  for (let step = 0; step <= 6; step++) {
+  //    Fine steps let the pill settle just clear of whatever blocks it, so it still
+  //    reads as belonging to its arrow rather than floating above it.
+  for (let step = 0; step <= 12; step++) {
     for (const leg of legs) {
-      const off = (Math.abs(leg.uy) * w) / 2 + (Math.abs(leg.ux) * h) / 2 + 5 + step * 6;
+      const off = (Math.abs(leg.uy) * w) / 2 + (Math.abs(leg.ux) * h) / 2 + 5 + step * 3;
       const sides = [at(leg, leg.len / 2, -off), at(leg, leg.len / 2, off)];
       sides.sort((m, n) => m.y - n.y || n.x - m.x); // above first, then to the right
       for (const side of sides) candidates.push({ ...side, away: step });
@@ -541,9 +543,9 @@ export function placeEdgeLabel(pts, w, h, { boxes = [], labels = [], lines = [] 
     const near = { x1: r.x1 - 2, y1: r.y1 - 2, x2: r.x2 + 2, y2: r.y2 + 2 };
     // Earlier candidates win ties; drifting away from the line costs more than a snug fit,
     // but far less than covering a box, a label, or another flow.
-    let cost = idx * 0.01 + c.away * 2;
+    let cost = idx * 0.005 + c.away;
     if (r.x1 < 2 || r.y1 < 2 || r.x2 > CANVAS_W - 2 || r.y2 > CANVAS_H - 2) cost += 100;
-    for (const box of boxes) cost += rectsOverlap(r, box, 1) ? 100 : rectsOverlap(r, box, 4) ? 1 : 0;
+    for (const box of boxes) cost += rectsOverlap(r, box, 1) ? 100 : rectsOverlap(r, box, 3) ? 1 : 0;
     for (const lbl of labels) if (rectsOverlap(r, lbl, 2)) cost += 60;
     for (const [p, q] of lines) if (segmentHitsRect(p, q, near)) cost += 25;
     if (cost < bestCost) {
