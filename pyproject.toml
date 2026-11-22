@@ -1,6 +1,6 @@
 [project]
 name = "mockery"
-version = "0.2.0"
+version = "0.2.1"
 description = "Mockery — Local-first Apple Silicon mock interview studio"
 readme = "README.md"
 license = { text = "MIT" }
