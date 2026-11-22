@@ -3882,6 +3882,56 @@ function selectAndJumpToQa(qaId) {
   }
 }
 
+/* The Home role headline is a title that wraps instead of truncating. Enter commits
+   rather than breaking the line, pasted line breaks collapse to spaces, and a very long
+   title steps the type down so it still settles in two lines. Scripted writes go
+   through the same path, so every caller keeps assigning `.value` as before. */
+function bindRoleHeadline(field) {
+  if (!field) return;
+  const native = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+  const sizesItself = typeof CSS !== "undefined" && CSS.supports?.("field-sizing", "content");
+
+  const fit = () => {
+    const len = native.get.call(field).trim().length;
+    const tier = len > 84 ? "sm" : len > 60 ? "md" : "";
+    if (tier) field.dataset.fit = tier;
+    else delete field.dataset.fit;
+    if (sizesItself) return;
+    // Browsers without field-sizing: measure the wrapped text (skipped while Home is hidden).
+    field.style.height = "auto";
+    field.style.height = field.scrollHeight ? `${field.scrollHeight}px` : "";
+  };
+
+  Object.defineProperty(field, "value", {
+    configurable: true,
+    get: () => native.get.call(field),
+    set: (next) => {
+      native.set.call(field, String(next ?? "").replace(/\s*[\r\n]+\s*/g, " "));
+      fit();
+    },
+  });
+
+  field.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" || ev.isComposing) return;
+    ev.preventDefault();
+    field.blur();
+  });
+  field.addEventListener("input", () => {
+    const raw = native.get.call(field);
+    if (/[\r\n]/.test(raw)) {
+      const caret = field.selectionStart;
+      field.value = raw;
+      field.setSelectionRange(caret, caret);
+    } else {
+      fit();
+    }
+  });
+  if (!sizesItself && typeof ResizeObserver === "function") {
+    new ResizeObserver(fit).observe(field.parentElement || field);
+  }
+  fit();
+}
+
 function initEvents() {
   el("startCaptureBtn").onclick = startCapture;
   el("setupStartBtn").onclick = startCapture;
@@ -3897,6 +3947,7 @@ function initEvents() {
   };
 
   // Sync Setup Launchpad inputs <-> Topbar Popover inputs (only mutate Copilot config in Copilot mode)
+  bindRoleHeadline(el("setupRoleInput"));
   el("setupRoleInput").oninput = () => {
     if (practiceStudio?.isHomePracticeMode?.()) return;
     el("roleInput").value = el("setupRoleInput").value;
