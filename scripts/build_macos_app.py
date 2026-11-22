@@ -22,12 +22,24 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import tomllib
 import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SWIFT_SRC = ROOT / "macos" / "MockeryLauncher.swift"
 DIST_DIR = ROOT / "dist"
+
+
+def _project_version() -> str:
+    try:
+        data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        version = str((data.get("project") or {}).get("version") or "").strip()
+        if version:
+            return version
+    except Exception:
+        pass
+    return "0.2.3"
 
 
 def _write_png_rgba(path: Path, width: int, height: int, rgba: bytes) -> None:
@@ -220,7 +232,7 @@ def build_app(*, force_shell: bool = False) -> Path:
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.3</string>
+  <string>{_project_version()}</string>
   <key>CFBundleVersion</key>
   <string>5</string>
   {"<key>CFBundleIconFile</key><string>AppIcon</string>" if has_icon else ""}
@@ -288,9 +300,29 @@ def main() -> None:
         build_dmg(app_dir)
     if args.install:
         dest = Path("/Applications/Mockery.app")
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(app_dir, dest, symlinks=True)
+        staging = dest.parent / ".Mockery.app.staging"
+        backup = dest.parent / ".Mockery.app.backup"
+        if staging.exists():
+            shutil.rmtree(staging)
+        if backup.exists():
+            shutil.rmtree(backup)
+        shutil.copytree(app_dir, staging, symlinks=True)
+        staged_exe = staging / "Contents" / "MacOS" / "Mockery"
+        if not staged_exe.is_file() or not os.access(staged_exe, os.X_OK):
+            shutil.rmtree(staging, ignore_errors=True)
+            raise RuntimeError(f"Staged app bundle missing executable launcher: {staged_exe}")
+        try:
+            if dest.exists():
+                dest.rename(backup)
+            staging.rename(dest)
+        except Exception:
+            if not dest.exists() and backup.exists():
+                backup.rename(dest)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        else:
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
         print(f"Installed to {dest}")
 
 

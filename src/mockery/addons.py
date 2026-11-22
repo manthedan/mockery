@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .asr import parakeet_snapshot_is_complete
 from .redactor import RAMPART_APPROX_MB, RAMPART_REPO_ID, RampartRedactor
 from .tts import KOKORO_APPROX_MB, KOKORO_REPO_ID, PHONON_APPROX_MB, PHONON_REPO_ID
 from .state_machines import (
@@ -57,19 +58,37 @@ def _invalidate_hf_repo_cache(repo_id: str | None = None) -> None:
     if repo_id is None:
         _hf_repo_status_cache.clear()
         return
-    for key in [k for k in _hf_repo_status_cache if k[1] == repo_id]:
+    prefix = f"{repo_id}:"
+    for key in [k for k in _hf_repo_status_cache if k[1] == repo_id or k[1].startswith(prefix)]:
         _hf_repo_status_cache.pop(key, None)
 
 
-def _hf_repo_has_files(repo_dir: Path) -> bool:
+def _hf_repo_has_files(
+    repo_dir: Path,
+    *,
+    snapshot_validator: Callable[[Path], bool] | None = None,
+) -> bool:
     if not repo_dir.is_dir():
         return False
     snapshots_dir = repo_dir / "snapshots"
     if snapshots_dir.is_dir():
+        if snapshot_validator is not None:
+            ref_main = repo_dir / "refs" / "main"
+            if ref_main.is_file():
+                try:
+                    rev = ref_main.read_text(encoding="utf-8").strip()
+                    if rev:
+                        return snapshot_validator(snapshots_dir / rev)
+                except OSError:
+                    pass
         try:
             with os.scandir(snapshots_dir) as snap_it:
                 for snap in snap_it:
                     if not snap.is_dir():
+                        continue
+                    if snapshot_validator is not None:
+                        if snapshot_validator(Path(snap.path)):
+                            return True
                         continue
                     try:
                         with os.scandir(snap.path) as file_it:
@@ -84,6 +103,8 @@ def _hf_repo_has_files(repo_dir: Path) -> bool:
         except OSError:
             return False
         return False
+    if snapshot_validator is not None:
+        return snapshot_validator(repo_dir)
     # Fallback for non-standard or minimal cache dirs without a snapshots/ subdirectory
     try:
         with os.scandir(repo_dir) as it:
@@ -98,9 +119,15 @@ def _hf_repo_has_files(repo_dir: Path) -> bool:
     return False
 
 
-def _hf_repo_cached(repo_id: str, *, bypass_cache: bool = False) -> bool:
+def _hf_repo_cached(
+    repo_id: str,
+    *,
+    bypass_cache: bool = False,
+    snapshot_validator: Callable[[Path], bool] | None = None,
+) -> bool:
     hub_dir = _hf_hub_dir()
-    cache_key = (str(hub_dir), repo_id)
+    validator_tag = getattr(snapshot_validator, "__name__", "") if snapshot_validator is not None else ""
+    cache_key = (str(hub_dir), f"{repo_id}:{validator_tag}")
     now = time.monotonic()
     if not bypass_cache:
         cached = _hf_repo_status_cache.get(cache_key)
@@ -108,7 +135,7 @@ def _hf_repo_cached(repo_id: str, *, bypass_cache: bool = False) -> bool:
             return cached[1]
 
     repo_dir = hub_dir / f"models--{repo_id.replace('/', '--')}"
-    result = _hf_repo_has_files(repo_dir)
+    result = _hf_repo_has_files(repo_dir, snapshot_validator=snapshot_validator)
     _hf_repo_status_cache[cache_key] = (now, result)
     return result
 
@@ -234,7 +261,10 @@ class AddonManager:
                 "size_mb": 600,
                 "description": "Offline speech recognition for English. Turns what you say into text without leaving this Mac.",
                 "repo_id": "mlx-community/parakeet-tdt-0.6b-v2",
-                "installed": _hf_repo_cached("mlx-community/parakeet-tdt-0.6b-v2"),
+                "installed": _hf_repo_cached(
+                    "mlx-community/parakeet-tdt-0.6b-v2",
+                    snapshot_validator=parakeet_snapshot_is_complete,
+                ),
                 "available": True,
             },
             {
@@ -245,7 +275,10 @@ class AddonManager:
                 "size_mb": 620,
                 "description": "Offline speech recognition for 25 European languages.",
                 "repo_id": "mlx-community/parakeet-tdt-0.6b-v3",
-                "installed": _hf_repo_cached("mlx-community/parakeet-tdt-0.6b-v3"),
+                "installed": _hf_repo_cached(
+                    "mlx-community/parakeet-tdt-0.6b-v3",
+                    snapshot_validator=parakeet_snapshot_is_complete,
+                ),
                 "available": True,
             },
             {

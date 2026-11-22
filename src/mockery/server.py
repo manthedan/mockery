@@ -316,6 +316,15 @@ class AppRuntime:
         self.ws_senders: set[Any] = set()
         self.capturing_sender: Any | None = None
         self.asr_watcher_task: asyncio.Task[Any] | None = None
+        self._capture_locks_by_loop: dict[int, asyncio.Lock] = {}
+
+    def capture_lifecycle_lock(self) -> asyncio.Lock:
+        loop_id = id(asyncio.get_running_loop())
+        lock = self._capture_locks_by_loop.get(loop_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._capture_locks_by_loop[loop_id] = lock
+        return lock
 
     @asynccontextmanager
     async def practice_lock(self, session_id: str):
@@ -432,7 +441,9 @@ class AppRuntime:
         self.role_orientation_checked.discard(new_session.id)
         self.role_orientation_inflight.discard(new_session.id)
         self.active_session = new_session
-        self.diarizer.reset()
+        # Instantiate fresh per-session diarizer state while sharing the loaded WeSpeaker embedder model
+        # so late in-flight embeddings from a previous session cannot mutate the new session's centroids.
+        self.diarizer = OnlineTwoSpeakerDiarizer(self.voice_embedder)
         self.grouper.sync_card_kinds(self.active_session)
         initial_offset_ms = (
             max((u.end_ms for u in new_session.utterances), default=0) + 500
@@ -570,6 +581,7 @@ def create_app(
         resume = runtime.profiles.state.resume
         return {
             "asr": runtime.asr.status_dict(),
+            "vad": runtime.vad_runtime.status_dict(),
             "tts": runtime.tts.status_dict(),
             "diarizer": runtime.diarizer.status_dict(),
             "llm": runtime.llm_config.public_dict(),
@@ -765,7 +777,7 @@ def create_app(
         bg_tasks: set[asyncio.Task[Any]] = set()
         send_lock = asyncio.Lock()
         final_seg_queue: asyncio.Queue[
-            tuple[InterviewSession, SessionAudioRouter, SegmentedSpeech] | None
+            tuple[InterviewSession, SessionAudioRouter, OnlineTwoSpeakerDiarizer, SegmentedSpeech] | None
         ] = asyncio.Queue()
 
         def spawn_bg(coro: Any) -> asyncio.Task[Any]:
@@ -797,6 +809,7 @@ def create_app(
         async def handle_segmented_speech(
             target_session: InterviewSession,
             router: SessionAudioRouter,
+            diarizer: OnlineTwoSpeakerDiarizer,
             seg: SegmentedSpeech,
         ) -> None:
             use_acoustic_diarizer = (
@@ -817,7 +830,7 @@ def create_app(
                         # Run CoreML WeSpeaker and MLX Parakeet concurrently on separate hardware units
                         speaker, res = await asyncio.gather(
                             asyncio.to_thread(
-                                runtime.diarizer.classify_partial,
+                                diarizer.classify_partial,
                                 seg.audio,
                                 default_speaker=seg.speaker,
                             ),
@@ -861,7 +874,7 @@ def create_app(
             if use_acoustic_diarizer:
                 try:
                     sub_segs = await asyncio.to_thread(
-                        runtime.diarizer.diarize_segment,
+                        diarizer.diarize_segment,
                         seg.audio,
                         seg.start_ms,
                         seg.end_ms,
@@ -882,7 +895,7 @@ def create_app(
                         utt_id = seg.utterance_id if not emitted_any else short_id("utt")
                         rev = seg.rev if not emitted_any else 1
                         emitted_any = True
-                        runtime.diarizer.bind_utterance(utt_id, sub)
+                        diarizer.bind_utterance(utt_id, sub)
                         await upsert_utterance_and_route(
                             target_session=target_session,
                             router=router,
@@ -1239,8 +1252,8 @@ def create_app(
                 try:
                     if item is None:
                         return
-                    sess_ref, router_ref, seg_item = item
-                    await handle_segmented_speech(sess_ref, router_ref, seg_item)
+                    sess_ref, router_ref, diarizer_ref, seg_item = item
+                    await handle_segmented_speech(sess_ref, router_ref, diarizer_ref, seg_item)
                 except Exception as exc:
                     logger.exception("Final segment transcription failed")
                     await send_json(
@@ -1282,19 +1295,40 @@ def create_app(
                         and runtime.capturing_sender is not send_json
                     ):
                         continue
-                    runtime.begin_capture(owner=send_json)
+                    if not runtime.is_capturing or runtime.capturing_sender is not send_json:
+                        async with runtime.capture_lifecycle_lock():
+                            if (
+                                runtime.is_capturing
+                                and runtime.capturing_sender is not None
+                                and runtime.capturing_sender is not send_json
+                            ):
+                                continue
+                            runtime.begin_capture(owner=send_json)
+                            if not runtime.vad_runtime.is_ready:
+                                try:
+                                    await asyncio.to_thread(runtime.vad_runtime.ensure_loaded)
+                                except Exception as vad_exc:
+                                    runtime.pause_or_end_capture(mark_ended=False)
+                                    await send_json(
+                                        {
+                                            "type": "error",
+                                            "message": f"Speech detector (Silero VAD) unavailable: {vad_exc}",
+                                        }
+                                    )
+                                    continue
                     raw_bytes = message["bytes"]
                     arch = runtime.ensure_archive()
                     if arch is not None:
                         arch.append_frame(raw_bytes)
                     cur_session = runtime.active_session
                     cur_router = runtime.audio_router
+                    cur_diarizer = runtime.diarizer
                     segments = cur_router.ingest_binary_frame(raw_bytes)
                     for seg in segments:
                         if seg.kind == "partial":
-                            spawn_bg(handle_segmented_speech(cur_session, cur_router, seg))
+                            spawn_bg(handle_segmented_speech(cur_session, cur_router, cur_diarizer, seg))
                         else:
-                            await final_seg_queue.put((cur_session, cur_router, seg))
+                            await final_seg_queue.put((cur_session, cur_router, cur_diarizer, seg))
                     continue
 
                 if "text" in message and message["text"]:
@@ -1323,16 +1357,44 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
-            reset_triage_window(close_scheduling=True)
+            was_capture_owner = runtime.capturing_sender is send_json
             runtime.ws_senders.discard(send_json)
-            if runtime.capturing_sender is send_json or not runtime.ws_senders:
-                runtime.pause_or_end_capture(mark_ended=False)
+            if was_capture_owner and not capture_gate["closed"]:
+                async with runtime.capture_lifecycle_lock():
+                    capture_gate["closed"] = True
+                    cur_session = runtime.active_session
+                    cur_router = runtime.audio_router
+                    cur_diarizer = runtime.diarizer
+                    cur_epoch = runtime.session_epoch
+                    try:
+                        if runtime.vad_runtime.is_ready:
+                            trailing = cur_router.flush_all()
+                            for seg in trailing:
+                                await final_seg_queue.put((cur_session, cur_router, cur_diarizer, seg))
+                        await final_seg_queue.put(None)
+                        await seg_worker_task
+                        flush_triage_now(target_session=cur_session, job_epoch=cur_epoch)
+                    finally:
+                        runtime.pause_or_end_capture(mark_ended=False)
+                        if cur_session.utterances or cur_session.elapsed_capture_ms > 0:
+                            runtime.store.save(cur_session)
+                        try:
+                            await runtime.llm.release_warm_spare()
+                        except BaseException:
+                            pass
+                    if runtime.ws_senders:
+                        await broadcast_session()
+            else:
                 try:
-                    await runtime.llm.release_warm_spare()
-                except Exception:
-                    pass
-            await final_seg_queue.put(None)
-            await seg_worker_task
+                    await final_seg_queue.put(None)
+                    await seg_worker_task
+                finally:
+                    if was_capture_owner or not runtime.ws_senders:
+                        runtime.pause_or_end_capture(mark_ended=False)
+                        try:
+                            await runtime.llm.release_warm_spare()
+                        except BaseException:
+                            pass
             reset_triage_window(close_scheduling=True)
 
     @app.get("/static/js_sandbox_worker.js")
@@ -1446,25 +1508,38 @@ async def _handle_ws_command(
         return
 
     if action == "start_capture":
-        runtime.begin_capture(enforce_transition=True, owner=send_json)
-        if open_triage_window is not None:
-            open_triage_window()
-        runtime.llm.prewarm_fast_model()
-        if capture_gate is not None:
-            capture_gate["closed"] = False
+        async with runtime.capture_lifecycle_lock():
+            if not runtime.vad_runtime.is_ready:
+                try:
+                    await asyncio.to_thread(runtime.vad_runtime.ensure_loaded)
+                except Exception as exc:
+                    await send_json(
+                        {
+                            "type": "error",
+                            "message": f"Speech detector (Silero VAD) could not load: {exc}",
+                        }
+                    )
+                    return
+            runtime.begin_capture(enforce_transition=True, owner=send_json)
+            if open_triage_window is not None:
+                open_triage_window()
+            runtime.llm.prewarm_fast_model()
+            if capture_gate is not None:
+                capture_gate["closed"] = False
         await broadcast_session()
         return
 
     if action == "cancel_capture":
-        if capture_gate is not None:
-            capture_gate["closed"] = True
-        if reset_triage_window is not None:
-            reset_triage_window(close_scheduling=True)
-        runtime.pause_or_end_capture(mark_ended=False)
-        try:
-            await runtime.llm.release_warm_spare()
-        except Exception:
-            pass
+        async with runtime.capture_lifecycle_lock():
+            if capture_gate is not None:
+                capture_gate["closed"] = True
+            if reset_triage_window is not None:
+                reset_triage_window(close_scheduling=True)
+            runtime.pause_or_end_capture(mark_ended=False)
+            try:
+                await runtime.llm.release_warm_spare()
+            except Exception:
+                pass
         await broadcast_session()
         return
 
@@ -1473,9 +1548,10 @@ async def _handle_ws_command(
         if speaker in ("interviewer", "candidate"):
             cur_session = runtime.active_session
             cur_router = runtime.audio_router
+            cur_diarizer = runtime.diarizer
             flushed = cur_router.set_manual_speaker(speaker)
             for seg in flushed:
-                await final_seg_queue.put((cur_session, cur_router, seg))
+                await final_seg_queue.put((cur_session, cur_router, cur_diarizer, seg))
             await runtime.broadcast_all(
                 {"type": "manual_speaker", "manual_speaker": cur_router.manual_speaker}
             )
@@ -1707,22 +1783,24 @@ async def _handle_ws_command(
         return
 
     if action == "flush_and_end":
-        if capture_gate is not None:
-            capture_gate["closed"] = True
-        cur_session = runtime.active_session
-        cur_router = runtime.audio_router
-        trailing = cur_router.flush_all()
-        for seg in trailing:
-            await final_seg_queue.put((cur_session, cur_router, seg))
-        await final_seg_queue.join()
-        if flush_triage_now is not None:
-            flush_triage_now(target_session=cur_session, job_epoch=runtime.session_epoch)
-        runtime.pause_or_end_capture(mark_ended=True)
-        try:
-            await runtime.llm.release_warm_spare()
-        except Exception:
-            pass
-        runtime.store.save(cur_session)
+        async with runtime.capture_lifecycle_lock():
+            if capture_gate is not None:
+                capture_gate["closed"] = True
+            cur_session = runtime.active_session
+            cur_router = runtime.audio_router
+            cur_diarizer = runtime.diarizer
+            trailing = cur_router.flush_all()
+            for seg in trailing:
+                await final_seg_queue.put((cur_session, cur_router, cur_diarizer, seg))
+            await final_seg_queue.join()
+            if flush_triage_now is not None:
+                flush_triage_now(target_session=cur_session, job_epoch=runtime.session_epoch)
+            runtime.pause_or_end_capture(mark_ended=True)
+            try:
+                await runtime.llm.release_warm_spare()
+            except Exception:
+                pass
+            runtime.store.save(cur_session)
         await broadcast_session({"session_ended": True})
         return
 

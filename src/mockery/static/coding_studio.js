@@ -1028,7 +1028,46 @@ export function createCodingStudioPlugin({
       renderConsole();
     }
 
-    /* ---------------- Sandboxed Test Execution (Single-Use Isolated Workers) ---------------- */
+    /* ---------------- Sandboxed Test Execution (Single-Use Isolated Workers + Warm Python Spare) ---------------- */
+
+    let warmPySpare = null; // { worker: Worker, ready: boolean }
+
+    function disposeWarmPySpare() {
+      if (!warmPySpare) return;
+      try {
+        warmPySpare.worker.terminate();
+      } catch {
+        /* ignore */
+      }
+      warmPySpare = null;
+    }
+
+    function armWarmPySpare() {
+      if (state.destroyed || warmPySpare || activeRun) return;
+      if (state.language !== "python") return;
+      const pyFlags = getPyodidePackFlags();
+      if (!pyFlags.installed || pyFlags.installing || pyFlags.uninstalling) return;
+      try {
+        const w = new Worker("/static/py_sandbox_worker.js");
+        const entry = { worker: w, ready: false };
+        w.onmessage = (ev) => {
+          if (warmPySpare !== entry) return;
+          const msg = ev.data || {};
+          if (msg.type === "warm_ready") {
+            entry.ready = true;
+          } else if (msg.type === "warm_error") {
+            disposeWarmPySpare();
+          }
+        };
+        w.onerror = () => {
+          if (warmPySpare === entry) disposeWarmPySpare();
+        };
+        warmPySpare = entry;
+        w.postMessage({ type: "prewarm" });
+      } catch {
+        warmPySpare = null;
+      }
+    }
 
     function finishRun(runRef, { ok, stdout, error, durationMs, timedOut = false }) {
       if (state.destroyed || activeRun !== runRef) return;
@@ -1059,6 +1098,9 @@ export function createCodingStudioPlugin({
       renderStatusPill();
       renderConsole();
       notifyChanged();
+      if (runRef.language === "python") {
+        armWarmPySpare();
+      }
     }
 
     function launchIsolatedWorker(language, code, tests) {
@@ -1069,42 +1111,49 @@ export function createCodingStudioPlugin({
       const workerUrl =
         language === "python" ? "/static/py_sandbox_worker.js" : "/static/js_sandbox_worker.js";
       let worker;
-      try {
-        worker = new Worker(workerUrl);
-      } catch (err) {
-        const fallbackRef = {
-          id: runId,
-          worker: null,
-          timer: null,
-          booted: true,
-          phase: "running",
-          language,
-          codeSnap: code,
-          testsSnap: tests,
-        };
-        activeRun = fallbackRef;
-        finishRun(fallbackRef, {
-          ok: false,
-          stdout: "",
-          error: `Could not launch sandbox worker: ${err.message || err}`,
-          durationMs: 0,
-        });
-        return;
+      let usedWarmSpare = false;
+      if (language === "python" && warmPySpare) {
+        worker = warmPySpare.worker;
+        usedWarmSpare = warmPySpare.ready;
+        warmPySpare = null;
+      } else {
+        try {
+          worker = new Worker(workerUrl);
+        } catch (err) {
+          const fallbackRef = {
+            id: runId,
+            worker: null,
+            timer: null,
+            booted: true,
+            phase: "running",
+            language,
+            codeSnap: code,
+            testsSnap: tests,
+          };
+          activeRun = fallbackRef;
+          finishRun(fallbackRef, {
+            ok: false,
+            stdout: "",
+            error: `Could not launch sandbox worker: ${err.message || err}`,
+            durationMs: 0,
+          });
+          return;
+        }
       }
 
       const runRef = {
         id: runId,
         worker,
         timer: null,
-        booted: language === "javascript",
-        phase: language === "python" ? "starting" : "running",
+        booted: language === "javascript" || usedWarmSpare,
+        phase: language === "python" && !usedWarmSpare ? "starting" : "running",
         language,
         codeSnap: code,
         testsSnap: tests,
       };
       activeRun = runRef;
       clientMachines?.beginOp?.("coding_test_run", { language, runId });
-      runnerMachine.transition(language === "python" ? "booting_pyodide" : "running", {
+      runnerMachine.transition(language === "python" && !usedWarmSpare ? "booting_pyodide" : "running", {
         event: "launch_worker",
         reason: language,
       });
@@ -1126,6 +1175,11 @@ export function createCodingStudioPlugin({
         armTimer(
           JS_TIMEOUT_MS,
           `Execution timed out after ${(JS_TIMEOUT_MS / 1000).toFixed(1)}s (possible infinite loop or unresolved promise).`
+        );
+      } else if (usedWarmSpare) {
+        armTimer(
+          PY_RUN_TIMEOUT_MS,
+          `Python execution timed out after ${(PY_RUN_TIMEOUT_MS / 1000).toFixed(1)}s (possible infinite loop).`
         );
       } else {
         armTimer(
@@ -1271,31 +1325,92 @@ export function createCodingStudioPlugin({
       }
     }
 
+    let resetConfirmTimer = null;
+    let resetConfirmArmed = false;
+
+    function clearResetConfirmArm() {
+      if (resetConfirmTimer) {
+        clearTimeout(resetConfirmTimer);
+        resetConfirmTimer = null;
+      }
+      if (resetConfirmArmed) {
+        resetConfirmArmed = false;
+        const btn = q("[data-cs-reset]");
+        if (btn) btn.textContent = "Reset";
+      }
+    }
+
+    function insertTextPreservingUndo(ta, start, end, text) {
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(start, end);
+      let usedExec = false;
+      try {
+        if (typeof document.execCommand === "function") {
+          usedExec = document.execCommand("insertText", false, text);
+        }
+      } catch {
+        usedExec = false;
+      }
+      if (!usedExec) {
+        if (typeof ta.setRangeText === "function") {
+          ta.setRangeText(text, start, end, "end");
+        } else {
+          const val = ta.value;
+          ta.value = val.slice(0, start) + text + val.slice(end);
+          ta.selectionStart = ta.selectionEnd = start + text.length;
+        }
+      }
+    }
+
     function resetStarterForActiveTab() {
       const curQ = getCurrentQuestion();
+      const targetText =
+        state.activeTab === "tests"
+          ? safeClipText(
+              typeof curQ?.tests?.[state.language] === "string" ? curQ.tests[state.language] : "",
+              MAX_CODE_UTF8_BYTES
+            )
+          : safeClipText(
+              typeof curQ?.starter_code?.[state.language] === "string"
+                ? curQ.starter_code[state.language]
+                : state.language === "python"
+                ? "# Write your Python solution here\n"
+                : "// Write your solution here\n",
+              MAX_CODE_UTF8_BYTES
+            );
+      const currentText =
+        state.activeTab === "tests"
+          ? state.testsByLang[state.language] || ""
+          : state.codeByLang[state.language] || "";
+      if (currentText !== targetText && !resetConfirmArmed) {
+        resetConfirmArmed = true;
+        const btn = q("[data-cs-reset]");
+        if (btn) btn.textContent = "Confirm Reset?";
+        resetConfirmTimer = setTimeout(() => clearResetConfirmArm(), 4500);
+        showToast("Click Reset again to restore starter code (undoable with Cmd+Z).", 3400);
+        return;
+      }
+      clearResetConfirmArm();
       if (state.language === "javascript" || state.language === "python") {
         state.cancelledByLang[state.language] = null;
       }
-      if (state.activeTab === "tests") {
-        const curated = curQ?.tests?.[state.language];
-        state.testsByLang[state.language] = safeClipText(
-          typeof curated === "string" ? curated : "",
-          MAX_CODE_UTF8_BYTES
-        );
-        showToast("Restored curated test suite.", 2000);
+      const ta = q("[data-cs-editor]");
+      if (ta) {
+        insertTextPreservingUndo(ta, 0, ta.value.length, targetText);
+        setActiveEditorText(ta.value);
+        syncGutter(ta.value);
+        renderStatusPill();
+        renderConsole();
       } else {
-        const curated = curQ?.starter_code?.[state.language];
-        state.codeByLang[state.language] = safeClipText(
-          typeof curated === "string"
-            ? curated
-            : state.language === "python"
-            ? "# Write your Python solution here\n"
-            : "// Write your solution here\n",
-          MAX_CODE_UTF8_BYTES
-        );
-        showToast("Restored starter code.", 2000);
+        if (state.activeTab === "tests") state.testsByLang[state.language] = targetText;
+        else state.codeByLang[state.language] = targetText;
+        renderAll();
       }
-      renderAll();
+      showToast(
+        state.activeTab === "tests" ? "Restored curated test suite." : "Restored starter code.",
+        2000
+      );
       notifyChanged();
     }
 
@@ -1306,10 +1421,12 @@ export function createCodingStudioPlugin({
       if (langBtn) {
         const nextLang = langBtn.getAttribute("data-cs-lang");
         if (VALID_LANG_IDS.has(nextLang) && nextLang !== state.language) {
+          clearResetConfirmArm();
           state.language = nextLang;
           if (nextLang === "pseudocode") state.activeTab = "solution";
           renderAll();
           notifyChanged();
+          if (nextLang === "python") armWarmPySpare();
         }
         return;
       }
@@ -1456,8 +1573,7 @@ export function createCodingStudioPlugin({
         const val = ta.value;
 
         if (!ev.shiftKey && start === end) {
-          ta.value = val.slice(0, start) + indent + val.slice(end);
-          ta.selectionStart = ta.selectionEnd = start + indent.length;
+          insertTextPreservingUndo(ta, start, end, indent);
         } else {
           const lineStart = val.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
           const block = val.slice(lineStart, end);
@@ -1481,7 +1597,7 @@ export function createCodingStudioPlugin({
             deltaEnd -= remove;
             return line.slice(remove);
           });
-          ta.value = val.slice(0, lineStart) + updated.join("\n") + val.slice(end);
+          insertTextPreservingUndo(ta, lineStart, end, updated.join("\n"));
           ta.selectionStart = Math.max(lineStart, start + deltaStart);
           ta.selectionEnd = Math.max(ta.selectionStart, end + deltaEnd);
         }
@@ -1510,8 +1626,7 @@ export function createCodingStudioPlugin({
         if (leading || extra) {
           ev.preventDefault();
           const insert = `\n${leading}${extra}`;
-          ta.value = val.slice(0, start) + insert + val.slice(end);
-          ta.selectionStart = ta.selectionEnd = start + insert.length;
+          insertTextPreservingUndo(ta, start, end, insert);
           setActiveEditorText(ta.value);
           syncGutter(ta.value);
           renderStatusPill();
@@ -1523,6 +1638,9 @@ export function createCodingStudioPlugin({
 
     buildShell();
     renderAll();
+    if (state.language === "python") {
+      armWarmPySpare();
+    }
 
     const editorEl = q("[data-cs-editor]");
     containerEl.addEventListener("click", onClick);
@@ -1582,8 +1700,13 @@ export function createCodingStudioPlugin({
         const wasInstalled = isPyodidePackInstalled(state.addons);
         state.addons = nextAddons;
         const nowInstalled = isPyodidePackInstalled(nextAddons);
-        if (wasInstalled && !nowInstalled && activeRun?.language === "python") {
-          terminateActiveRun("pyodide_uninstalled");
+        if (wasInstalled && !nowInstalled) {
+          disposeWarmPySpare();
+          if (activeRun?.language === "python") {
+            terminateActiveRun("pyodide_uninstalled");
+          }
+        } else if (!wasInstalled && nowInstalled && state.language === "python") {
+          armWarmPySpare();
         }
         renderStatusPill();
         renderPyBanner();
@@ -1591,6 +1714,8 @@ export function createCodingStudioPlugin({
       },
       destroy() {
         state.destroyed = true;
+        clearResetConfirmArm();
+        disposeWarmPySpare();
         unsubscribePackOps?.();
         terminateActiveRun("destroy");
         clientMachines?.unregister?.("codingStudio");

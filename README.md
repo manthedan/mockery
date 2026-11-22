@@ -47,7 +47,7 @@ A quiet second pair of ears when you run a mock for a friend or teammate—on Go
 
 - **Offline speech-to-text.** [Parakeet TDT 0.6B v2](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2) on MLX streams drafts in ~50 ms and locks in with full-sentence context—100% on your Mac.
 - **Two voices, kept apart.** On Google Meet, your mic (`You`) and the Chrome tab (`Candidate`) capture on a shared audio clock with echo-bleed suppression. In person, [WeSpeaker](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) acoustic diarization on CoreML splits two speakers from a single microphone.
-- **Live speculative follow-ups.** Mockery pre-drafts three grounded probes in the background as the candidate speaks. Hit <kbd>D</kbd> to surface them instantly, <kbd>1</kbd>–<kbd>3</kbd> to mark them asked, and <kbd>N</kbd> to start a new phase card.
+- **On-demand grounded follow-ups.** Hit <kbd>D</kbd> at any moment to draft three transcript-grounded follow-up probes via a warm-ready model (zero wasted background calls), <kbd>1</kbd>–<kbd>3</kbd> to mark them asked, and <kbd>N</kbd> to start a new phase card.
 - **Blind calibration.** Lock in your own hire signal, level, and rationale before seeing the AI's take. Then inspect an evidence audit against the transcript, with every claim cited to its exact `[MM:SS]` timestamp.
 - **Clean Markdown export.** Export a full interviewer debrief or a scrubbed candidate feedback copy in one click.
 

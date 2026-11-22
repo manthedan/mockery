@@ -1170,11 +1170,30 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       }
       const meta = NODE_TYPE_MAP.get(type) || NODE_TYPES[2];
       pushHistory();
-      const col = state.placeCursor % 4;
-      const row = Math.floor(state.placeCursor / 4) % 4;
-      state.placeCursor += 1;
-      const x = clamp(snap(48 + col * 196 + ((state.placeCursor * 12) % 24)), 12, CANVAS_W - NODE_W - 12);
-      const y = clamp(snap(36 + row * 88), 12, CANVAS_H - NODE_H - 12);
+      if (state.placeCursor < state.graph.nodes.length) {
+        state.placeCursor = state.graph.nodes.length;
+      }
+      let x = 48;
+      let y = 36;
+      for (let attempt = 0; attempt < 24; attempt++) {
+        const idx = state.placeCursor + attempt;
+        const col = idx % 4;
+        const row = Math.floor(idx / 4) % 4;
+        const candX = clamp(snap(48 + col * 196 + ((idx * 12) % 24)), 12, CANVAS_W - NODE_W - 12);
+        const candY = clamp(snap(36 + row * 88), 12, CANVAS_H - NODE_H - 12);
+        const collides = state.graph.nodes.some(
+          (n) => Math.abs(n.x - candX) < 36 && Math.abs(n.y - candY) < 28
+        );
+        x = candX;
+        y = candY;
+        if (!collides) {
+          state.placeCursor = idx + 1;
+          break;
+        }
+        if (attempt === 23) {
+          state.placeCursor += 1;
+        }
+      }
       const node = {
         id: shortLocalId("n"),
         type: meta.type,
@@ -1484,9 +1503,18 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       const edgeGroup = ev.target.closest("[data-sd-edge]");
       if (edgeGroup) {
         const eid = edgeGroup.getAttribute("data-sd-edge");
-        dispatchInteraction({ type: "SELECT_ITEM", kind: "edge", id: eid }, "click_edge");
-        focusCanvas();
-        renderAll();
+        const now = Date.now();
+        const isDblTap =
+          ev.detail >= 2 ||
+          (state.lastEdgeTap && state.lastEdgeTap.id === eid && now - state.lastEdgeTap.at <= 380);
+        state.lastEdgeTap = isDblTap ? null : { id: eid, at: now };
+        dispatchInteraction({ type: "SELECT_ITEM", kind: "edge", id: eid }, isDblTap ? "dblclick_edge" : "click_edge");
+        if (isDblTap) {
+          renderAll({ focusLabel: true });
+        } else {
+          focusCanvas();
+          renderAll();
+        }
         return;
       }
 
@@ -1611,11 +1639,18 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       dispatchInteraction({ type: "COMMIT_DRAG", pointerId: ev.pointerId }, "pointer_up");
       releaseDragCapture(drag);
       if (drag.moved) {
+        state.lastNodeTap = null;
         pushHistory(drag.snapshot);
         renderAll();
         notifyChanged();
       } else {
-        renderAll();
+        const now = Date.now();
+        const isDblTap =
+          state.lastNodeTap &&
+          state.lastNodeTap.id === drag.nodeId &&
+          now - state.lastNodeTap.at <= 380;
+        state.lastNodeTap = isDblTap ? null : { id: drag.nodeId, at: now };
+        renderAll({ focusLabel: Boolean(isDblTap) });
       }
     }
 
@@ -1758,6 +1793,9 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       }
 
       if ((ev.key === "Delete" || ev.key === "Backspace") && state.interaction.mode === "selected") {
+        // Don't delete a node/edge when a toolbar button or interactive control has focus
+        const tag = active.tagName;
+        if (tag === "BUTTON" || tag === "A" || tag === "SUMMARY") return;
         ev.preventDefault();
         deleteSelected();
       }

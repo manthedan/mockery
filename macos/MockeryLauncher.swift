@@ -4,6 +4,8 @@ import Foundation
 final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var serverProcess: Process?
+    private var logHandle: FileHandle?
+    private var attachedExternalServer: Bool = false
     private var activePort: Int = 8765
     private var statusMenuItem: NSMenuItem?
     private let dataDir: URL
@@ -22,12 +24,20 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
-        if isServerHealthy(port: activePort) {
-            updateStatus("Running on port \(activePort)")
-            openStudioInBrowser()
-            return
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let port = self.activePort
+            let alreadyHealthy = self.isServerHealthy(port: port)
+            DispatchQueue.main.async {
+                if alreadyHealthy {
+                    self.attachedExternalServer = true
+                    self.updateStatus("Running on port \(port) (external)")
+                    self.openStudioInBrowser()
+                    return
+                }
+                self.startServer(openBrowserWhenReady: true)
+            }
         }
-        startServer(openBrowserWhenReady: true)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -107,6 +117,12 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
 
     private func startServer(openBrowserWhenReady: Bool) {
         stopServer()
+        if attachedExternalServer && isServerHealthy(port: activePort) {
+            updateStatus("Running on port \(activePort) (external)")
+            showErrorAlert("Mockery is already running on port \(activePort) in another process (such as Terminal). Stop that server first before restarting from the menu bar.")
+            return
+        }
+        attachedExternalServer = false
         guard let (exe, baseArgs) = findMockeryExecutable() else {
             updateStatus("Mockery CLI not installed")
             showInstallAlert()
@@ -132,15 +148,29 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
         env["MOCKERY_HOME"] = dataDir.path
         proc.environment = env
 
-        FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        if !FileManager.default.fileExists(atPath: logFile.path) {
+            FileManager.default.createFile(atPath: logFile.path, contents: nil)
+        }
         if let fh = try? FileHandle(forWritingTo: logFile) {
             fh.seekToEndOfFile()
+            let banner = "\n--- Mockery server launch (\(ISO8601DateFormatter().string(from: Date()))) on port \(activePort) ---\n"
+            if let data = banner.data(using: .utf8) {
+                fh.write(data)
+            }
+            self.logHandle = fh
             proc.standardOutput = fh
             proc.standardError = fh
         }
 
         proc.terminationHandler = { [weak self] terminated in
             guard let self = self else { return }
+            DispatchQueue.main.async {
+                if self.serverProcess === terminated {
+                    try? self.logHandle?.close()
+                    self.logHandle = nil
+                    self.serverProcess = nil
+                }
+            }
             if terminated.terminationReason == .exit && terminated.terminationStatus == 0 {
                 self.updateStatus("Stopped")
             } else {
@@ -180,6 +210,10 @@ final class MockeryAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopServer() {
+        defer {
+            try? logHandle?.close()
+            logHandle = nil
+        }
         guard let proc = serverProcess else { return }
         if proc.isRunning {
             proc.terminate()

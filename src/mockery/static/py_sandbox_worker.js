@@ -170,10 +170,48 @@ async def __mockery_run_sandbox(code_src: str, tests_src: str) -> dict:
 `;
 
 let hasRun = false;
+let pyInstance = null;
+let prewarmPromise = null;
+
+async function ensurePyodideReady(runId = "") {
+  if (pyInstance) return pyInstance;
+  if (!prewarmPromise) {
+    prewarmPromise = (async () => {
+      if (runId) _postMessage({ type: "status", runId, status: "loading" });
+      importScripts(`${LOCAL_PYODIDE_BASE}pyodide.js`);
+      if (typeof self.loadPyodide !== "function") {
+        throw new Error("Local Pyodide bootstrap did not expose loadPyodide().");
+      }
+      const py = await self.loadPyodide({
+        indexURL: LOCAL_PYODIDE_BASE,
+      });
+      // Lock down worker messaging, script loading, and network APIs before running untrusted Python
+      disableRuntimeHostApis();
+      await py.runPythonAsync(PY_SANDBOX_BOOTSTRAP);
+      pyInstance = py;
+      return py;
+    })();
+  }
+  return prewarmPromise;
+}
 
 self.addEventListener("message", async (ev) => {
-  if (hasRun) return;
   const payload = ev.data || {};
+  if (payload.type === "prewarm") {
+    if (hasRun || pyInstance || prewarmPromise) return;
+    try {
+      await ensurePyodideReady("");
+      if (!hasRun) {
+        _postMessage({ type: "warm_ready" });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      _postMessage({ type: "warm_error", error: msg.slice(0, MAX_ERROR_CHARS) });
+    }
+    return;
+  }
+
+  if (hasRun) return;
   if (payload.type !== "run") return;
   hasRun = true;
 
@@ -182,18 +220,7 @@ self.addEventListener("message", async (ev) => {
   const tests = typeof payload.tests === "string" ? payload.tests : "";
 
   try {
-    _postMessage({ type: "status", runId, status: "loading" });
-    importScripts(`${LOCAL_PYODIDE_BASE}pyodide.js`);
-    if (typeof self.loadPyodide !== "function") {
-      throw new Error("Local Pyodide bootstrap did not expose loadPyodide().");
-    }
-    const py = await self.loadPyodide({
-      indexURL: LOCAL_PYODIDE_BASE,
-    });
-    // Lock down worker messaging, script loading, and network APIs before running untrusted Python
-    disableRuntimeHostApis();
-
-    await py.runPythonAsync(PY_SANDBOX_BOOTSTRAP);
+    const py = await ensurePyodideReady(runId);
     _postMessage({ type: "ready", runId });
 
     const startedAt = _perfNow();

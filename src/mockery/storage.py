@@ -340,12 +340,36 @@ class SessionStore:
 
     def list_recent(self, limit: int = 25) -> list[dict[str, Any]]:
         self.flush_pending()
+        # Union snapshot (*.json) and journal-only (*.events.jsonl) IDs so crashed sessions stay recoverable.
+        candidate_ids: set[str] = set()
+        for path in self.sessions_dir.glob("*.json"):
+            candidate_ids.add(path.stem)
+        for path in self.sessions_dir.glob("*.events.jsonl"):
+            name = path.name
+            if name.endswith(".events.jsonl"):
+                candidate_ids.add(name[: -len(".events.jsonl")])
+
         items: list[dict[str, Any]] = []
-        for path in sorted(self.sessions_dir.glob("*.json"), reverse=True)[:limit]:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict) or not data.get("id"):
+        for sid in sorted(candidate_ids, reverse=True):
+            if len(items) >= limit:
+                break
+            json_path = self.sessions_dir / f"{sid}.json"
+            data: dict[str, Any] | None = None
+            recovered = False
+            if json_path.is_file():
+                try:
+                    parsed = json.loads(json_path.read_text(encoding="utf-8"))
+                    if isinstance(parsed, dict) and parsed.get("id"):
+                        data = parsed
+                except Exception:
+                    data = None
+            if data is None:
+                sess = self._recover_from_jsonl(sid)
+                if sess is None:
                     continue
+                data = sess.model_dump()
+                recovered = True
+            try:
                 cfg = data.get("config") or {}
                 utts = data.get("utterances") or []
                 if utts:
@@ -354,18 +378,19 @@ class SessionStore:
                     dur_s = round(max(0.0, (max_e - min_s) / 1000.0), 1)
                 else:
                     dur_s = 0.0
-                items.append(
-                    {
-                        "id": str(data["id"]),
-                        "created_at_iso": str(data.get("created_at_iso", "")),
-                        "role_title": str(cfg.get("role_title", "Senior Software Engineer")),
-                        "interview_type": str(cfg.get("interview_type", "behavioral")),
-                        "mode": str(cfg.get("mode", "remote_meet")),
-                        "qa_count": len(data.get("qa_groups") or []),
-                        "duration_seconds": dur_s,
-                        "has_calibration": bool(data.get("calibration_markdown")),
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "id": str(data["id"]),
+                    "created_at_iso": str(data.get("created_at_iso", "")),
+                    "role_title": str(cfg.get("role_title", "Senior Software Engineer")),
+                    "interview_type": str(cfg.get("interview_type", "behavioral")),
+                    "mode": str(cfg.get("mode", "remote_meet")),
+                    "qa_count": len(data.get("qa_groups") or []),
+                    "duration_seconds": dur_s,
+                    "has_calibration": bool(data.get("calibration_markdown")),
+                }
+                if recovered:
+                    entry["recovered"] = True
+                items.append(entry)
             except Exception:
                 continue
         return items

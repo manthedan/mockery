@@ -66,7 +66,7 @@ def build_addons_router(
             if event == "install":
                 raise HTTPException(status_code=500, detail=f"Failed to install {pack_id}: {exc}") from exc
             raise
-        if pack_id == "rampart_pii" and runtime.profiles.state.resume is not None:
+        if pack_id == "rampart_pii" and event == "install" and runtime.profiles.state.resume is not None:
             await asyncio.to_thread(
                 runtime.profiles.update_redaction_prefs,
                 runtime.profiles.state.resume.prefs,

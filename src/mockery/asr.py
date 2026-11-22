@@ -44,17 +44,59 @@ class ASRTranscription:
     audio_duration_ms: float
 
 
+def parakeet_snapshot_is_complete(snapshot_dir: Path) -> bool:
+    """
+    Verify a cached Parakeet snapshot directory contains both a readable non-empty
+    `config.json` and non-empty `.safetensors` weights (rejecting partial downloads).
+    """
+    if not snapshot_dir.is_dir():
+        return False
+    cfg_path = snapshot_dir / "config.json"
+    try:
+        if not cfg_path.is_file() or cfg_path.stat().st_size <= 0:
+            return False
+        with cfg_path.open("rb") as fh:
+            if not fh.read(1):
+                return False
+    except OSError:
+        return False
+
+    try:
+        for entry in snapshot_dir.iterdir():
+            if entry.name.endswith(".safetensors"):
+                try:
+                    if entry.is_file() and entry.stat().st_size > 0:
+                        with entry.open("rb") as fh:
+                            if fh.read(1):
+                                return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
 def _resolve_model_source(model_id: str) -> str:
     """
     Resolves a Hugging Face repo ID from the local cache first (zero network HEAD requests
-    on warm boot), falling back to the raw repo ID so `from_pretrained` downloads on miss.
+    on warm boot), falling back to the raw repo ID so `from_pretrained` downloads or resumes
+    if the local snapshot is missing or incomplete.
     """
-    if Path(model_id).exists():
+    local_path = Path(model_id)
+    if local_path.exists():
         return model_id
     try:
-        return snapshot_download(model_id, local_files_only=True)
+        cached_dir = snapshot_download(model_id, local_files_only=True)
+        if parakeet_snapshot_is_complete(Path(cached_dir)):
+            return cached_dir
+        logger.warning(
+            "Local Parakeet cache for %s at %s is incomplete; falling back to remote download.",
+            model_id,
+            cached_dir,
+        )
     except Exception:
-        return model_id
+        pass
+    return model_id
 
 
 def _configure_mlx_cache_limit() -> int:
@@ -482,6 +524,8 @@ class ParakeetEngine:
         self._fast_decoder: FastTDTGreedyDecoder | None = None
         self._optimization_mode: str = "unloaded"
         self._streams: OrderedDict[str, _UtteranceStreamState] = OrderedDict()
+        self._streams_lock = threading.Lock()
+        self._streams_gen: int = 0
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._load_gen: int = 0
@@ -513,8 +557,10 @@ class ParakeetEngine:
             next_st = ASRModelState.LOADING if self.state == ASRModelState.IDLE else ASRModelState.SWITCHING
             self._set_state_locked(next_st)
             self.error_message = None
-        with self._lock:
+        with self._streams_lock:
+            self._streams_gen += 1
             self._streams.clear()
+        with self._lock:
             self._model = None
             self._fast_decoder = None
             mx.clear_cache()
@@ -612,15 +658,16 @@ class ParakeetEngine:
         return fast_decoder.decode_enc_proj(enc_proj_np)
 
     def drop_stream(self, utterance_id: str) -> None:
-        """Releases cached Conformer KV/conv state for a finalized or canceled utterance."""
+        """Releases cached Conformer KV/conv state without blocking on active inference."""
         if not utterance_id:
             return
-        with self._lock:
+        with self._streams_lock:
             self._streams.pop(utterance_id, None)
 
     def clear_streams(self) -> None:
-        """Releases all cached streaming partial states (e.g. on session switch or capture end)."""
-        with self._lock:
+        """Releases all cached streaming partial states without blocking on active inference."""
+        with self._streams_lock:
+            self._streams_gen += 1
             self._streams.clear()
 
     def ensure_loaded(self) -> BaseParakeet:
@@ -660,12 +707,14 @@ class ParakeetEngine:
         pos_enc = getattr(encoder, "pos_enc", None)
         fast_dec = self._fast_decoder
 
+        with self._streams_lock:
+            has_existing_stream = utterance_id in self._streams
         if (
             not utterance_id
             or fast_dec is None
             or not isinstance(pre_encode, DwStridingSubsampling)
             or pos_enc is None
-            or (audio_duration_s < STREAM_WARM_START_SEC and utterance_id not in self._streams)
+            or (audio_duration_s < STREAM_WARM_START_SEC and not has_existing_stream)
         ):
             return self.transcribe_pcm(pcm_float32)
 
@@ -683,7 +732,9 @@ class ParakeetEngine:
             if self._model is not model or fast_dec is None:
                 fallback_full = True
             else:
-                st = self._streams.get(utterance_id)
+                with self._streams_lock:
+                    stream_gen = self._streams_gen
+                    st = self._streams.get(utterance_id)
                 if st is None or pcm_float32.size < st.last_samples:
                     st = _UtteranceStreamState(
                         caches=[
@@ -693,10 +744,12 @@ class ParakeetEngine:
                             for _ in range(len(encoder.layers))
                         ]
                     )
-                    self._streams[utterance_id] = st
-                self._streams.move_to_end(utterance_id)
-                while len(self._streams) > MAX_ACTIVE_STREAMS:
-                    self._streams.popitem(last=False)
+                with self._streams_lock:
+                    if self._streams_gen == stream_gen:
+                        self._streams[utterance_id] = st
+                        self._streams.move_to_end(utterance_id)
+                        while len(self._streams) > MAX_ACTIVE_STREAMS:
+                            self._streams.popitem(last=False)
 
                 st.last_samples = int(pcm_float32.size)
 

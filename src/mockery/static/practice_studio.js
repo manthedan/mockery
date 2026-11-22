@@ -243,11 +243,17 @@ export function createPracticeStudioController({
     activeAudioUrl: null,
     pendingOpTimer: null,
     pendingOpNodes: [],
+    opAbortController: null,
     debriefStartedAt: 0,
+    debriefConfirmTimer: null,
+    debriefConfirmArmed: false,
+    nextQConfirmTimer: null,
+    nextQConfirmArmed: false,
 
     // Local mic recording state
     recordingTarget: null, // null | "answer" | "retry"
     micTarget: null,
+    lastFailedClip: null, // { target, questionId, int16 }
     recGen: 0,
     recSamples: 0,
     recAutoStopping: false,
@@ -1209,11 +1215,90 @@ export function createPracticeStudioController({
     local.recGen += 1;
     local.recordingTarget = null;
     local.micTarget = null;
+    local.lastFailedClip = null;
     micMachine.reset("idle", { event: "abort_mic" });
     cleanupMicResources();
     // Always restore both status lines on session switch/reset so a prior mic-denied note never lingers.
     updateMicUI("answer", "idle", "Transcribed privately on this Mac");
     updateMicUI("retry", "idle", "One focused 45-second rep");
+  }
+
+  function renderMicRetryButton(target, errMsg) {
+    const statusId = target === "retry" ? "practiceRetryMicStatus" : "practiceMicStatus";
+    const statusEl = el(statusId);
+    if (!statusEl) return;
+    statusEl.innerHTML = `${escapeHtml(`Local transcription error: ${errMsg}`)} <button type="button" class="btn-inline-retry" data-retry-asr="${escapeHtml(target)}">Retry transcription</button>`;
+    const btn = statusEl.querySelector("[data-retry-asr]");
+    if (btn) {
+      btn.addEventListener("click", () => {
+        retryFailedTranscription();
+      });
+    }
+  }
+
+  async function transcribeInt16Clip(int16, { target, myQuestionId, mySessionGen, myRecGen }) {
+    micMachine.transition("transcribing", { event: "start_transcribe" });
+    updateMicUI(target, "transcribing", "Transcribing on this Mac…");
+    try {
+      const res = await fetch("/api/asr/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: int16.buffer,
+      });
+      const data = await res.json();
+      if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return false;
+      if (!res.ok) {
+        throw new Error(formatApiDetail(data.detail, "Transcription failed"));
+      }
+      local.lastFailedClip = null;
+      // If the user advanced to a different question while transcribing, discard stale answer audio
+      if (target === "answer" && myQuestionId && currentQuestionId() !== myQuestionId) {
+        local.micTarget = null;
+        micMachine.transition("idle", { event: "transcribe_discarded_question_changed" });
+        updateMicUI(target, "idle", "Transcribed privately on this Mac");
+        return true;
+      }
+      const transcript = String(data.text || "").trim();
+      const inputEl = el(target === "retry" ? "practiceRetryInput" : "practiceAnswerInput");
+      if (inputEl && transcript) {
+        const prefix = inputEl.value.trim();
+        inputEl.value = prefix ? `${prefix} ${transcript}` : transcript;
+        inputEl.focus();
+      }
+      local.micTarget = null;
+      micMachine.transition("idle", { event: "transcribe_done" });
+      const ms = data.inference_ms ? ` (${Math.round(data.inference_ms)} ms local)` : "";
+      updateMicUI(
+        target,
+        "idle",
+        transcript
+          ? `Transcribed locally${ms} — edit or press Send`
+          : "No speech detected — try speaking closer to the mic"
+      );
+      return true;
+    } catch (err) {
+      if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return false;
+      local.micTarget = null;
+      local.lastFailedClip = { target, questionId: myQuestionId, int16 };
+      micMachine.transition("idle", { event: "transcribe_error" });
+      updateMicUI(target, "idle", `Local transcription error: ${err.message || err}`);
+      renderMicRetryButton(target, err.message || err);
+      showToast(`${err.message || err} — click Retry transcription to try again.`, 3800);
+      return false;
+    }
+  }
+
+  async function retryFailedTranscription() {
+    const clip = local.lastFailedClip;
+    if (!clip || !clip.int16 || micMachine.state !== "idle" || opMachine.state === "exiting") return;
+    local.recGen += 1;
+    local.micTarget = clip.target;
+    await transcribeInt16Clip(clip.int16, {
+      target: clip.target,
+      myQuestionId: clip.questionId,
+      mySessionGen: local.sessionGen,
+      myRecGen: local.recGen,
+    });
   }
 
   async function toggleMicRecording(target = "answer") {
@@ -1319,11 +1404,17 @@ export function createPracticeStudioController({
       source.connect(processor);
       processor.connect(ctx.destination);
 
+      local.lastFailedClip = null;
       updateMicUI(target, "recording", "Listening · 0:00");
       if (target === "retry") startRetryTimerIfIdle();
       local.recTimerHandle = setInterval(() => {
         const elapsed = (Date.now() - local.recStartedAt) / 1000;
-        updateMicUI(target, "recording", `Listening · ${fmtShortClock(elapsed)}`);
+        const left = Math.max(0, Math.ceil(120 - elapsed));
+        const label =
+          elapsed >= 90
+            ? `Listening · ${fmtShortClock(elapsed)} (${left}s left)`
+            : `Listening · ${fmtShortClock(elapsed)}`;
+        updateMicUI(target, "recording", label);
       }, 400);
     } catch (err) {
       if (stream) {
@@ -1366,50 +1457,12 @@ export function createPracticeStudioController({
       return;
     }
 
-    micMachine.transition("transcribing", { event: "start_transcribe" });
-    updateMicUI(target, "transcribing", "Transcribing on this Mac…");
-    try {
-      const res = await fetch("/api/asr/transcribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: int16.buffer,
-      });
-      const data = await res.json();
-      if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return;
-      if (!res.ok) {
-        throw new Error(formatApiDetail(data.detail, "Transcription failed"));
-      }
-      // If the user advanced to a different question while transcribing, discard stale answer audio
-      if (target === "answer" && myQuestionId && currentQuestionId() !== myQuestionId) {
-        local.micTarget = null;
-        micMachine.transition("idle", { event: "transcribe_discarded_question_changed" });
-        updateMicUI(target, "idle", "Transcribed privately on this Mac");
-        return;
-      }
-      const transcript = String(data.text || "").trim();
-      const inputEl = el(target === "retry" ? "practiceRetryInput" : "practiceAnswerInput");
-      if (inputEl && transcript) {
-        const prefix = inputEl.value.trim();
-        inputEl.value = prefix ? `${prefix} ${transcript}` : transcript;
-        inputEl.focus();
-      }
-      local.micTarget = null;
-      micMachine.transition("idle", { event: "transcribe_done" });
-      const ms = data.inference_ms ? ` (${Math.round(data.inference_ms)} ms local)` : "";
-      updateMicUI(
-        target,
-        "idle",
-        transcript
-          ? `Transcribed locally${ms} — edit or press Send`
-          : "No speech detected — try speaking closer to the mic"
-      );
-    } catch (err) {
-      if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return;
-      local.micTarget = null;
-      micMachine.transition("idle", { event: "transcribe_error" });
-      updateMicUI(target, "idle", `Local transcription error: ${err.message || err}`);
-      showToast(String(err.message || err), 3200);
-    }
+    await transcribeInt16Clip(int16, {
+      target,
+      myQuestionId,
+      mySessionGen,
+      myRecGen,
+    });
   }
 
   /* ---------------- Extensible Studio Slot (M3 & M4) ---------------- */
@@ -1923,6 +1976,8 @@ export function createPracticeStudioController({
     // Invalidate all in-flight session requests BEFORE unmounting so nothing can remount after exit
     local.sessionGen += 1;
     local.debriefStartedAt = 0;
+    cancelActiveOp();
+    clearConfirmArms();
     clearExitForceArm();
     clearPendingOpUI({ force: true });
     unmountStudioPlugin({ flush: false });
@@ -2010,23 +2065,85 @@ export function createPracticeStudioController({
     }, 250);
   }
 
-  function showPendingTurnCard({ container, roleClass = "pturn-interviewer", title = "Interviewer", stages = [], coachRailMsg = "" }) {
+  function beginOpAbort() {
+    if (local.opAbortController) {
+      try {
+        local.opAbortController.abort();
+      } catch {
+        /* ignore */
+      }
+    }
+    const ctrl = new AbortController();
+    local.opAbortController = ctrl;
+    return ctrl;
+  }
+
+  function cancelActiveOp() {
+    if (!local.opAbortController) return false;
+    const ctrl = local.opAbortController;
+    local.opAbortController = null;
+    try {
+      ctrl.abort();
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+
+  function clearConfirmArms() {
+    if (local.debriefConfirmTimer) {
+      clearTimeout(local.debriefConfirmTimer);
+      local.debriefConfirmTimer = null;
+    }
+    if (local.debriefConfirmArmed) {
+      local.debriefConfirmArmed = false;
+      const btn = el("practiceDebriefBtn");
+      if (btn && !btn.classList.contains("is-loading")) btn.textContent = "End & Debrief";
+    }
+    if (local.nextQConfirmTimer) {
+      clearTimeout(local.nextQConfirmTimer);
+      local.nextQConfirmTimer = null;
+    }
+    if (local.nextQConfirmArmed) {
+      local.nextQConfirmArmed = false;
+      const btn = el("practiceNextQBtn");
+      if (btn && !btn.classList.contains("is-loading")) btn.textContent = "Next Q";
+    }
+  }
+
+  function showPendingTurnCard({
+    container,
+    roleClass = "pturn-interviewer",
+    title = "Interviewer",
+    stages = [],
+    coachRailMsg = "",
+    onCancel = null,
+  }) {
     if (!container) return null;
     const card = document.createElement("div");
     card.className = `pturn ${roleClass} is-thinking`;
     card.setAttribute("role", "status");
     card.setAttribute("aria-live", "polite");
     const initialText = stages[0]?.text || "Thinking…";
+    const cancelHtml = onCancel
+      ? `<button type="button" class="btn-inline-cancel" data-cancel-op>Cancel</button>`
+      : "";
     card.innerHTML = `
       <div class="pturn-head">
         <span>${escapeHtml(title)}</span>
-        <span class="thinking-elapsed" aria-hidden="true"></span>
+        <span class="pturn-head-actions">
+          <span class="thinking-elapsed" aria-hidden="true"></span>
+          ${cancelHtml}
+        </span>
       </div>
       <div class="pturn-body">
         <span class="typing-dots" aria-hidden="true"><span></span><span></span><span></span></span>
         <span class="thinking-stage-text">${escapeHtml(initialText)}</span>
       </div>
     `;
+    if (onCancel) {
+      card.querySelector("[data-cancel-op]")?.addEventListener("click", () => onCancel());
+    }
     container.appendChild(card);
     local.pendingOpNodes.push(card);
     container.scrollTop = container.scrollHeight;
@@ -2313,9 +2430,13 @@ export function createPracticeStudioController({
       return;
     }
     const mySessionGen = local.sessionGen;
+    clearConfirmArms();
     if (!opMachine.transition("submitting_turn", { event: "submit_turn" })) return;
     setBusy(true);
 
+    let clearedDraft = false;
+    let submittedText = "";
+    let opCtrl = null;
     try {
       if (micMachine.state === "recording" && local.recordingTarget === "answer") {
         await stopMicAndTranscribe();
@@ -2326,10 +2447,15 @@ export function createPracticeStudioController({
       const inputEl = el("practiceAnswerInput");
       const text = (explicitText !== null ? String(explicitText) : inputEl?.value || "").trim();
       if (!text) return;
+      submittedText = text;
 
-      if (explicitText === null && inputEl) inputEl.value = "";
+      if (explicitText === null && inputEl) {
+        inputEl.value = "";
+        clearedDraft = true;
+      }
 
       setButtonLoading("practiceSendBtn", true, "Thinking…");
+      opCtrl = beginOpAbort();
 
       // Optimistic render of candidate's message + staged AI Interviewer thinking card
       const feed = el("practiceFeed");
@@ -2348,6 +2474,7 @@ export function createPracticeStudioController({
             { at: 6.5, text: "Still thinking — waiting on model response…" },
           ],
           coachRailMsg: "Reading your answer for its strongest signals…",
+          onCancel: () => cancelActiveOp(),
         });
       }
 
@@ -2355,6 +2482,7 @@ export function createPracticeStudioController({
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/turn`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: opCtrl.signal,
         body: JSON.stringify({
           text,
           workspace_context: wsCtx,
@@ -2364,6 +2492,7 @@ export function createPracticeStudioController({
       const data = await res.json();
       if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Turn failed"));
+      clearedDraft = false;
       local.session = data.session;
       renderPracticeSession();
       if (data.interviewer_turn?.text && local.voiceEnabled) {
@@ -2371,10 +2500,21 @@ export function createPracticeStudioController({
       }
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
-        showToast(String(err.message || err), 3200);
+        const inputEl = el("practiceAnswerInput");
+        if (clearedDraft && submittedText && inputEl && !inputEl.value.trim()) {
+          inputEl.value = submittedText;
+        }
+        const msg =
+          err?.name === "AbortError"
+            ? "Cancelled — your answer is still in the box."
+            : `${err.message || err} — your answer was kept in the box.`;
+        showToast(msg, 3600);
         renderPracticeSession();
       }
     } finally {
+      if (opCtrl && local.opAbortController === opCtrl) {
+        local.opAbortController = null;
+      }
       clearPendingOpUI();
       if (opMachine.state === "submitting_turn") {
         opMachine.transition("idle", { event: "submit_turn_done" });
@@ -2388,11 +2528,13 @@ export function createPracticeStudioController({
 
   async function requestHint() {
     if (!local.session || opMachine.state !== "idle" || local.session.phase !== "active") return;
+    clearConfirmArms();
     const mySessionGen = local.sessionGen;
     if (!opMachine.transition("requesting_hint", { event: "request_hint" })) return;
     stopSpeaking();
     setBusy(true);
     setButtonLoading("practiceHintBtn", true, "Hint…");
+    const opCtrl = beginOpAbort();
     showPendingTurnCard({
       container: el("practiceFeed"),
       roleClass: "pturn-coach",
@@ -2403,12 +2545,14 @@ export function createPracticeStudioController({
         { at: 6.5, text: "Still thinking — waiting on model response…" },
       ],
       coachRailMsg: "Finding the most helpful nudge for where you are…",
+      onCancel: () => cancelActiveOp(),
     });
     try {
       const wsCtx = getActiveWorkspaceContext();
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/hint`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: opCtrl.signal,
         body: JSON.stringify({ workspace_context: wsCtx }),
       });
       const data = await res.json();
@@ -2418,10 +2562,11 @@ export function createPracticeStudioController({
       renderPracticeSession();
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
-        showToast(String(err.message || err), 3000);
+        showToast(err?.name === "AbortError" ? "Hint request cancelled." : String(err.message || err), 3000);
         renderPracticeSession();
       }
     } finally {
+      if (local.opAbortController === opCtrl) local.opAbortController = null;
       clearPendingOpUI();
       if (opMachine.state === "requesting_hint") {
         opMachine.transition("idle", { event: "request_hint_done" });
@@ -2436,12 +2581,25 @@ export function createPracticeStudioController({
       showToast("Finishing voice capture — try again in a moment.", 2000);
       return;
     }
+    const hasPendingDraft =
+      micMachine.state === "recording" || Boolean((el("practiceAnswerInput")?.value || "").trim());
+    if (hasPendingDraft && !local.nextQConfirmArmed) {
+      clearConfirmArms();
+      local.nextQConfirmArmed = true;
+      const btn = el("practiceNextQBtn");
+      if (btn) btn.textContent = "Skip draft?";
+      local.nextQConfirmTimer = setTimeout(() => clearConfirmArms(), 5000);
+      showToast("You have an unsent answer — send it first, or click Next Q again to skip it.", 3800);
+      return;
+    }
+    clearConfirmArms();
     const mySessionGen = local.sessionGen;
     if (!opMachine.transition("advancing", { event: "advance_question" })) return;
     stopSpeaking();
     abortMicRecording();
     setBusy(true);
     setButtonLoading("practiceNextQBtn", true, "Loading…");
+    const opCtrl = beginOpAbort();
     showPendingTurnCard({
       container: el("practiceFeed"),
       roleClass: "pturn-interviewer",
@@ -2451,11 +2609,13 @@ export function createPracticeStudioController({
         { at: 2.5, text: "Tailoring the transition from your last answer…" },
         { at: 6.5, text: "Still thinking — waiting on model response…" },
       ],
+      onCancel: () => cancelActiveOp(),
     });
     try {
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/next`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: opCtrl.signal,
         body: JSON.stringify({ expected_question_id: currentQuestionId() }),
       });
       const data = await res.json();
@@ -2472,10 +2632,11 @@ export function createPracticeStudioController({
       }
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
-        showToast(String(err.message || err), 3000);
+        showToast(err?.name === "AbortError" ? "Cancelled." : String(err.message || err), 3000);
         renderPracticeSession();
       }
     } finally {
+      if (local.opAbortController === opCtrl) local.opAbortController = null;
       clearPendingOpUI();
       if (opMachine.state === "advancing") {
         opMachine.transition("idle", { event: "advance_question_done" });
@@ -2491,10 +2652,28 @@ export function createPracticeStudioController({
       showToast("Finishing voice capture — try again in a moment.", 2000);
       return;
     }
+    const qTotal = Array.isArray(local.session.questions) ? local.session.questions.length : 0;
+    const qIdx = Number(local.session.current_question_index || 0);
+    const hasRemainingQuestions = local.session.phase === "active" && qTotal > 0 && qIdx < qTotal - 1;
+    if (hasRemainingQuestions && !local.debriefConfirmArmed) {
+      clearConfirmArms();
+      local.debriefConfirmArmed = true;
+      const btn = el("practiceDebriefBtn");
+      if (btn) btn.textContent = "Confirm End?";
+      local.debriefConfirmTimer = setTimeout(() => clearConfirmArms(), 5000);
+      const leftCount = qTotal - 1 - qIdx;
+      showToast(
+        `${leftCount} question${leftCount === 1 ? "" : "s"} remaining — click End & Debrief again to finish and grade now.`,
+        4000
+      );
+      return;
+    }
+    clearConfirmArms();
     const mySessionGen = local.sessionGen;
     if (!opMachine.transition("debriefing", { event: "run_debrief" })) return;
     setBusy(true);
     stopSpeaking();
+    const opCtrl = beginOpAbort();
     // End & Debrief simply goes quiet (disabled by setBusy): the progress card is the status.
     local.debriefStartedAt = Date.now();
     setConversationCollapsed(false);
@@ -2515,8 +2694,31 @@ export function createPracticeStudioController({
           return;
         }
       }
+      // If the candidate typed or just spoke a final answer, include it in the transcript before debriefing!
+      const inputEl = el("practiceAnswerInput");
+      const unsentDraft = (inputEl?.value || "").trim();
+      if (unsentDraft && local.session.phase === "active") {
+        const turnRes = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/turn`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: opCtrl.signal,
+          body: JSON.stringify({
+            text: unsentDraft,
+            workspace_context: getActiveWorkspaceContext(),
+            expected_question_id: currentQuestionId(),
+          }),
+        });
+        const turnData = await turnRes.json();
+        if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
+        if (!turnRes.ok) {
+          throw new Error(formatApiDetail(turnData.detail, "Could not save your final answer before debrief"));
+        }
+        local.session = turnData.session;
+        if (inputEl) inputEl.value = "";
+      }
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/debrief`, {
         method: "POST",
+        signal: opCtrl.signal,
       });
       const data = await res.json();
       if (mySessionGen !== local.sessionGen || opMachine.state === "exiting") return;
@@ -2526,10 +2728,11 @@ export function createPracticeStudioController({
       refreshPracticeHistory();
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
-        showToast(String(err.message || err), 3400);
+        showToast(err?.name === "AbortError" ? "Debrief cancelled." : String(err.message || err), 3400);
         renderPracticeSession();
       }
     } finally {
+      if (local.opAbortController === opCtrl) local.opAbortController = null;
       if (local.session?.phase !== "debriefing") {
         clearPendingOpUI();
       }
@@ -2647,6 +2850,7 @@ export function createPracticeStudioController({
         return;
       }
       setButtonLoading("practiceRetrySubmitBtn", true, "Evaluating retry…");
+      const opCtrl = beginOpAbort();
       showPendingTurnCard({
         container: el("practiceRetryHistory"),
         roleClass: "pturn-coach",
@@ -2656,11 +2860,13 @@ export function createPracticeStudioController({
           { at: 2.5, text: "Writing before → after coaching feedback…" },
           { at: 6.5, text: "Still working — waiting on model response…" },
         ],
+        onCancel: () => cancelActiveOp(),
       });
       const drill = local.session.debrief?.retry_drill || {};
       const res = await fetch(`/api/practice/${encodeURIComponent(local.session.id)}/retry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: opCtrl.signal,
         body: JSON.stringify({
           answer_text: text,
           question_id: drill.question_id || null,
@@ -2677,9 +2883,10 @@ export function createPracticeStudioController({
       showToast("Nice rep. Your before → after is below.", 2800);
     } catch (err) {
       if (mySessionGen === local.sessionGen) {
-        showToast(String(err.message || err), 3200);
+        showToast(err?.name === "AbortError" ? "Retry evaluation cancelled." : String(err.message || err), 3200);
       }
     } finally {
+      local.opAbortController = null;
       clearPendingOpUI();
       if (opMachine.state === "submitting_retry") {
         opMachine.transition("idle", { event: "submit_retry_done" });
@@ -3523,6 +3730,35 @@ export function createPracticeStudioController({
     pushWorkspaceSnapshot,
     previewVoice,
     stopSpeaking,
+    handleEscape: () => {
+      if (local.isSpeaking) {
+        stopSpeaking();
+        return true;
+      }
+      if (local.opAbortController) {
+        return cancelActiveOp();
+      }
+      return false;
+    },
+    toggleVoiceShortcut: () => {
+      if (!local.session) return false;
+      if (local.session.phase === "active") {
+        toggleMicRecording("answer");
+        return true;
+      }
+      if (local.session.phase === "completed" && el("practiceRetryMicBtn")) {
+        toggleMicRecording("retry");
+        return true;
+      }
+      return false;
+    },
+    hasUnsavedWork: () =>
+      Boolean(
+        local.session &&
+          (micMachine.state === "recording" ||
+            local.workspaceDirty ||
+            Boolean((el("practiceAnswerInput")?.value || "").trim()))
+      ),
     getStateSnapshot,
     isPracticeActive: () => Boolean(local.session),
     isPracticeStartingOrActive: () =>
