@@ -273,6 +273,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             turns=[opening_turn],
         )
         await asyncio.to_thread(runtime.practice_store.save, session)
+        runtime.llm.prewarm_fast_model()
         return {
             "session": serialize_practice_session(runtime, session),
             "opening_turn": opening_turn.model_dump(),
@@ -390,6 +391,8 @@ def build_practice_router(runtime: Any) -> APIRouter:
             session.turns.append(cand_turn)
             session.turns.append(interviewer_turn)
             await asyncio.to_thread(runtime.practice_store.save, session)
+            if session.phase == PracticePhase.ACTIVE.value:
+                runtime.llm.prewarm_fast_model()
             return {
                 "session": serialize_practice_session(runtime, session),
                 "reply": reply,

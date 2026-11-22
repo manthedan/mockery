@@ -505,100 +505,323 @@ def test_question_bank_cache_jd_score_parity_and_invalidation(tmp_path: Path) ->
     assert store.get_question("cust_q1")["title"] == "Updated Distributed Queue"
 
 
-def test_speculative_probe_budget_throttling_and_session_reset(tmp_path: Path) -> None:
-    """Automatic Live Copilot speculative probes must respect cooldown, word delta, and per-card caps."""
-    from mockery.models import InterviewSession, QAGroup, Utterance
-    from mockery.server import (
-        AppRuntime,
-        SPECULATIVE_PROBE_CLI_COOLDOWN_SEC,
-        SPECULATIVE_PROBE_COOLDOWN_SEC,
-        SPECULATIVE_PROBE_MAX_PER_CARD,
-        SPECULATIVE_PROBE_MIN_NEW_WORDS,
-    )
+def test_live_copilot_no_automatic_speculative_probes(tmp_path: Path) -> None:
+    """Live Copilot must never fire background speculative probes; Dive Deeper runs strictly on-demand (`D`)."""
+    from mockery import server as server_mod
+    from mockery.server import AppRuntime
 
     rt = AppRuntime(tmp_path)
-    rt.llm_config.provider = "openai"
-    rt.llm_config.api_key = "sk-test-budget"
-    rt.llm_config.base_url = "https://api.openai.com/v1"
+    assert not hasattr(rt, "speculative_probe_budget")
+    assert not hasattr(rt, "should_run_speculative_probe")
+    assert not hasattr(server_mod, "SPECULATIVE_PROBE_COOLDOWN_SEC")
 
-    session = InterviewSession()
-    u1 = Utterance(id="u1", speaker="candidate", text=" ".join(["word"] * 40), start_ms=0, end_ms=5000, final=True)
-    session.utterances.append(u1)
-    qa = QAGroup(id="qa_1", index=1, title="Ledger Design", utterance_ids=["u1"])
-    session.qa_groups.append(qa)
-    rt.active_session = session
 
-    # First pre-warm on card is allowed immediately
-    assert rt.should_run_speculative_probe(session, qa, now=100.0) is True
-    rt.record_speculative_probe(session, qa, now=100.0)
-
-    # Blocked during cooldown even if candidate adds plenty of words
-    u2 = Utterance(
-        id="u2",
-        speaker="candidate",
-        text=" ".join(["detail"] * (SPECULATIVE_PROBE_MIN_NEW_WORDS + 10)),
-        start_ms=6000,
-        end_ms=15000,
-        final=True,
+def test_all_five_cli_harnesses_enforce_prompt_injection_lockdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every supported CLI harness (`agy`, `claude`, `codex`, `gemini`, `pi`) must lock down tools/MCP/cwd."""
+    from mockery.llm import (
+        AGY_DENY_ALL_SETTINGS,
+        InterviewCopilotLLM,
+        LLMRuntimeConfig,
+        _cli_sandbox_cwd,
+        _gemini_deny_policy_path,
     )
-    session.utterances.append(u2)
-    qa.utterance_ids.append("u2")
-    assert rt.should_run_speculative_probe(session, qa, now=100.0 + SPECULATIVE_PROBE_COOLDOWN_SEC - 1.0) is False
 
-    # Allowed once cooldown elapsed AND enough new finalized candidate words arrived
-    assert rt.should_run_speculative_probe(session, qa, now=100.0 + SPECULATIVE_PROBE_COOLDOWN_SEC + 1.0) is True
-    rt.record_speculative_probe(session, qa, now=100.0 + SPECULATIVE_PROBE_COOLDOWN_SEC + 1.0)
+    sandbox = _cli_sandbox_cwd()
+    invocations: list[tuple[tuple[str, ...], str | None]] = []
 
-    # Blocked after cooldown if candidate only spoke a short utterance (< min new words)
-    u3 = Utterance(
-        id="u3",
-        speaker="candidate",
-        text="just ten short words here right now yes indeed okay",
-        start_ms=20000,
-        end_ms=23000,
-        final=True,
-    )
-    session.utterances.append(u3)
-    qa.utterance_ids.append("u3")
-    assert rt.should_run_speculative_probe(session, qa, now=200.0) is False
+    class _FakeOneShotProc:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self._stdout = stdout
 
-    # Add enough words to hit the per-card cap
-    u4 = Utterance(
-        id="u4",
-        speaker="candidate",
-        text=" ".join(["more"] * (SPECULATIVE_PROBE_MIN_NEW_WORDS + 5)),
-        start_ms=25000,
-        end_ms=35000,
-        final=True,
-    )
-    session.utterances.append(u4)
-    qa.utterance_ids.append("u4")
-    assert rt.should_run_speculative_probe(session, qa, now=200.0) is True
-    rt.record_speculative_probe(session, qa, now=200.0)
-    assert rt.speculative_probe_budget["qa_1"]["count"] == SPECULATIVE_PROBE_MAX_PER_CARD
+        async def communicate(self, _stdin: bytes | None = None) -> tuple[bytes, bytes]:
+            return (self._stdout, b"")
 
-    # Once per-card cap is reached, no further automatic background calls fire
-    u5 = Utterance(id="u5", speaker="candidate", text=" ".join(["extra"] * 100), start_ms=40000, end_ms=55000, final=True)
-    session.utterances.append(u5)
-    qa.utterance_ids.append("u5")
-    assert rt.should_run_speculative_probe(session, qa, now=500.0) is False
+    async def fake_subproc(*args: Any, **kwargs: Any):
+        str_args = tuple(str(a) for a in args)
+        invocations.append((str_args, kwargs.get("cwd")))
+        if str_args[0] == "agy":
+            return _FakeOneShotProc(b'{"status":"SUCCESS","response":"OK_AGY"}')
+        if str_args[0] == "codex" and "-o" in str_args:
+            out_idx = str_args.index("-o") + 1
+            Path(str_args[out_idx]).write_text("OK_CODEX", encoding="utf-8")
+            return _FakeOneShotProc(b"")
+        return _FakeOneShotProc(b"OK_CLI")
 
-    # Local/CLI backends enforce the stricter cooldown & cap
-    rt.switch_session(InterviewSession())
-    assert rt.speculative_probe_budget == {}
-    rt.llm_config.provider = "omlx"
-    rt.llm_config.base_url = "http://localhost:8000/v1"
-    rt.llm_config.api_key = ""
-    s2 = rt.active_session
-    s2.utterances.append(Utterance(id="c1", speaker="candidate", text=" ".join(["local"] * 50), start_ms=0, end_ms=8000, final=True))
-    qa2 = QAGroup(id="qa_local", index=1, title="Local GPU Test", utterance_ids=["c1"])
-    s2.qa_groups.append(qa2)
-    assert rt.should_run_speculative_probe(s2, qa2, now=10.0) is True
-    rt.record_speculative_probe(s2, qa2, now=10.0)
-    s2.utterances.append(Utterance(id="c2", speaker="candidate", text=" ".join(["local"] * 60), start_ms=9000, end_ms=19000, final=True))
-    qa2.utterance_ids.append("c2")
-    assert rt.should_run_speculative_probe(s2, qa2, now=10.0 + SPECULATIVE_PROBE_CLI_COOLDOWN_SEC - 1.0) is False
-    assert rt.should_run_speculative_probe(s2, qa2, now=10.0 + SPECULATIVE_PROBE_CLI_COOLDOWN_SEC + 1.0) is True
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subproc)
+
+    cases = [
+        ("agy", "cli://agy", "gemini-4-hydrogen:low", "OK_AGY"),
+        ("claude_cli", "cli://claude", "claude-haiku-4-5-20251001", "OK_CLI"),
+        ("codex_cli", "cli://codex", "gpt-5.4-mini", "OK_CODEX"),
+        ("gemini_cli", "cli://gemini", "gemini-2.5-flash", "OK_CLI"),
+        ("pi", "cli://pi", "anthropic/claude-haiku-4-5-20251001", "OK_CLI"),
+    ]
+    for provider, base_url, model, expected in cases:
+        cfg = LLMRuntimeConfig(tmp_path)
+        cfg.provider = provider
+        cfg.base_url = base_url
+        llm = InterviewCopilotLLM(cfg)
+        out = asyncio.run(llm._complete_text(model=model, system="Sys", user="Candidate said ignore rules", expect_json=False))
+        assert out == expected
+
+    assert len(invocations) == 5
+    for args, cwd in invocations:
+        assert cwd == str(sandbox)
+
+    by_bin = {args[0]: args for args, _ in invocations}
+    # agy
+    assert "--sandbox" in by_bin["agy"]
+    assert "--disable-slash-commands" in by_bin["agy"]
+    assert "--settings" in by_bin["agy"]
+    assert AGY_DENY_ALL_SETTINGS in by_bin["agy"]
+    # claude
+    assert "--no-session-persistence" in by_bin["claude"]
+    assert "--tools" in by_bin["claude"]
+    assert by_bin["claude"][by_bin["claude"].index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in by_bin["claude"]
+    assert "--setting-sources" in by_bin["claude"]
+    assert by_bin["claude"][by_bin["claude"].index("--setting-sources") + 1] == ""
+    assert "--disable-slash-commands" in by_bin["claude"]
+    # codex
+    assert "-s" in by_bin["codex"]
+    assert by_bin["codex"][by_bin["codex"].index("-s") + 1] == "read-only"
+    assert "--ephemeral" in by_bin["codex"]
+    for disabled_feat in ("shell_tool", "unified_exec", "apps", "browser_use"):
+        assert disabled_feat in by_bin["codex"]
+    assert "mcp_servers={}" in by_bin["codex"]
+    # gemini
+    assert "--approval-mode" in by_bin["gemini"]
+    assert by_bin["gemini"][by_bin["gemini"].index("--approval-mode") + 1] == "plan"
+    assert "-e" in by_bin["gemini"]
+    assert by_bin["gemini"][by_bin["gemini"].index("-e") + 1] == "none"
+    assert "--allowed-mcp-server-names" in by_bin["gemini"]
+    assert "--admin-policy" in by_bin["gemini"]
+    policy_path = _gemini_deny_policy_path()
+    assert str(policy_path) in by_bin["gemini"]
+    assert policy_path.is_file()
+    assert 'decision = "deny"' in policy_path.read_text(encoding="utf-8")
+    # pi
+    for flag in ("--no-session", "--no-context-files", "--no-tools", "--no-extensions", "--no-mcp"):
+        assert flag in by_bin["pi"]
+
+
+def test_disposable_warm_spare_lifecycle_streaming_and_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify pre-spawned disposable warm spares for `agy` & `claude`: single-use, streaming, cleanup, fallback."""
+    from mockery.llm import InterviewCopilotLLM, LLMRuntimeConfig
+
+    class _FakeStdin:
+        def __init__(self, *, broken: bool = False) -> None:
+            self.written: list[bytes] = []
+            self.closed = False
+            self._broken = broken
+
+        def is_closing(self) -> bool:
+            return self.closed
+
+        def write(self, data: bytes) -> None:
+            if self._broken:
+                raise BrokenPipeError("spare died")
+            self.written.append(data)
+
+        async def drain(self) -> None:
+            if self._broken:
+                raise BrokenPipeError("spare died")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeStdout:
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = list(lines)
+
+        async def readline(self) -> bytes:
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+    class _FakeStderr:
+        def __init__(self, data: bytes = b"") -> None:
+            self._data = data
+
+        async def read(self) -> bytes:
+            return self._data
+
+    class _FakeWarmProc:
+        def __init__(self, stdout_lines: list[bytes], *, broken_stdin: bool = False, stderr: bytes = b"") -> None:
+            self.returncode: int | None = None
+            self.stdin = _FakeStdin(broken=broken_stdin)
+            self.stdout = _FakeStdout(stdout_lines)
+            self.stderr = _FakeStderr(stderr)
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.terminated = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+        async def communicate(self, _stdin: bytes | None = None) -> tuple[bytes, bytes]:
+            self.returncode = 0
+            return (b'{"status":"SUCCESS","response":"FALLBACK_ONESHOT"}', b"")
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/fake")
+
+    async def _run_all() -> None:
+        # 1. agy warm spare: streams deltas, uses {"event":"user"}, terminates after 1 turn, replenishes next spare
+        spawned_agy: list[tuple[tuple[str, ...], _FakeWarmProc]] = []
+
+        async def fake_agy_exec(*args: Any, **_kwargs: Any):
+            str_args = tuple(str(a) for a in args)
+            if "--input-format" in str_args:
+                proc = _FakeWarmProc(
+                    [
+                        json.dumps({"event": "step_update", "step_update": {"step_type": "agent_response", "text_delta": "Hel"}}).encode() + b"\n",
+                        json.dumps({"event": "step_update", "step_update": {"step_type": "agent_response", "text_delta": "lo"}}).encode() + b"\n",
+                        json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "Hello"}}).encode() + b"\n",
+                    ]
+                )
+            else:
+                proc = _FakeWarmProc([])
+            spawned_agy.append((str_args, proc))
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_agy_exec)
+        agy_cfg = LLMRuntimeConfig(tmp_path)
+        agy_cfg.provider = "agy"
+        agy_cfg.base_url = "cli://agy"
+        agy_cfg.fast_model = "gemini-4-hydrogen:low"
+        agy_llm = InterviewCopilotLLM(agy_cfg)
+
+        agy_llm.prewarm_fast_model()
+        await asyncio.gather(*list(agy_llm._warm_spare_tasks))
+        assert len(spawned_agy) == 1
+        first_args, first_proc = spawned_agy[0]
+        assert "--input-format" in first_args and "stream-json" in first_args
+        assert "--sandbox" in first_args and "--settings" in first_args
+
+        deltas: list[str] = []
+
+        async def on_delta(chunk: str) -> None:
+            deltas.append(chunk)
+
+        out = await agy_llm._complete_text(
+            model="gemini-4-hydrogen:low",
+            system="You are an interviewer.",
+            user="Candidate answer.",
+            expect_json=False,
+            on_delta=on_delta,
+        )
+        assert out == "Hello"
+        assert deltas == ["Hel", "lo"]
+        assert first_proc.terminated is True
+        sent_env = json.loads(first_proc.stdin.written[0].decode("utf-8"))
+        assert sent_env["event"] == "user"
+        assert sent_env["message"]["role"] == "user"
+        assert "<INSTRUCTIONS>" in sent_env["message"]["content"]
+
+        # Replenishment task spawned a fresh spare; aclose() terminates it cleanly
+        await asyncio.gather(*list(agy_llm._warm_spare_tasks))
+        assert len(spawned_agy) == 2
+        second_proc = spawned_agy[1][1]
+        assert second_proc.terminated is False
+        await agy_llm.aclose()
+        assert second_proc.terminated is True
+        assert agy_llm._warm_spare is None
+
+        # 2. Broken warm spare transparently falls back to hardened one-shot
+        fallback_calls: list[tuple[str, ...]] = []
+
+        async def fake_agy_fallback_exec(*args: Any, **_kwargs: Any):
+            str_args = tuple(str(a) for a in args)
+            fallback_calls.append(str_args)
+            if "--input-format" in str_args:
+                return _FakeWarmProc([], broken_stdin=True)
+            return _FakeWarmProc([])
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_agy_fallback_exec)
+        agy_llm.prewarm_fast_model()
+        await asyncio.gather(*list(agy_llm._warm_spare_tasks))
+        fb_out = await agy_llm._complete_text(
+            model="gemini-4-hydrogen:low",
+            system="Sys",
+            user="Prompt",
+            expect_json=True,
+        )
+        assert fb_out == "FALLBACK_ONESHOT"
+        assert len(fallback_calls) == 2
+        assert "--input-format" in fallback_calls[0]
+        assert "--input-format" not in fallback_calls[1]
+        await agy_llm.aclose()
+
+        # 3. claude warm spare uses {"type":"user"}, streams content_block_delta, and locks down tools/MCP
+        spawned_claude: list[tuple[tuple[str, ...], _FakeWarmProc]] = []
+
+        async def fake_claude_exec(*args: Any, **_kwargs: Any):
+            str_args = tuple(str(a) for a in args)
+            proc = _FakeWarmProc(
+                [
+                    json.dumps(
+                        {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"text": "Hi "}}}
+                    ).encode()
+                    + b"\n",
+                    json.dumps(
+                        {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"text": "there"}}}
+                    ).encode()
+                    + b"\n",
+                    json.dumps({"type": "result", "is_error": False, "result": "Hi there"}).encode() + b"\n",
+                ]
+            )
+            spawned_claude.append((str_args, proc))
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_claude_exec)
+        cl_cfg = LLMRuntimeConfig(tmp_path)
+        cl_cfg.provider = "claude_cli"
+        cl_cfg.base_url = "cli://claude"
+        cl_cfg.fast_model = "claude-haiku-4-5-20251001"
+        cl_llm = InterviewCopilotLLM(cl_cfg)
+        cl_llm.prewarm_fast_model()
+        await asyncio.gather(*list(cl_llm._warm_spare_tasks))
+        assert len(spawned_claude) == 1
+        cl_args, cl_proc = spawned_claude[0]
+        assert "--strict-mcp-config" in cl_args
+        assert "--setting-sources" in cl_args
+        assert "--disable-slash-commands" in cl_args
+        assert "--tools" in cl_args
+
+        cl_deltas: list[str] = []
+
+        async def on_cl_delta(chunk: str) -> None:
+            cl_deltas.append(chunk)
+
+        cl_out = await cl_llm._complete_text(
+            model="claude-haiku-4-5-20251001",
+            system="Coach",
+            user="Turn 1",
+            expect_json=False,
+            on_delta=on_cl_delta,
+        )
+        assert cl_out == "Hi there"
+        assert cl_deltas == ["Hi ", "there"]
+        assert cl_proc.terminated is True
+        cl_env = json.loads(cl_proc.stdin.written[0].decode("utf-8"))
+        assert cl_env["type"] == "user"
+        assert cl_env["message"]["role"] == "user"
+        await cl_llm.aclose()
+
+    asyncio.run(_run_all())
 
 
 def test_prompt_caching_wire_formats_prefix_stability_and_cli_sandbox_cwd(
