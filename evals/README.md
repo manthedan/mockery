@@ -38,15 +38,24 @@ Install the optional dev-only `gepa` extra first (installs both `gepa` and `lite
 uv sync --extra gepa
 ```
 
-Then pair your fast local `task_lm` (oMLX / Ollama / LM Studio / DeepSeek Flash) with a frontier `reflection_lm` (OpenAI / Anthropic / Gemini via GEPA's `ReflectionConfig`):
+Then pair your fast local `task_lm` (oMLX / Ollama / LM Studio / DeepSeek Flash, OR Mockery's `cli://` transports such as `cli://claude`, `cli://codex`, `cli://agy`) with a frontier `reflection_lm` (either a LiteLLM string like `openai/gpt-5.1` or a zero-API-key local CLI transport like `cli://claude/sonnet`, `cli://codex/gpt-6.1-sol`, `cli://agy/gemini-4-neon:high`):
 
 ```bash
+# Via local HTTP server (oMLX) + LiteLLM reflection model:
 uv run python -m evals.optimize_gepa \
   --target practice_interviewer \
   --task-model mlx-community/Qwen2.5-7B-Instruct-4bit \
   --task-base-url http://localhost:8000/v1 \
   --reflection-model openai/gpt-5.1 \
   --max-metric-calls 40
+
+# Or via Mockery's cli:// transports (zero API keys, no LiteLLM required):
+uv run python -m evals.optimize_gepa \
+  --target practice_interviewer \
+  --task-base-url cli://claude \
+  --task-model haiku \
+  --reflection-model cli://claude/sonnet \
+  --max-metric-calls 32
 ```
 
 ## 4. Reviewing & Promoting Candidate Prompts
