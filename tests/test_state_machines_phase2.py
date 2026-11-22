@@ -419,10 +419,11 @@ def test_ux92_interactive_ergonomics_contract():
     ):
         assert hook in practice_js, f"Missing split-studio hook: {hook}"
 
-    # Pending debrief: the dock is hidden, one calm status line remains, restored by phase
-    assert ".practice-composer.is-debriefing .composer-dock" in css
+    # Pending debrief: the whole composer footer steps aside so the staged progress
+    # card is the single status on screen (no competing footer line), restored by phase
+    assert ".practice-composer.is-debriefing {" in css
     assert 'classList.toggle("is-debriefing", isDebriefing)' in practice_js
-    assert "Finalizing your coaching debrief…" in practice_js
+    assert "Finalizing your coaching debrief…" not in practice_js
 
     # Home ↔ active target JD alignment (role + level), hand edits always win
     assert "autoAlignHomeToJd" in profile_js

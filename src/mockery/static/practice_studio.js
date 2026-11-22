@@ -270,6 +270,8 @@ export function createPracticeStudioController({
     mountedPluginKey: null,
     workspaceSyncTimer: null,
     workspaceDirty: false,
+    savePendingSince: 0, // when the current unsaved stretch began (0 = everything is saved)
+    saveStatusTimer: null,
     workspaceSaveSeq: 0,
     workspaceAckSeq: 0,
     debriefPollTimer: null,
@@ -310,6 +312,8 @@ export function createPracticeStudioController({
     }
   }
 
+  const SAVE_STATUS_GRACE_MS = 1600;
+
   function renderWorkspaceSaveStatus() {
     const pill = el("practiceWorkspaceSaveStatus");
     if (!pill) return;
@@ -318,6 +322,34 @@ export function createPracticeStudioController({
     if (!show) return;
     const st = workspaceSaveMachine.state;
     pill.classList.remove("is-saving", "is-dirty", "is-error");
+
+    // A routine autosave lands in about a second, so it is not news: the pill only
+    // leaves "Saved" when a save has been pending for longer than a beat (a long
+    // typing run, a slow write, a failure). No flicker on every pause in typing.
+    const pending = st === "dirty" || st === "saving";
+    if (!pending) {
+      local.savePendingSince = 0;
+      if (local.saveStatusTimer) {
+        clearTimeout(local.saveStatusTimer);
+        local.saveStatusTimer = null;
+      }
+    } else {
+      if (!local.savePendingSince) local.savePendingSince = Date.now();
+      const waited = Date.now() - local.savePendingSince;
+      if (waited < SAVE_STATUS_GRACE_MS) {
+        if (!local.saveStatusTimer) {
+          local.saveStatusTimer = setTimeout(() => {
+            local.saveStatusTimer = null;
+            renderWorkspaceSaveStatus();
+          }, SAVE_STATUS_GRACE_MS - waited + 16);
+        }
+        pill.textContent = "Saved";
+        pill.disabled = true;
+        pill.title = "Changes save automatically on this Mac";
+        return;
+      }
+    }
+
     if (st === "saving") {
       pill.textContent = "Saving…";
       pill.classList.add("is-saving");
@@ -349,6 +381,11 @@ export function createPracticeStudioController({
     local.workspaceDirty = false;
     local.workspaceSaveSeq = 0;
     local.workspaceAckSeq = 0;
+    local.savePendingSince = 0;
+    if (local.saveStatusTimer) {
+      clearTimeout(local.saveStatusTimer);
+      local.saveStatusTimer = null;
+    }
     workspaceSaveMachine.reset("saved", { event: "session_reset" });
     renderWorkspaceSaveStatus();
   }
@@ -1076,6 +1113,7 @@ export function createPracticeStudioController({
       status.textContent = note;
       delete status.dataset.lockNote;
     }
+    if (isRetry) syncRetrySubmit();
   }
 
   /* The answer dock steps back whenever something else has the floor: an in-flight
@@ -1097,8 +1135,9 @@ export function createPracticeStudioController({
     const composer = el("practiceComposerWrap");
     if (composer) {
       composer.classList.toggle("is-locked", locked);
-      // While the debrief is written the dock disappears entirely; one calm status line
-      // stays. Phase-driven, so an error or a new session restores the dock by itself.
+      // While the debrief is written the whole composer steps aside: the staged progress
+      // card in the feed is the single status. Phase-driven, so an error or a new session
+      // restores the dock by itself.
       composer.classList.toggle("is-debriefing", isDebriefing);
     }
     const input = el("practiceAnswerInput");
@@ -1112,9 +1151,7 @@ export function createPracticeStudioController({
     const status = el("practiceMicStatus");
     if (status) {
       if (locked) {
-        status.textContent = isDebriefing
-          ? "Finalizing your coaching debrief…"
-          : "Every question answered — your debrief is ready when you are";
+        status.textContent = "Every question answered — your debrief is ready when you are";
         status.dataset.lockNote = "1";
       } else if (status.dataset.lockNote) {
         status.textContent = "Transcribed privately on this Mac";
@@ -1807,6 +1844,7 @@ export function createPracticeStudioController({
     if (ans) ans.value = "";
     const ret = el("practiceRetryInput");
     if (ret) ret.value = "";
+    syncRetrySubmit();
   }
 
   async function exitPracticeToHome({ force = false } = {}) {
@@ -1914,11 +1952,15 @@ export function createPracticeStudioController({
     }
   }
 
-  function setCoachRailThinking(active, toneText = "Analyzing", messageText = "") {
+  function setCoachRailThinking(active, toneText = "Analyzing", messageText = "", { quiet = false } = {}) {
     const toneEl = el("practiceCoachTone");
     const msgEl = el("practiceCoachMessage");
     const card = toneEl?.closest(".practice-coach-card") || msgEl?.closest(".practice-coach-card");
-    if (card) card.classList.toggle("is-thinking", Boolean(active));
+    if (card) {
+      card.classList.toggle("is-thinking", Boolean(active));
+      // Quiet: something else on screen already carries the progress (the debrief card).
+      card.classList.toggle("is-quiet", Boolean(active && quiet));
+    }
     // While a new evaluation is in flight, the score on screen is the previous reading.
     const meterCard = el("practiceMeterCard");
     if (meterCard) {
@@ -2058,7 +2100,8 @@ export function createPracticeStudioController({
     setCoachRailThinking(
       true,
       "Debriefing",
-      "Pulling together your strengths, a question-by-question breakdown, and one retry drill…"
+      "Pulling together your strengths, a question-by-question breakdown, and one retry drill…",
+      { quiet: true }
     );
 
     const elapsedEl = card.querySelector(".thinking-elapsed");
@@ -2095,9 +2138,18 @@ export function createPracticeStudioController({
     }
     const debriefBtn = el("practiceDebriefBtn");
     if (debriefBtn) debriefBtn.disabled = busy || isDebriefing;
-    const retryBtn = el("practiceRetrySubmitBtn");
-    if (retryBtn) retryBtn.disabled = busy;
+    syncRetrySubmit();
     syncComposerLock();
+  }
+
+  /* Evaluate retry is only live when there is something to evaluate: typed or
+     transcribed words, or a retry recording it can stop and submit. */
+  function syncRetrySubmit() {
+    const btn = el("practiceRetrySubmitBtn");
+    if (!btn) return;
+    const hasText = Boolean((el("practiceRetryInput")?.value || "").trim());
+    const recordingRetry = micMachine.state === "recording" && local.recordingTarget === "retry";
+    btn.disabled = Boolean(local.busy) || !(hasText || recordingRetry);
   }
 
   async function startNewPractice() {
@@ -2444,7 +2496,7 @@ export function createPracticeStudioController({
     if (!opMachine.transition("debriefing", { event: "run_debrief" })) return;
     setBusy(true);
     stopSpeaking();
-    setButtonLoading("practiceDebriefBtn", true, "Writing debrief…");
+    // End & Debrief simply goes quiet (disabled by setBusy): the progress card is the status.
     local.debriefStartedAt = Date.now();
     setConversationCollapsed(false);
     showPendingDebriefCard(el("practiceFeed"), local.debriefStartedAt);
@@ -2916,10 +2968,23 @@ export function createPracticeStudioController({
       if (el("practiceRetryPrompt")) {
         el("practiceRetryPrompt").textContent = drill.prompt;
       }
-      // Once a retry is scored, the composer above it becomes an optional next rep.
-      retryCard.classList.toggle("has-retries", retries.length > 0);
-      el("practiceRetryAgainHint")?.classList.toggle("hidden", retries.length === 0);
+      // Result first: once a retry is scored it sits directly under the prompt, and the
+      // composer — with its timer — becomes the quieter "another rep" block beneath it.
+      // Before any retry, the composer leads and the timer rides in the header.
+      const hasRetries = retries.length > 0;
+      retryCard.classList.toggle("has-retries", hasRetries);
+      el("practiceRetryAgainHint")?.classList.toggle("hidden", !hasRetries);
       const histEl = el("practiceRetryHistory");
+      const repEl = el("practiceRetryRep");
+      const timerEl = el("practiceRetryTimerWrap");
+      if (histEl && repEl) {
+        // Only move a node that is out of place, so focus and a running timer are never disturbed.
+        if (hasRetries && histEl.nextElementSibling !== repEl) retryCard.insertBefore(histEl, repEl);
+        else if (!hasRetries && repEl.nextElementSibling !== histEl) retryCard.insertBefore(histEl, repEl.nextSibling);
+      }
+      const timerHome = el(hasRetries ? "practiceRetryRepHead" : "practiceRetryHead");
+      if (timerEl && timerHome && timerEl.parentElement !== timerHome) timerHome.appendChild(timerEl);
+      syncRetrySubmit();
       if (histEl) {
         let before = originalQuestionSignals(sess, drillIdx);
         histEl.innerHTML = retries
@@ -3053,7 +3118,7 @@ export function createPracticeStudioController({
       el("practiceProgressBadge").textContent = isCompleted
         ? "Debrief"
         : isDebriefing
-        ? "Writing debrief…"
+        ? "Debrief"
         : isAwaitingDebrief
         ? "Ready for debrief"
         : `Q${curIdx + 1} of ${totalQ}`;
@@ -3073,8 +3138,9 @@ export function createPracticeStudioController({
       // Quiet outline while the interview is live; it only becomes the primary action once every question is done.
       debriefBtn.classList.toggle("is-ready", isAwaitingDebrief);
       if (isDebriefing) {
+        // Muted and inert, with its own label: no second spinner beside the progress card.
         debriefBtn.disabled = true;
-        setButtonLoading("practiceDebriefBtn", true, "Writing debrief…");
+        setButtonLoading("practiceDebriefBtn", false, null, "End & Debrief");
       } else if (opMachine.state === "idle") {
         debriefBtn.disabled = false;
         setButtonLoading("practiceDebriefBtn", false, null, "End & Debrief");
@@ -3084,9 +3150,7 @@ export function createPracticeStudioController({
     const answerInput = el("practiceAnswerInput");
     const sendBtn = el("practiceSendBtn");
     if (answerInput) {
-      answerInput.placeholder = isDebriefing
-        ? "Writing your coaching debrief — one moment…"
-        : isAwaitingDebrief
+      answerInput.placeholder = isAwaitingDebrief
         ? "All questions complete — click End & Debrief above when you are ready."
         : "Speak, or type your answer here…";
     }
@@ -3312,6 +3376,13 @@ export function createPracticeStudioController({
 
     el("practiceRetryTimerBtn")?.addEventListener("click", () => toggleRetryTimer());
     el("practiceRetrySubmitBtn")?.addEventListener("click", () => submitRetry());
+    el("practiceRetryInput")?.addEventListener("input", () => syncRetrySubmit());
+    el("practiceRetryInput")?.addEventListener("keydown", (ev) => {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter" && !el("practiceRetrySubmitBtn")?.disabled) {
+        ev.preventDefault();
+        submitRetry();
+      }
+    });
 
     el("practiceExportMdBtn")?.addEventListener("click", () => {
       if (!local.session) return;
