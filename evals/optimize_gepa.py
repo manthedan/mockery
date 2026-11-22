@@ -51,6 +51,9 @@ from mockery.prompts import get_prompt_spec  # noqa: E402
 DEFAULT_DATASETS: dict[str, Path] = {
     "triage_window": REPO_ROOT / "evals" / "datasets" / "triage_window.jsonl",
     "practice_interviewer": REPO_ROOT / "evals" / "datasets" / "practice_interviewer.jsonl",
+    "suggest_probes": REPO_ROOT / "evals" / "datasets" / "suggest_probes.jsonl",
+    "practice_retry_eval": REPO_ROOT / "evals" / "datasets" / "practice_retry_eval.jsonl",
+    "practice_hint": REPO_ROOT / "evals" / "datasets" / "practice_hint.jsonl",
 }
 
 TARGET_OBJECTIVES: dict[str, str] = {
@@ -68,12 +71,34 @@ TARGET_OBJECTIVES: dict[str, str] = {
         "strictly monotonic `carl_signals`, supportive encouraging coaching tone, and zero code/algorithm spoilers. "
         "MUST keep `{interview_type_label}`, `{role_title}`, `{target_level}`, and `{tone_instruction}` verbatim."
     ),
+    "suggest_probes": (
+        "Optimize the system prompt for Live Copilot real-time follow-up probes ('Dive Deeper'). "
+        "Maximize strict raw-JSON output, 1 crisp `quick_read` sentence, exactly 3 distinct grounded probes "
+        "(1-4 word `angle`, natural spoken `question` under 24 words ending in `?`, concise 3-16 word `why`), "
+        "zero repetition of already-asked or prior-suggested questions, and zero pronoun-policing or forced arithmetic pedantry. "
+        "MUST keep the `{probe_guidance}` placeholder verbatim."
+    ),
+    "practice_retry_eval": (
+        "Optimize the system prompt for evaluating a candidate's 45-second Retry Weak Part drill. "
+        "Maximize strict raw-JSON output, honest evidence-based `carl_after` grading with zero sycophantic "
+        "inflation when a dimension is still missing or vague, concrete before-vs-after diff grounding in "
+        "`what_improved` and `one_more_polish`, concise 1-2 sentence fields, and warm encouraging tone."
+    ),
+    "practice_hint": (
+        "Optimize the system prompt for a warm, non-spoiler 1-2 sentence whisper hint during live practice. "
+        "Maximize plain conversational text only (zero JSON, markdown headers, bullets, or code fences), "
+        "strictly 1-2 crisp sentences (12-55 words), strong grounding in the candidate's current attempt/workspace, "
+        "warm confidence-building tone, and ZERO leaks of the target algorithm, data structure, library, or code fix."
+    ),
 }
 
 # Match exact runtime parameters in src/mockery/llm.py
 TARGET_TEMPERATURES: dict[str, float] = {
     "triage_window": 0.0,
     "practice_interviewer": 0.4,
+    "suggest_probes": 0.35,
+    "practice_retry_eval": 0.35,
+    "practice_hint": 0.4,
 }
 
 SECRET_TOKEN_RE = re.compile(
@@ -89,6 +114,12 @@ def compute_max_tokens(target: str, example: dict[str, Any]) -> int:
         return max(450, 220 * max(1, n_utts))
     if target == "practice_interviewer":
         return 480
+    if target == "suggest_probes":
+        return 420
+    if target == "practice_retry_eval":
+        return 380
+    if target == "practice_hint":
+        return 160
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 
@@ -265,6 +296,8 @@ def make_cli_task_runner(
     effective_model = (model or "").strip() or url_model
     llm, resolved_model = _build_cli_llm(cli_bin, effective_model)
 
+    expect_json = get_prompt_spec(TARGET_TO_PROMPT_NAME[target]).output_format == "json"
+
     def _run(system_prompt: str, user_prompt: str, example: dict[str, Any]) -> str:
         return asyncio.run(
             llm._complete_text(
@@ -274,7 +307,7 @@ def make_cli_task_runner(
                 temperature=temperature,
                 max_tokens=compute_max_tokens(target, example),
                 timeout=timeout,
-                expect_json=True,
+                expect_json=expect_json,
             )
         )
 
