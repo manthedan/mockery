@@ -12,7 +12,6 @@ from mockery.llm import _fast_extra_body
 from mockery.models import InterviewSession, SessionConfig, Utterance
 from mockery.server import create_app
 from mockery.sources import (
-    CHANNEL_CANDIDATE,
     CHANNEL_INTERVIEWER,
     CrossChannelBleedFilter,
     SessionAudioRouter,
@@ -573,7 +572,7 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
             }
         )
         s_q1 = ws.receive_json()
-        qa_id = s_q1["session"]["qa_groups_resolved"][0]["id"]
+        assert s_q1["session"]["qa_groups_resolved"][0]["id"]
         assert s_q1["session"]["qa_groups_resolved"][0]["badge"] == "Q1"
 
         # Switching interview_type dynamically updates existing card_kind (`Q1` -> `P1`)
@@ -692,7 +691,6 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
 
 
 def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
-    import json
     import stat
 
     from mockery.grouper import make_concise_title

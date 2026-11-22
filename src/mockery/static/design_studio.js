@@ -1,4 +1,4 @@
-/* System Design Whiteboard Studio (Milestone 3)
+/* System Design Whiteboard Studio
  * 100% offline SVG architecture canvas registered as a Practice Studio plugin.
  * Ink & Paper aesthetic in Light & Dark modes, zero CDN dependencies.
  */

@@ -102,7 +102,7 @@ class QuestionBankStore:
                         if not isinstance(q, dict) or not q.get("id"):
                             continue
                         qid = str(q["id"])
-                        levels_upper = frozenset(str(l).upper() for l in (q.get("levels") or []))
+                        levels_upper = frozenset(str(lvl).upper() for lvl in (q.get("levels") or []))
                         comp_lower = str(q.get("competency") or "").lower()
                         jd_tags_lower = tuple(str(tag).lower() for tag in (q.get("jd_tags") or []))
                         text_blob = f"{q.get('title', '')} {q.get('competency', '')} {q.get('prompt', '')}".lower()

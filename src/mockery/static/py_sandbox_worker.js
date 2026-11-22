@@ -1,4 +1,4 @@
-/* Sandboxed Offline Python Execution Worker (Pyodide WASM — Milestone 4)
+/* Sandboxed Offline Python Execution Worker (Pyodide WASM)
  * Served with strict Worker CSP restricting `script-src` and `connect-src` exclusively to
  * `/api/addons/pyodide/` (zero external CDN or localhost API access). Spawned fresh per
  * submission and terminated by the host on every completion/timeout so interpreter state,

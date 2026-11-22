@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from mockery.llm import _extract_json_object
 from mockery.practice import estimate_carl_heuristic
-from mockery.profiles import CandidateProfileStore, ResumeRedactionPrefs, _mask_pii_preview
+from mockery.profiles import _mask_pii_preview
 from mockery.prompts import render_prompt_template
 from mockery.redactor import RampartRedactor, _resolve_public_http_url, extract_document_text
 from mockery.server import create_app

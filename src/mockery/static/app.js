@@ -1079,17 +1079,16 @@ function renderWorkspaceMode() {
     practiceStudio?.refreshPracticeHistory();
   }
   state.homeVisible = showLaunchpad;
+  syncTopbarTelemetryVisibility();
+}
 
-  // Show live audio meters only while streaming; hide topbar talk-ratio pill on Calibration tab to avoid duplicating the Talk Time card
+function syncTopbarTelemetryVisibility() {
   const m = state.session?.metrics;
   const hasSpeech = Boolean(m && (m.interviewer_words > 0 || m.candidate_words > 0));
   const isStreaming = state.captureState === "streaming";
-  const showRatioInTopbar = isStreaming || (hasSpeech && state.rightTab !== "calibration");
   el("liveMetersGroup")?.classList.toggle("hidden", !isStreaming);
-  el("liveTelemetryCluster")?.classList.toggle("hidden", !showRatioInTopbar);
+  el("liveTelemetryCluster")?.classList.toggle("hidden", !(isStreaming || hasSpeech));
 }
-
-/* ---------------- State-Driven UI Rendering ---------------- */
 
 function renderConnectionIndicator() {
   const dot = el("brandDot");
@@ -1342,18 +1341,17 @@ function renderMetricsBar() {
   const m = state.session?.metrics;
   const youEl = el("ratioYouText");
   const candEl = el("ratioCandText");
-  const isStreaming = state.captureState === "streaming";
   if (!m || (m.interviewer_words === 0 && m.candidate_words === 0)) {
     if (youEl) youEl.textContent = "You —";
     if (candEl) candEl.textContent = "Candidate —";
-    el("liveTelemetryCluster")?.classList.toggle("hidden", !isStreaming);
+    syncTopbarTelemetryVisibility();
     return;
   }
   const youPct = Math.round(m.interviewer_time_pct);
   const candPct = Math.round(m.candidate_time_pct);
   if (youEl) youEl.textContent = `You ${youPct}%`;
   if (candEl) candEl.textContent = `Candidate ${candPct}%`;
-  el("liveTelemetryCluster")?.classList.toggle("hidden", false);
+  syncTopbarTelemetryVisibility();
 }
 
 function renderCardProbePill(probeState) {
@@ -1985,7 +1983,7 @@ function renderProbesPanel() {
   const setDiveBtn = (text, { disabled = false, hidden = false } = {}) => {
     diveBtn.disabled = disabled;
     diveBtn.classList.toggle("hidden", hidden);
-    diveBtn.innerHTML = `<span id="diveDeeperLabel">${text}</span> <kbd>D</kbd>`;
+    diveBtn.innerHTML = `<span id="diveDeeperLabel">${escapeHtml(text)}</span> <kbd>D</kbd>`;
   };
   const setState = (text, ready = false) => {
     stateEl.textContent = text;
@@ -2371,7 +2369,7 @@ function formatInlineMarkdown(raw) {
     );
   });
 
-  // 3. Remove awkward outer parentheses wrapping a quote + citation chip: `("..." [12:08 ↗])` -> `— "..." [12:08 ↗]`
+  // Unwrap redundant outer parentheses around stashed citation chips
   s = s.replace(/\(\s*(\u0000TOK\d+\u0000(?:\s*\u0000TOK\d+\u0000)*)\s*\)/g, "$1");
 
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -3624,12 +3622,16 @@ async function skipOnboardingTranscriptOnly() {
       const saved = await res.json();
       state.llm = saved.llm;
       syncHomeAiPrompt(saved.llm);
+      setModalState("none");
+      showToast("Transcript-only mode enabled. You can connect an AI anytime in Settings.", 3200);
+      return;
     }
-  } catch {
-    /* ignore */
+    console.warn("[onboarding] Failed to persist transcript-only mode:", res.status);
+  } catch (err) {
+    console.warn("[onboarding] Failed to persist transcript-only mode:", err);
   }
   setModalState("none");
-  showToast("Transcript-only mode enabled. You can connect an AI anytime in Settings.", 3200);
+  showToast("Couldn't save transcript-only preference — you can update it anytime in Settings.", 3600);
 }
 
 async function checkInitialOnboarding() {
@@ -3981,6 +3983,7 @@ function initEvents() {
         opt.classList.toggle("active", opt === btn);
         opt.setAttribute("aria-pressed", opt === btn ? "true" : "false");
       }
+      practiceStudio.refreshQuestionPicker?.();
       return;
     }
     el("typeSelect").value = btn.getAttribute("data-setup-type");

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -673,9 +672,21 @@ def test_phase1_codex_regressions_cancellation_http409_and_invariants(tmp_path: 
 
         # Run debrief coroutine directly on a fresh event loop and cancel it mid-save
         async def _verify_debrief_save_lock() -> None:
+            def _iter_routes(routes: Any):
+                for r in routes:
+                    orig = getattr(r, "original_router", None)
+                    if orig is not None:
+                        yield from _iter_routes(orig.routes)
+                    else:
+                        sub = getattr(r, "routes", None)
+                        if sub is not None and not hasattr(r, "endpoint"):
+                            yield from _iter_routes(sub)
+                        else:
+                            yield r
+
             endpoint = next(
                 r.endpoint
-                for r in app.routes
+                for r in _iter_routes(app.routes)
                 if getattr(r, "path", None) == "/api/practice/{session_id}/debrief"
             )
             deb_task = asyncio.create_task(endpoint(sid))

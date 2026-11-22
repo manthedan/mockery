@@ -11,7 +11,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from dotenv import dotenv_values
@@ -232,7 +232,7 @@ def build_compact_session_index(
     exclude_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Compact summary index of active interview state (inspired by scratch/triage-lab's `buildCompactIndex`).
+    Compact summary index of active interview state.
     Keeps incremental live LLM calls small and fast even 45 minutes into an interview.
     """
     skip = exclude_ids or set()
@@ -1063,25 +1063,37 @@ class InterviewCopilotLLM:
                 for s in item.get("segments") or []:
                     if not isinstance(s, dict):
                         continue
-                    spk = str(s.get("speaker", "")).strip().lower()
+                    spk_raw = str(s.get("speaker", "")).strip().lower()
                     txt = str(s.get("text", "")).strip()
-                    if spk in ("interviewer", "candidate") and txt:
-                        segs.append(TurnSegment(speaker=spk, text=txt))  # type: ignore[arg-type]
+                    if spk_raw == "interviewer" and txt:
+                        segs.append(TurnSegment(speaker="interviewer", text=txt))
+                    elif spk_raw == "candidate" and txt:
+                        segs.append(TurnSegment(speaker="candidate", text=txt))
                 if not segs:
                     segs = [TurnSegment(speaker=orig.speaker, text=orig.text)]
-                action = str(item.get("card_action", "keep_in_current")).strip()
-                if action not in ("keep_in_current", "open_new_card", "ignore_backchannel"):
-                    action = "keep_in_current"
-                conf = str(item.get("confidence", "high")).strip().lower()
-                if conf not in ("high", "medium", "low"):
-                    conf = "medium"
+                action_raw = str(item.get("card_action", "keep_in_current")).strip()
+                card_action: Literal["keep_in_current", "open_new_card", "ignore_backchannel"]
+                if action_raw == "open_new_card":
+                    card_action = "open_new_card"
+                elif action_raw == "ignore_backchannel":
+                    card_action = "ignore_backchannel"
+                else:
+                    card_action = "keep_in_current"
+                conf_raw = str(item.get("confidence", "high")).strip().lower()
+                confidence: Literal["high", "medium", "low"]
+                if conf_raw == "high":
+                    confidence = "high"
+                elif conf_raw == "low":
+                    confidence = "low"
+                else:
+                    confidence = "medium"
                 out.append(
                     TurnTriagePlan(
                         utterance_id=uid,
                         segments=segs,
-                        card_action=action,  # type: ignore[arg-type]
+                        card_action=card_action,
                         suggested_title=str(item.get("suggested_title", "")).strip(),
-                        confidence=conf,  # type: ignore[arg-type]
+                        confidence=confidence,
                         rationale=str(item.get("rationale", "")).strip(),
                     )
                 )
@@ -1394,7 +1406,7 @@ class InterviewCopilotLLM:
             )
         return "\n".join(lines)
 
-    # ---------------- Milestone 2+: AI Practice Interviewer & Supportive CARL Coach ----------------
+    # AI Practice Interviewer & Supportive CARL Coach
 
     async def generate_practice_plan(
         self,
@@ -1830,7 +1842,7 @@ class InterviewCopilotLLM:
                     "strength": "You engaged thoughtfully with the prompt and kept the story clear and grounded.",
                     "coaching_tip": f"Next pass, spend 15 extra seconds sharpening your {focus_dim.title()} so a hiring panel immediately hears your {target_level} impact.",
                     "carl_reframe": (
-                        f"Try closing with: 'As a result, [measurable outcome], and what I carried forward to future projects was [1-sentence learning].'"
+                        "Try closing with: 'As a result, [measurable outcome], and what I carried forward to future projects was [1-sentence learning].'"
                     ),
                 }
             )

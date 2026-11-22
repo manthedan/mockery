@@ -5,7 +5,6 @@ import io
 import json
 import os
 import re
-import time
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +22,7 @@ from mockery.practice import (
     PracticeSessionStore,
     PracticeTurn,
 )
-from mockery.redactor import DetectedSpan, RAMPART_FILES, RAMPART_REPO_ID, RampartRedactor
+from mockery.redactor import RAMPART_FILES, RAMPART_REPO_ID, RampartRedactor
 from mockery.server import _decode_audio_to_float32_16k, _lowpass_antialias, create_app
 from mockery.tts import LocalTTSEngine, _split_speech_sentences
 
