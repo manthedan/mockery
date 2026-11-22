@@ -1,0 +1,169 @@
+{
+  "pack_id": "coding_practical_core",
+  "title": "Practical & Algorithmic Coding",
+  "category": "coding",
+  "version": "1.0",
+  "description": "Realistic coding interview prompts (full-stack, concurrency, data structures, parsers) with starter code and runnable test suites.",
+  "questions": [
+    {
+      "id": "code_ttl_lru_01",
+      "competency": "Data Structures & Systems",
+      "levels": ["L4", "L5"],
+      "title": "LRU Cache with Per-Key TTL",
+      "prompt": "Implement an in-memory cache `TTLLRUCache(capacity)` supporting `get(key, now_ms)` and `put(key, value, ttl_ms, now_ms)` in O(1) average time. Expired entries must not be returned by `get` and should be evicted before live entries when at capacity.",
+      "starter_code": {
+        "python": "class TTLLRUCache:\n    def __init__(self, capacity: int):\n        self.capacity = capacity\n\n    def get(self, key: str, now_ms: int):\n        # Return value if present and not expired, else None\n        pass\n\n    def put(self, key: str, value, ttl_ms: int, now_ms: int) -> None:\n        pass\n",
+        "javascript": "class TTLLRUCache {\n  constructor(capacity) {\n    this.capacity = capacity;\n  }\n  get(key, nowMs) {\n    // Return value if present and not expired, else null\n    return null;\n  }\n  put(key, value, ttlMs, nowMs) {\n  }\n}\n"
+      },
+      "tests": {
+        "python": "c = TTLLRUCache(2)\nc.put('a', 1, 100, 0)\nc.put('b', 2, 500, 10)\nassert c.get('a', 50) == 1\nassert c.get('a', 100) is None  # expired at 100\nc.put('c', 3, 500, 120)         # 'a' is expired, 'b' must stay\nassert c.get('b', 130) == 2\nassert c.get('c', 130) == 3\nc.put('d', 4, 500, 140)         # evicts LRU ('c' since 'b' was touched? actually 'c' touched at 130 after 'b')\nassert c.get('d', 150) == 4\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (cond, msg) => { if (!cond) throw new Error(msg || 'Assertion failed'); };\nconst c = new TTLLRUCache(2);\nc.put('a', 1, 100, 0);\nc.put('b', 2, 500, 10);\nassert(c.get('a', 50) === 1, 'a should be alive at 50');\nassert(c.get('a', 100) === null, 'a should expire at 100');\nc.put('c', 3, 500, 120);\nassert(c.get('b', 130) === 2, 'b should survive');\nassert(c.get('c', 130) === 3, 'c should exist');\nc.put('d', 4, 500, 140);\nassert(c.get('d', 150) === 4, 'd should exist');\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "Think about separating recency tracking (OrderedDict / Map) from lazy vs. proactive expiration.",
+        "Edge cases: capacity=0, updating an existing key with a new TTL, ttl_ms <= 0."
+      ],
+      "jd_tags": ["full-stack", "backend", "python", "typescript", "caching"]
+    },
+    {
+      "id": "code_rate_01",
+      "competency": "Practical Systems",
+      "levels": ["L4", "L5"],
+      "title": "Sliding-Window Rate Limiter",
+      "prompt": "Implement `RateLimiter(limit, window_ms)` with `allow(user_id, now_ms) -> bool` that permits at most `limit` requests per user in any rolling `window_ms` interval `(now_ms - window_ms, now_ms]`. Follow-up: how would you bound memory across millions of idle users?",
+      "starter_code": {
+        "python": "class RateLimiter:\n    def __init__(self, limit: int, window_ms: int):\n        self.limit = limit\n        self.window_ms = window_ms\n\n    def allow(self, user_id: str, now_ms: int) -> bool:\n        pass\n",
+        "javascript": "class RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n  }\n  allow(userId, nowMs) {\n    return false;\n  }\n}\n"
+      },
+      "tests": {
+        "python": "rl = RateLimiter(2, 1000)\nassert rl.allow('u1', 100) is True\nassert rl.allow('u1', 500) is True\nassert rl.allow('u1', 900) is False\nassert rl.allow('u2', 900) is True\nassert rl.allow('u1', 1100) is True   # 100 fell out of (100, 1100]\nassert rl.allow('u1', 1200) is False\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (c, m) => { if (!c) throw new Error(m || 'Assertion failed'); };\nconst rl = new RateLimiter(2, 1000);\nassert(rl.allow('u1', 100) === true);\nassert(rl.allow('u1', 500) === true);\nassert(rl.allow('u1', 900) === false);\nassert(rl.allow('u2', 900) === true);\nassert(rl.allow('u1', 1100) === true);\nassert(rl.allow('u1', 1200) === false);\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "Use a per-user deque and evict timestamps <= now_ms - window_ms.",
+        "Only append a timestamp when the request is allowed — rejected requests shouldn't consume quota!"
+      ],
+      "jd_tags": ["backend", "api", "full-stack", "python", "typescript"]
+    },
+    {
+      "id": "code_sse_01",
+      "competency": "Full-Stack & Streaming",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Incremental SSE Stream Parser",
+      "prompt": "Write an incremental Server-Sent Events parser `SSEParser` with `feed(chunk: str) -> list[dict]` that handles arbitrary chunk boundaries (including splits mid-line or mid-CRLF), `event:` and multi-line `data:` fields, comments starting with `:`, and blank-line event dispatch.",
+      "starter_code": {
+        "python": "class SSEParser:\n    def __init__(self):\n        pass\n\n    def feed(self, chunk: str) -> list[dict]:\n        # Return list of {'event': str, 'data': str} dispatched by this chunk\n        return []\n",
+        "javascript": "class SSEParser {\n  constructor() {\n  }\n  feed(chunk) {\n    // Return array of { event, data } objects dispatched by this chunk\n    return [];\n  }\n}\n"
+      },
+      "tests": {
+        "python": "p = SSEParser()\nassert p.feed('event: delta\\nda') == []\nassert p.feed('ta: hello\\ndata: world\\n\\n') == [{'event': 'delta', 'data': 'hello\\nworld'}]\nassert p.feed(': keepalive\\ndata: solo\\r\\n\\r\\n') == [{'event': 'message', 'data': 'solo'}]\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (c, m) => { if (!c) throw new Error(m || 'Assertion failed'); };\nconst p = new SSEParser();\nassert(p.feed('event: delta\\nda').length === 0);\nconst e1 = p.feed('ta: hello\\ndata: world\\n\\n');\nassert(e1.length === 1 && e1[0].event === 'delta' && e1[0].data === 'hello\\nworld');\nconst e2 = p.feed(': keepalive\\ndata: solo\\r\\n\\r\\n');\nassert(e2.length === 1 && e2[0].event === 'message' && e2[0].data === 'solo');\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "Keep a trailing line buffer for incomplete lines without a newline.",
+        "Watch out for CRLF split across two chunks ('\\r' at end of chunk 1, '\\n' at start of chunk 2) and optional single leading space after ':'."
+      ],
+      "jd_tags": ["full-stack", "frontend", "ai", "streaming", "typescript", "python"]
+    },
+    {
+      "id": "code_dag_01",
+      "competency": "Graphs & Build/Workflow Systems",
+      "levels": ["L4", "L5"],
+      "title": "Parallel Task Scheduler (Topological Layers)",
+      "prompt": "Given tasks `tasks: list[str]` and prerequisite pairs `deps: list[tuple[str, str]]` where `(a, b)` means `a` must finish before `b`, return `schedule_layers(tasks, deps)` — a list of parallel execution waves (each wave sorted alphabetically). Raise `ValueError` (or throw Error in JS) if a cycle exists.",
+      "starter_code": {
+        "python": "def schedule_layers(tasks: list[str], deps: list[tuple[str, str]]) -> list[list[str]]:\n    pass\n",
+        "javascript": "function scheduleLayers(tasks, deps) {\n  return [];\n}\n"
+      },
+      "tests": {
+        "python": "assert schedule_layers(['a', 'b', 'c', 'd'], [('a', 'b'), ('a', 'c'), ('b', 'd'), ('c', 'd')]) == [['a'], ['b', 'c'], ['d']]\ntry:\n    schedule_layers(['x', 'y'], [('x', 'y'), ('y', 'x')])\n    raise AssertionError('Expected cycle error')\nexcept ValueError:\n    pass\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (c, m) => { if (!c) throw new Error(m || 'Assertion failed'); };\nconst res = scheduleLayers(['a', 'b', 'c', 'd'], [['a', 'b'], ['a', 'c'], ['b', 'd'], ['c', 'd']]);\nassert(JSON.stringify(res) === JSON.stringify([['a'], ['b', 'c'], ['d']]));\nlet threw = false;\ntry { scheduleLayers(['x', 'y'], [['x', 'y'], ['y', 'x']]); } catch { threw = true; }\nassert(threw, 'Expected cycle error');\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "Kahn's BFS by level gives exact parallel waves naturally.",
+        "Watch out for duplicate edges in `deps` — deduplicate before counting in-degrees!"
+      ],
+      "jd_tags": ["backend", "full-stack", "algorithms", "workflow"]
+    },
+    {
+      "id": "code_undo_01",
+      "competency": "Frontend & Editor Internals",
+      "levels": ["L4", "L5"],
+      "title": "Transactional Text Buffer with Undo / Redo",
+      "prompt": "Implement `TextEditor` supporting `insert(pos, text)`, `delete(pos, length)`, `undo()`, `redo()`, and `get_text() -> str`. Calling `insert` or `delete` after an `undo()` must clear the redo stack. Out-of-bounds positions should be clamped safely.",
+      "starter_code": {
+        "python": "class TextEditor:\n    def __init__(self):\n        pass\n\n    def insert(self, pos: int, text: str) -> None:\n        pass\n\n    def delete(self, pos: int, length: int) -> str:\n        pass\n\n    def undo(self) -> bool:\n        pass\n\n    def redo(self) -> bool:\n        pass\n\n    def get_text(self) -> str:\n        return ''\n",
+        "javascript": "class TextEditor {\n  constructor() {}\n  insert(pos, text) {}\n  delete(pos, length) { return ''; }\n  undo() { return false; }\n  redo() { return false; }\n  getText() { return ''; }\n}\n"
+      },
+      "tests": {
+        "python": "ed = TextEditor()\ned.insert(0, 'hello world')\nassert ed.delete(5, 6) == ' world'\nassert ed.get_text() == 'hello'\nassert ed.undo() is True\nassert ed.get_text() == 'hello world'\nassert ed.redo() is True\nassert ed.get_text() == 'hello'\ned.undo()\ned.insert(5, '!')\nassert ed.get_text() == 'hello! world'\nassert ed.redo() is False\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (c, m) => { if (!c) throw new Error(m || 'Assertion failed'); };\nconst ed = new TextEditor();\ned.insert(0, 'hello world');\nassert(ed.delete(5, 6) === ' world');\nassert(ed.getText() === 'hello');\nassert(ed.undo() === true && ed.getText() === 'hello world');\nassert(ed.redo() === true && ed.getText() === 'hello');\ned.undo(); ed.insert(5, '!');\nassert(ed.getText() === 'hello! world' && ed.redo() === false);\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "Store minimal inverse command records rather than full document snapshots so memory scales with edit size.",
+        "Follow-up discussion: how would you coalesce rapid keystrokes or support collaborative undo?"
+      ],
+      "jd_tags": ["frontend", "full-stack", "react", "typescript", "editor"]
+    },
+    {
+      "id": "code_merge_int_01",
+      "competency": "Algorithms & Intervals",
+      "levels": ["L4", "L5"],
+      "title": "Calendar Availability & Meeting Slot Finder",
+      "prompt": "Given busy intervals for multiple attendees `schedules: list[list[tuple[int, int]]]`, a working window `(day_start, day_end)`, and `duration`, return all merged free intervals of length >= `duration` where everyone is available.",
+      "starter_code": {
+        "python": "def find_free_slots(schedules: list[list[tuple[int, int]]], day_start: int, day_end: int, duration: int) -> list[tuple[int, int]]:\n    pass\n",
+        "javascript": "function findFreeSlots(schedules, dayStart, dayEnd, duration) {\n  return [];\n}\n"
+      },
+      "tests": {
+        "python": "s = [[(9, 10), (12, 13)], [(10, 11), (15, 16)]]\nassert find_free_slots(s, 8, 17, 1) == [(8, 9), (11, 12), (13, 15), (16, 17)]\nassert find_free_slots(s, 8, 17, 2) == [(13, 15)]\nassert find_free_slots([], 9, 17, 1) == [(9, 17)]\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (c, m) => { if (!c) throw new Error(m || 'Assertion failed'); };\nconst s = [[[9, 10], [12, 13]], [[10, 11], [15, 16]]];\nassert(JSON.stringify(findFreeSlots(s, 8, 17, 1)) === JSON.stringify([[8, 9], [11, 12], [13, 15], [16, 17]]));\nassert(JSON.stringify(findFreeSlots(s, 8, 17, 2)) === JSON.stringify([[13, 15]]));\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "Clamp all busy intervals to [day_start, day_end], sort, merge overlaps, then emit gaps >= duration.",
+        "Edge cases: busy intervals outside the working window, empty schedules, touching intervals (10,11) & (11,12)."
+      ],
+      "jd_tags": ["algorithms", "full-stack", "python", "typescript"]
+    },
+    {
+      "id": "code_async_pool_01",
+      "competency": "Concurrency & Async",
+      "levels": ["L5", "L6"],
+      "title": "Bounded-Concurrency Async Batch Runner",
+      "prompt": "Implement `run_with_limit(items, worker, limit)` (or `runWithLimit` in JS) that runs an async `worker(item)` over `items` with at most `limit` concurrent executions, preserves input order in the returned results list, and fails fast if any worker throws.",
+      "starter_code": {
+        "python": "import asyncio\n\nasync def run_with_limit(items, worker, limit: int):\n    pass\n",
+        "javascript": "async function runWithLimit(items, worker, limit) {\n  return [];\n}\n"
+      },
+      "tests": {
+        "python": "import asyncio\nactive = 0\npeak = 0\nasync def w(x):\n    global active, peak\n    active += 1\n    peak = max(peak, active)\n    await asyncio.sleep(0.01)\n    active -= 1\n    return x * 10\nres = await run_with_limit([1, 2, 3, 4, 5], w, 2)\nassert res == [10, 20, 30, 40, 50], f'got {res}'\nassert peak <= 2, f'peak concurrency {peak} > 2'\nasync def failing_worker(x):\n    if x == 2:\n        raise RuntimeError('boom')\n    await asyncio.sleep(0.01)\n    return x\nfailed = False\ntry:\n    await run_with_limit([1, 2, 3], failing_worker, 2)\nexcept RuntimeError:\n    failed = True\nassert failed, 'expected fail-fast exception propagation'\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (c, m) => { if (!c) throw new Error(m || 'Assertion failed'); };\nlet active = 0, peak = 0;\nconst w = async (x) => { active++; peak = Math.max(peak, active); await new Promise(r => setTimeout(r, 10)); active--; return x * 10; };\nconst res = await runWithLimit([1, 2, 3, 4, 5], w, 2);\nassert(JSON.stringify(res) === JSON.stringify([10, 20, 30, 40, 50]), 'order mismatch');\nassert(peak <= 2, 'peak > 2');\nlet failed = false;\ntry {\n  await runWithLimit([1, 2, 3], async (x) => { if (x === 2) throw new Error('boom'); await new Promise(r => setTimeout(r, 10)); return x; }, 2);\n} catch {\n  failed = true;\n}\nassert(failed, 'expected fail-fast rejection');\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "A semaphore or fixed pool of `min(limit, len(items))` worker coroutines pulling from a shared index works cleanly.",
+        "Discuss cancellation semantics on failure and backpressure when `items` is an iterator of 1M elements."
+      ],
+      "jd_tags": ["full-stack", "backend", "async", "typescript", "python"]
+    },
+    {
+      "id": "code_kv_txn_01",
+      "competency": "Database & Storage Internals",
+      "levels": ["L5", "L6"],
+      "title": "Transactional Key-Value Store with Nested Transactions",
+      "prompt": "Implement `TransactionalKV` supporting `set(k, v)`, `get(k)`, `delete(k)`, `begin()`, `commit()`, and `rollback()`. Transactions can be nested arbitrarily deep; `commit()` applies only the innermost transaction to its parent (or base store), while `rollback()` discards only the innermost transaction.",
+      "starter_code": {
+        "python": "class TransactionalKV:\n    def __init__(self):\n        pass\n\n    def set(self, key: str, value) -> None:\n        pass\n\n    def get(self, key: str):\n        pass\n\n    def delete(self, key: str) -> None:\n        pass\n\n    def begin(self) -> None:\n        pass\n\n    def commit(self) -> bool:\n        return False\n\n    def rollback(self) -> bool:\n        return False\n",
+        "javascript": "class TransactionalKV {\n  constructor() {}\n  set(key, value) {}\n  get(key) { return null; }\n  delete(key) {}\n  begin() {}\n  commit() { return false; }\n  rollback() { return false; }\n}\n"
+      },
+      "tests": {
+        "python": "kv = TransactionalKV()\nkv.set('a', 1)\nkv.begin()\nkv.set('a', 2)\nkv.begin()\nkv.delete('a')\nassert kv.get('a') is None\nassert kv.rollback() is True\nassert kv.get('a') == 2\nassert kv.commit() is True\nassert kv.get('a') == 2\nassert kv.rollback() is False\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (c, m) => { if (!c) throw new Error(m || 'Assertion failed'); };\nconst kv = new TransactionalKV();\nkv.set('a', 1); kv.begin(); kv.set('a', 2); kv.begin(); kv.delete('a');\nassert(kv.get('a') === null);\nassert(kv.rollback() === true && kv.get('a') === 2);\nassert(kv.commit() === true && kv.get('a') === 2);\nassert(kv.rollback() === false);\nconsole.log('ALL TESTS PASSED');\n"
+      },
+      "hints": [
+        "Use a stack of delta frames with a distinct TOMBSTONE sentinel for deletions inside a transaction.",
+        "Make sure deleting a key inside an inner transaction masks the outer value instead of falling through!"
+      ],
+      "jd_tags": ["backend", "systems", "databases", "python", "typescript"]
+    }
+  ]
+}

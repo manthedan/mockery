@@ -1,24 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import io
 import json
 import logging
 import os
+import re
 import secrets
+import struct
 import subprocess
 import sys
 import time
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+import numpy as np
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
+from .addons import AddonManager
 from .asr import ParakeetEngine
+from .banks import QuestionBankStore
 from .diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
 from .grouper import QAGrouper
 from .llm import (
@@ -37,19 +45,41 @@ from .models import (
     short_id,
 )
 from .paths import resolve_data_root
+from .practice import (
+    PracticeConfig,
+    PracticeQuestionItem,
+    PracticeSession,
+    PracticeSessionStore,
+    PracticeTurn,
+    estimate_carl_heuristic,
+)
+from .profiles import CandidateProfileStore, ResumeRedactionPrefs
+from .pyodide_pack import PyodidePackManager
+from .redactor import (
+    RampartRedactor,
+    clean_job_listing_text,
+    extract_document_text,
+    fetch_job_listing,
+    parse_job_title_and_company,
+)
 from .sources import SegmentedSpeech, SessionAudioRouter
 from .state_machines import (
     ASRModelState,
     AsyncJobState,
     CardProbeState,
     InvalidStateTransitionError,
+    PracticePhase,
+    compute_allowed_practice_events,
     compute_allowed_session_events,
     derive_card_probe_state,
+    derive_practice_phase,
     derive_session_phase,
     export_machine_specs,
+    serialize_practice_state_machines,
     validate_session_invariants,
 )
 from .storage import SessionAudioArchive, SessionStore
+from .tts import LocalTTSEngine
 from .vad import SileroVADRuntime
 
 logger = logging.getLogger("mockery")
@@ -57,6 +87,14 @@ logger = logging.getLogger("mockery")
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"
 ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver"}
+MAX_RESUME_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_ASR_AUDIO_BYTES = 4 * 1024 * 1024
+MAX_ASR_DURATION_SECONDS = 120
+MAX_TTS_REQUEST_BYTES = 32 * 1024
+MAX_PRACTICE_REQUEST_BYTES = 256 * 1024
+MAX_PRACTICE_TURN_CHARS = 16_000
+MAX_WORKSPACE_CONTEXT_BYTES = 200_000
+PRACTICE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{3,80}$")
 
 
 def resolve_project_root() -> Path:
@@ -120,6 +158,210 @@ class LLMConnectionTestRequest(BaseModel):
     api_key: str | None = None
 
 
+class ResumeTextUploadRequest(BaseModel):
+    filename: str = "resume.txt"
+    text: str
+
+
+class JobListingImportRequest(BaseModel):
+    url: str = ""
+    text: str = ""
+    title: str = ""
+    company: str = ""
+    target_level: str = "L5"
+
+
+class AddonModulesUpdateRequest(BaseModel):
+    modules: dict[str, bool]
+
+
+class TTSSpeakRequest(BaseModel):
+    text: str
+    voice: str | None = None
+    rate: float = 1.0
+    engine: str | None = Field(default=None, max_length=24)
+
+
+class PracticeStartRequest(BaseModel):
+    role_title: str = ""
+    company: str = ""
+    interview_type: Literal["behavioral", "system_design", "coding", "general"] = "behavioral"
+    question_source: Literal["bank_only", "resume_jd_tailored", "mixed"] = "mixed"
+    target_level: str = "L5"
+    coach_style: Literal["supportive", "balanced"] = "supportive"
+    live_coach_nudges: bool = True
+    voice_enabled: bool = True
+    question_count: int = Field(default=4, ge=1, le=8)
+    selected_question_id: str | None = None
+
+
+class PracticeTurnRequest(BaseModel):
+    text: str
+    workspace_context: dict[str, Any] | None = None
+    expected_question_id: str | None = None
+
+
+class PracticeHintRequest(BaseModel):
+    workspace_context: dict[str, Any] | None = None
+
+
+class PracticeNextRequest(BaseModel):
+    expected_question_id: str | None = None
+
+
+class PracticeWorkspaceUpdateRequest(BaseModel):
+    workspace_context: dict[str, Any]
+
+
+class PracticeRetryRequest(BaseModel):
+    answer_text: str
+    question_id: str | None = None
+    focus: str = ""
+
+
+@functools.lru_cache(maxsize=16)
+def _lowpass_kernel(src_rate: int, dst_rate: int) -> np.ndarray:
+    """Cached Hann-windowed sinc FIR low-pass kernel before downsampling."""
+    cutoff = 0.45 * (float(dst_rate) / float(src_rate))  # normalized to Nyquist=0.5
+    taps = min(31, max(7, int(round(src_rate / dst_rate)) * 4 + 1))
+    if taps % 2 == 0:
+        taps += 1
+    half = taps // 2
+    n = np.arange(-half, half + 1, dtype=np.float32)
+    kernel = (np.sinc(2.0 * cutoff * n) * np.hanning(taps)).astype(np.float32)
+    k_sum = float(kernel.sum())
+    if k_sum > 0:
+        kernel /= k_sum
+    return kernel
+
+
+def _lowpass_antialias(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Lightweight Hann-windowed sinc FIR low-pass filter before downsampling."""
+    if src_rate <= dst_rate or pcm.size < 16:
+        return pcm
+    kernel = _lowpass_kernel(src_rate, dst_rate)
+    return np.convolve(pcm, kernel, mode="same").astype(np.float32)
+
+
+def _decimate_integer_fir(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """
+    Evaluate the symmetric Hann-sinc low-pass FIR filter ONLY at kept decimated output samples
+    when `src_rate` is an exact integer multiple of `dst_rate` (e.g. 48kHz -> 16kHz, 32kHz -> 16kHz).
+    Mathematically equivalent to `_lowpass_antialias(pcm, src_rate, dst_rate)[::factor]`.
+    """
+    factor = src_rate // dst_rate
+    out_len = pcm.size // factor
+    if out_len <= 0:
+        return np.empty(0, dtype=np.float32)
+    if pcm.size < 16:
+        return np.ascontiguousarray(pcm[::factor], dtype=np.float32)
+    kernel = _lowpass_kernel(src_rate, dst_rate)
+    half = kernel.size // 2
+    padded = np.pad(pcm, (half, half), mode="constant")
+    out = np.zeros(out_len, dtype=np.float32)
+    span = out_len * factor
+    for k, w in enumerate(kernel):
+        out += w * padded[k : k + span : factor]
+    return out
+
+
+def _decode_audio_to_float32_16k(raw_bytes: bytes, content_type: str = "") -> np.ndarray:
+    """
+    Decode either a standard RIFF/WAVE PCM16 upload or raw 16kHz little-endian int16 mono PCM
+    into a contiguous float32 array normalized to [-1.0, 1.0] at 16kHz.
+    """
+    if not raw_bytes:
+        raise ValueError("Audio payload is empty.")
+    ct = (content_type or "").lower()
+    is_wav = raw_bytes[:4] == b"RIFF" or "wav" in ct
+    if is_wav:
+        try:
+            with wave.open(io.BytesIO(raw_bytes), "rb") as wf:
+                channels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                rate = wf.getframerate()
+                nframes = wf.getnframes()
+                if channels not in (1, 2):
+                    raise ValueError(f"Unsupported channel count: {channels}")
+                if sampwidth != 2:
+                    raise ValueError(f"Only 16-bit PCM WAV is supported (got {sampwidth * 8}-bit).")
+                if rate < 8000 or rate > 96000:
+                    raise ValueError(f"Unsupported sample rate: {rate} Hz")
+                if nframes <= 0:
+                    raise ValueError("WAV audio contains no frames.")
+                if nframes > rate * MAX_ASR_DURATION_SECONDS:
+                    raise ValueError(f"Audio clip exceeds maximum {MAX_ASR_DURATION_SECONDS}-second limit.")
+                frames = wf.readframes(nframes)
+        except (wave.Error, EOFError, struct.error, OSError) as exc:
+            raise ValueError(f"Invalid WAV audio: {exc}") from exc
+        expected_bytes = nframes * channels * sampwidth
+        if len(frames) != expected_bytes:
+            raise ValueError("Truncated or malformed WAV audio payload.")
+        raw_i16 = np.frombuffer(frames, dtype="<i2")
+        if channels == 2:
+            stereo = raw_i16.reshape(-1, 2)
+            pcm = np.add(stereo[:, 0], stereo[:, 1], dtype=np.float32)
+            pcm *= np.float32(0.5 / 32768.0)
+        else:
+            pcm = raw_i16.astype(np.float32)
+            pcm *= np.float32(1.0 / 32768.0)
+        if rate != 16000 and pcm.size > 1:
+            if rate > 16000 and rate % 16000 == 0 and pcm.size % (rate // 16000) == 0:
+                pcm = _decimate_integer_fir(pcm, rate, 16000)
+            else:
+                if rate > 16000:
+                    pcm = _lowpass_antialias(pcm, rate, 16000)
+                target_len = max(1, int(round(pcm.size * (16000.0 / float(rate)))))
+                pos = np.arange(target_len, dtype=np.float64) * (float(pcm.size) / float(target_len))
+                np.minimum(pos, float(pcm.size - 1), out=pos)
+                i0 = pos.astype(np.intp)
+                i1 = np.minimum(i0 + 1, pcm.size - 1)
+                frac = (pos - i0).astype(np.float32)
+                pcm = pcm[i0] + frac * (pcm[i1] - pcm[i0])
+        return np.ascontiguousarray(pcm, dtype=np.float32)
+
+    # Raw 16kHz little-endian int16 mono PCM
+    if len(raw_bytes) % 2 != 0:
+        raw_bytes = raw_bytes[:-1]
+    if not raw_bytes:
+        raise ValueError("Audio payload is too short.")
+    pcm = np.frombuffer(raw_bytes, dtype="<i2").astype(np.float32)
+    pcm *= np.float32(1.0 / 32768.0)
+    if pcm.size > 16000 * MAX_ASR_DURATION_SECONDS:
+        raise ValueError(f"Audio clip exceeds maximum {MAX_ASR_DURATION_SECONDS}-second limit.")
+    return np.ascontiguousarray(pcm, dtype=np.float32)
+
+
+def _merge_workspace_context(session: PracticeSession, patch: dict[str, Any] | None) -> None:
+    if not patch:
+        return
+    if not isinstance(patch, dict):
+        raise ValueError("workspace_context must be a JSON object.")
+    if "diagram_graph" in patch and patch["diagram_graph"] is not None:
+        dg = patch["diagram_graph"]
+        if not isinstance(dg, dict):
+            raise ValueError("diagram_graph must be a JSON object.")
+        if "nodes" in dg and not isinstance(dg["nodes"], list):
+            raise ValueError("diagram_graph.nodes must be a list.")
+        if "edges" in dg and not isinstance(dg["edges"], list):
+            raise ValueError("diagram_graph.edges must be a list.")
+    for map_key in ("code_by_lang", "tests_by_lang"):
+        if map_key in patch and patch[map_key] is not None:
+            m = patch[map_key]
+            if not isinstance(m, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str) for k, v in m.items()
+            ):
+                raise ValueError(f"{map_key} must be an object mapping language names to strings.")
+    merged = {**session.workspace_context, **patch}
+    try:
+        encoded = json.dumps(merged, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError(f"Workspace context contains invalid text or data: {exc}") from exc
+    if len(encoded) > MAX_WORKSPACE_CONTEXT_BYTES:
+        raise ValueError("Workspace context exceeds size limit (200 KB).")
+    session.workspace_context = merged
+
+
 class AppRuntime:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
@@ -131,6 +373,38 @@ class AppRuntime:
         self.llm = InterviewCopilotLLM(self.llm_config)
         self.store = SessionStore(project_root / "sessions")
         self.grouper = QAGrouper()
+        self.redactor = RampartRedactor()
+        self.profiles = CandidateProfileStore(project_root / "profiles", self.redactor)
+        self.banks = QuestionBankStore(project_root / "banks")
+        self.addons = AddonManager(project_root, self.redactor)
+        self.tts = LocalTTSEngine(project_root / "models")
+        self.pyodide = PyodidePackManager(project_root / "models" / "pyodide")
+        self.practice_store = PracticeSessionStore(project_root / "practice")
+        self._practice_locks: dict[str, list[Any]] = {}
+        self._asr_http_sem = asyncio.Semaphore(1)
+        self._tts_sem = asyncio.Semaphore(2)
+
+        self.addons.register_pack_handler(
+            "phonon_tts",
+            is_installed=self.tts.is_phonon_installed,
+            install=lambda: asyncio.to_thread(self.tts.install_phonon),
+            uninstall=lambda: asyncio.to_thread(self.tts.uninstall_phonon),
+            available=self.tts.is_phonon_available(),
+        )
+        self.addons.register_pack_handler(
+            "kokoro_tts",
+            is_installed=self.tts.is_kokoro_installed,
+            install=lambda: asyncio.to_thread(self.tts.install_kokoro),
+            uninstall=lambda: asyncio.to_thread(self.tts.uninstall_kokoro),
+            available=self.tts.is_kokoro_available(),
+        )
+        self.addons.register_pack_handler(
+            "pyodide_python",
+            is_installed=self.pyodide.is_installed,
+            install=lambda: asyncio.to_thread(self.pyodide.install),
+            uninstall=lambda: asyncio.to_thread(self.pyodide.uninstall),
+            available=True,
+        )
 
         self.active_session = InterviewSession()
         self.audio_router = SessionAudioRouter(
@@ -143,6 +417,7 @@ class AppRuntime:
         self.capture_started_epoch_ms: int | None = None
         self.regroup_job: AsyncJobState = AsyncJobState.IDLE
         self.calibration_job: AsyncJobState = AsyncJobState.IDLE
+        self.practice_debrief_jobs: dict[str, AsyncJobState] = {}
         self.warming_card_ids: set[str] = set()
         self.loading_card_ids: set[str] = set()
         self.card_probe_gen: dict[str, int] = {}
@@ -155,6 +430,23 @@ class AppRuntime:
         self.ws_senders: set[Any] = set()
         self.capturing_sender: Any | None = None
         self.asr_watcher_task: asyncio.Task[Any] | None = None
+
+    @asynccontextmanager
+    async def practice_lock(self, session_id: str):
+        if not PRACTICE_SESSION_ID_RE.match(session_id or ""):
+            raise HTTPException(status_code=404, detail="Practice session not found.")
+        entry = self._practice_locks.get(session_id)
+        if entry is None:
+            entry = [asyncio.Lock(), 0]
+            self._practice_locks[session_id] = entry
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] <= 0 and self._practice_locks.get(session_id) is entry:
+                self._practice_locks.pop(session_id, None)
 
     def is_live_session(self, target_session: InterviewSession, epoch: int) -> bool:
         return self.session_epoch == epoch and self.active_session is target_session
@@ -300,10 +592,20 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        async def _warm_tts_quietly() -> None:
+            try:
+                await asyncio.to_thread(runtime.tts.warm_up_installed)
+            except Exception as exc:
+                logger.debug("Background local TTS warmup skipped: %s", exc)
+
+        tts_warmup_task: asyncio.Task[Any] | None = None
         if preload_asr:
             runtime.asr.start_background_load()
             runtime.voice_embedder.start_background_load()
+            tts_warmup_task = asyncio.create_task(_warm_tts_quietly())
         yield
+        if tts_warmup_task is not None and not tts_warmup_task.done():
+            tts_warmup_task.cancel()
         if runtime.asr_watcher_task is not None and not runtime.asr_watcher_task.done():
             runtime.asr_watcher_task.cancel()
         runtime.close_archive()
@@ -317,6 +619,15 @@ def create_app(
 
     @app.middleware("http")
     async def verify_http_origin_and_token(request: Request, call_next: Any):
+        host = request.headers.get("host") or ""
+        if not auth_token:
+            # Defend loopback-only server against browser DNS rebinding attacks
+            parsed_host = (urlparse(f"http://{host}").hostname or "").lower()
+            if parsed_host not in ("localhost", "127.0.0.1", "::1", "testserver"):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Untrusted Host header rejected in local loopback mode."},
+                )
         if auth_token:
             query_token = request.query_params.get("token")
             cookie_token = request.cookies.get("mockery_token")
@@ -333,13 +644,40 @@ def create_app(
                 )
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             origin = request.headers.get("origin")
-            host = request.headers.get("host")
             if not is_trusted_origin(origin, host, allow_same_host_lan=bool(auth_token)):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "Untrusted Origin rejected."},
                 )
+            cl = request.headers.get("content-length")
+            cl_int = int(cl) if (cl and cl.isdigit()) else None
+            if request.url.path.startswith("/api/profile/resume"):
+                if cl_int is not None and cl_int > MAX_RESUME_UPLOAD_BYTES + 262_144:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "Resume upload exceeds 10 MB limit."},
+                    )
+            elif request.url.path == "/api/asr/transcribe":
+                if cl_int is not None and cl_int > MAX_ASR_AUDIO_BYTES + 65_536:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "Audio upload exceeds 4 MB limit."},
+                    )
+            elif request.url.path in ("/api/tts/speak", "/api/tts/stream"):
+                if cl_int is not None and cl_int > MAX_TTS_REQUEST_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "TTS request exceeds 32 KB limit."},
+                    )
+            elif request.url.path.startswith("/api/practice"):
+                if cl_int is not None and cl_int > MAX_PRACTICE_REQUEST_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "Practice request exceeds 256 KB limit."},
+                    )
         response = await call_next(request)
+        if request.url.path.startswith(("/api/practice", "/api/profile", "/api/asr/transcribe")):
+            response.headers["Cache-Control"] = "no-store"
         if auth_token and request.query_params.get("token"):
             response.set_cookie(
                 key="mockery_token",
@@ -355,14 +693,948 @@ def create_app(
 
     @app.get("/api/status")
     async def get_status() -> dict[str, Any]:
+        active_jd = runtime.profiles.active_jd()
+        resume = runtime.profiles.state.resume
         return {
             "asr": runtime.asr.status_dict(),
+            "tts": runtime.tts.status_dict(),
             "diarizer": runtime.diarizer.status_dict(),
             "llm": runtime.llm_config.public_dict(),
+            "addons": runtime.addons.status_dict(),
+            "profile_summary": {
+                "has_resume": bool(resume and resume.raw_text.strip()),
+                "resume_filename": resume.filename if resume else "",
+                "resume_redacted_count": resume.redacted_count if resume else 0,
+                "resume_engine": resume.engine if resume else "rules_only",
+                "active_jd": (
+                    {
+                        "id": active_jd.id,
+                        "title": active_jd.title,
+                        "company": active_jd.company,
+                        "target_level": active_jd.target_level,
+                    }
+                    if active_jd
+                    else None
+                ),
+                "jd_count": len(runtime.profiles.state.job_listings),
+            },
             "data_dir": str(runtime.project_root),
             "sessions_dir": str(runtime.store.sessions_dir),
             "session": _serialize_session(runtime),
         }
+
+    @app.get("/api/profile")
+    async def get_candidate_profile() -> dict[str, Any]:
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/file")
+    async def upload_resume_file(file: UploadFile = File(...)) -> dict[str, Any]:
+        raw_bytes = await file.read(MAX_RESUME_UPLOAD_BYTES + 1)
+        if len(raw_bytes) > MAX_RESUME_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Resume file exceeds 10 MB limit.")
+        filename = Path(file.filename or "resume.txt").name
+        try:
+            extracted = await asyncio.to_thread(extract_document_text, filename, raw_bytes)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not read resume file: {exc}")
+        if not extracted.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No selectable text found in that file (if it is a scanned image PDF, paste the text directly).",
+            )
+        await asyncio.to_thread(
+            runtime.profiles.set_resume,
+            filename=filename,
+            raw_text=extracted,
+        )
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/text")
+    async def upload_resume_text(body: ResumeTextUploadRequest) -> dict[str, Any]:
+        if not body.text.strip():
+            raise HTTPException(status_code=400, detail="Resume text cannot be empty.")
+        if len(body.text.encode("utf-8")) > MAX_RESUME_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Resume text exceeds 10 MB limit.")
+        await asyncio.to_thread(
+            runtime.profiles.set_resume,
+            filename=Path(body.filename or "resume.txt").name,
+            raw_text=body.text.strip(),
+        )
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/redact")
+    async def update_resume_redaction(body: ResumeRedactionPrefs) -> dict[str, Any]:
+        updated = await asyncio.to_thread(runtime.profiles.update_redaction_prefs, body)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Upload a resume first before configuring redaction.")
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/resume/toggle/{span_id}")
+    async def toggle_resume_span_redaction(span_id: str) -> dict[str, Any]:
+        updated = await asyncio.to_thread(runtime.profiles.toggle_span_redaction, span_id)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Resume or span not found.")
+        return runtime.profiles.public_dict()
+
+    @app.delete("/api/profile/resume")
+    async def delete_resume() -> dict[str, Any]:
+        runtime.profiles.clear_resume()
+        return runtime.profiles.public_dict()
+
+    @app.post("/api/profile/jd")
+    async def import_job_listing(body: JobListingImportRequest) -> dict[str, Any]:
+        url = body.url.strip()
+        text = body.text.strip()
+        title = body.title.strip()
+        company = body.company.strip()
+
+        if url and not text:
+            try:
+                fetched = await fetch_job_listing(url)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Could not fetch job listing URL: {exc}")
+            text = fetched["text"]
+            title = title or fetched["title"]
+            company = company or fetched["company"]
+            url = fetched["url"]
+        elif text:
+            text = clean_job_listing_text(text)
+            if not title or not company:
+                inferred_title, inferred_company = parse_job_title_and_company(title, url=url, text=text)
+                title = title or inferred_title
+                company = company or inferred_company
+        else:
+            raise HTTPException(status_code=400, detail="Provide either a job listing URL or paste the job description text.")
+
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Job listing text is empty after parsing.")
+
+        jd = runtime.profiles.add_job_listing(
+            title=title or "Target Role",
+            company=company,
+            url=url,
+            text=text,
+            target_level=body.target_level or "L5",
+        )
+        out = runtime.profiles.public_dict()
+        out["imported_jd"] = jd.model_dump()
+        return out
+
+    @app.post("/api/profile/jd/{jd_id}/select")
+    async def select_job_listing(jd_id: str) -> dict[str, Any]:
+        jd = runtime.profiles.select_job_listing(jd_id)
+        if jd is None:
+            raise HTTPException(status_code=404, detail="Job listing not found")
+        return runtime.profiles.public_dict()
+
+    @app.delete("/api/profile/jd/{jd_id}")
+    async def delete_job_listing(jd_id: str) -> dict[str, Any]:
+        if not runtime.profiles.delete_job_listing(jd_id):
+            raise HTTPException(status_code=404, detail="Job listing not found")
+        return runtime.profiles.public_dict()
+
+    @app.get("/api/banks")
+    async def list_question_banks(
+        category: str | None = Query(None),
+        level: str | None = Query(None),
+        competency: str | None = Query(None),
+        match_active_jd: bool = Query(True),
+    ) -> dict[str, Any]:
+        active_jd = runtime.profiles.active_jd() if match_active_jd else None
+        jd_text = f"{active_jd.title} {active_jd.company} {active_jd.text}" if active_jd else None
+        questions = runtime.banks.list_questions(
+            category=category,
+            level=level,
+            competency=competency,
+            jd_text=jd_text,
+        )
+        packs = [
+            {k: v for k, v in p.items() if k != "questions"}
+            for p in runtime.banks.list_packs()
+        ]
+        return {
+            "packs": packs,
+            "questions": questions,
+            "matched_jd_id": active_jd.id if active_jd else None,
+        }
+
+    @app.get("/api/addons")
+    async def get_addons_status() -> dict[str, Any]:
+        return runtime.addons.status_dict()
+
+    @app.post("/api/addons/modules")
+    async def update_addon_modules(body: AddonModulesUpdateRequest) -> dict[str, Any]:
+        runtime.addons.update_modules(body.modules)
+        return runtime.addons.status_dict()
+
+    @app.post("/api/addons/{pack_id}/install")
+    async def install_addon_pack(pack_id: str) -> dict[str, Any]:
+        pack = runtime.addons.get_pack_spec(pack_id)
+        if pack is not None and "install" not in pack["allowed_events"]:
+            raise HTTPException(
+                status_code=409,
+                detail=InvalidStateTransitionError(
+                    machine="addon_pack",
+                    current_state=pack["state"],
+                    event="install",
+                    allowed_events=pack["allowed_events"],
+                    remediation=pack["blocked_reasons"].get(
+                        "install",
+                        f"Cannot install '{pack_id}' while in state '{pack['state']}'.",
+                    ),
+                ).to_dict(),
+            )
+        try:
+            status = await runtime.addons.install_pack(pack_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to install {pack_id}: {exc}")
+        # If Rampart was just installed and a resume already exists, automatically re-redact with Rampart!
+        if pack_id == "rampart_pii" and runtime.profiles.state.resume is not None:
+            await asyncio.to_thread(
+                runtime.profiles.update_redaction_prefs,
+                runtime.profiles.state.resume.prefs,
+            )
+        return {
+            "addons": status,
+            "profile": runtime.profiles.public_dict(),
+            "tts": runtime.tts.status_dict(),
+        }
+
+    @app.delete("/api/addons/{pack_id}")
+    async def uninstall_addon_pack(pack_id: str) -> dict[str, Any]:
+        pack = runtime.addons.get_pack_spec(pack_id)
+        if pack is not None and "uninstall" not in pack["allowed_events"]:
+            raise HTTPException(
+                status_code=409,
+                detail=InvalidStateTransitionError(
+                    machine="addon_pack",
+                    current_state=pack["state"],
+                    event="uninstall",
+                    allowed_events=pack["allowed_events"],
+                    remediation=pack["blocked_reasons"].get(
+                        "uninstall",
+                        f"Cannot remove '{pack_id}' while in state '{pack['state']}'.",
+                    ),
+                ).to_dict(),
+            )
+        try:
+            status = await runtime.addons.uninstall_pack(pack_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if pack_id == "rampart_pii" and runtime.profiles.state.resume is not None:
+            await asyncio.to_thread(
+                runtime.profiles.update_redaction_prefs,
+                runtime.profiles.state.resume.prefs,
+            )
+        return {
+            "addons": status,
+            "profile": runtime.profiles.public_dict(),
+            "tts": runtime.tts.status_dict(),
+        }
+
+    @app.get("/api/addons/pyodide/{asset_path:path}")
+    async def serve_pyodide_asset(asset_path: str, request: Request) -> Response:
+        try:
+            opened = runtime.pyodide.open_asset(asset_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if opened is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Offline Python runner (Pyodide) is not installed or asset not found.",
+            )
+        file_obj, size_bytes, media_type, etag = opened
+        if_none_match = (request.headers.get("if-none-match") or "").strip()
+        if if_none_match and if_none_match == etag:
+            file_obj.close()
+            return Response(
+                status_code=304,
+                headers={
+                    "ETag": etag,
+                    "Cache-Control": "no-cache",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        def _stream_and_close():
+            try:
+                while True:
+                    chunk = file_obj.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                file_obj.close()
+
+        return StreamingResponse(
+            _stream_and_close(),
+            media_type=media_type,
+            headers={
+                "Content-Length": str(size_bytes),
+                "ETag": etag,
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    # ---------------- Milestone 2: Local TTS, Mic ASR & AI Practice Mode ----------------
+
+    @app.get("/api/tts/status")
+    async def get_tts_status() -> dict[str, Any]:
+        if runtime.tts._cached_macos_voices is None:
+            await asyncio.to_thread(runtime.tts.list_macos_voices)
+        return runtime.tts.status_dict()
+
+    @app.post("/api/tts/speak")
+    async def synthesize_tts(body: TTSSpeakRequest) -> Response:
+        if not (body.text or "").strip():
+            raise HTTPException(status_code=400, detail="Text to speak cannot be empty.")
+        try:
+            await asyncio.wait_for(runtime._tts_sem.acquire(), timeout=0.05)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=429,
+                detail="Local voice synthesis is busy — try again in a moment.",
+            )
+        try:
+            try:
+                wav_bytes, engine = await runtime.tts.synthesize_wav(
+                    body.text,
+                    voice=body.voice,
+                    rate=body.rate,
+                    engine=body.engine,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+        finally:
+            runtime._tts_sem.release()
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers={
+                "X-TTS-Engine": engine,
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.post("/api/tts/stream")
+    async def stream_tts(body: TTSSpeakRequest) -> StreamingResponse:
+        if not (body.text or "").strip():
+            raise HTTPException(status_code=400, detail="Text to speak cannot be empty.")
+        try:
+            await asyncio.wait_for(runtime._tts_sem.acquire(), timeout=0.05)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=429,
+                detail="Local voice synthesis is busy — try again in a moment.",
+            )
+        try:
+            engine, sample_rate, chunk_iter = await runtime.tts.open_pcm_stream(
+                body.text,
+                voice=body.voice,
+                rate=body.rate,
+                engine=body.engine,
+            )
+        except ValueError as exc:
+            runtime._tts_sem.release()
+            raise HTTPException(status_code=400, detail=str(exc))
+        except RuntimeError as exc:
+            runtime._tts_sem.release()
+            raise HTTPException(status_code=503, detail=str(exc))
+        except BaseException:
+            runtime._tts_sem.release()
+            raise
+
+        async def _guarded_stream():
+            try:
+                async for chunk in chunk_iter:
+                    if chunk:
+                        yield chunk
+            finally:
+                try:
+                    aclose = getattr(chunk_iter, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
+                except Exception:
+                    pass
+                runtime._tts_sem.release()
+
+        return StreamingResponse(
+            _guarded_stream(),
+            media_type="application/octet-stream",
+            headers={
+                "X-TTS-Engine": engine,
+                "X-TTS-Sample-Rate": str(sample_rate),
+                "X-TTS-Channels": "1",
+                "X-TTS-Sample-Format": "pcm_s16le",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.post("/api/asr/transcribe")
+    async def transcribe_local_audio(request: Request) -> dict[str, Any]:
+        try:
+            await asyncio.wait_for(runtime._asr_http_sem.acquire(), timeout=0.05)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=429,
+                detail="Local transcription is already running — wait for the previous clip to finish.",
+            )
+        try:
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_ASR_AUDIO_BYTES:
+                    raise HTTPException(status_code=413, detail="Audio upload exceeds 4 MB limit.")
+                chunks.append(chunk)
+            raw_bytes = b"".join(chunks)
+            if not raw_bytes:
+                raise HTTPException(status_code=400, detail="Audio payload is empty.")
+            content_type = request.headers.get("content-type", "")
+            try:
+                pcm = await asyncio.to_thread(_decode_audio_to_float32_16k, raw_bytes, content_type)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            try:
+                res = await asyncio.to_thread(runtime.asr.transcribe_pcm, pcm)
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Local speech transcription unavailable: {exc}")
+            return {
+                "text": res.text,
+                "inference_ms": round(res.inference_ms, 1),
+                "audio_duration_ms": round(res.audio_duration_ms, 1),
+            }
+        finally:
+            runtime._asr_http_sem.release()
+
+    @app.get("/api/practice/sessions")
+    async def list_practice_sessions() -> dict[str, Any]:
+        items = await asyncio.to_thread(runtime.practice_store.list_recent, 25)
+        return {"sessions": items}
+
+    @app.get("/api/practice/sessions/{session_id}")
+    async def get_practice_session(session_id: str) -> dict[str, Any]:
+        if not PRACTICE_SESSION_ID_RE.match(session_id or ""):
+            raise HTTPException(status_code=404, detail="Practice session not found.")
+        sess = await asyncio.to_thread(runtime.practice_store.get, session_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="Practice session not found.")
+        return {"session": _serialize_practice_session(runtime, sess)}
+
+    @app.post("/api/practice/start")
+    async def start_practice_session(body: PracticeStartRequest) -> dict[str, Any]:
+        if not runtime.addons._modules.get("practice_mode", True):
+            raise HTTPException(
+                status_code=403,
+                detail="AI Mock Practice is switched off in Settings → Add-Ons.",
+            )
+        active_jd = runtime.profiles.active_jd()
+        role_title = body.role_title.strip() or (active_jd.title if active_jd else "Senior Software Engineer")
+        company = body.company.strip() or (active_jd.company if active_jd else "")
+        target_level = (body.target_level or (active_jd.target_level if active_jd else "L5")).strip() or "L5"
+        jd_text = f"{active_jd.title} {active_jd.company}\n{active_jd.text}" if active_jd else ""
+        # STRICT PRIVACY: ONLY the locally redacted resume text may ever reach the LLM!
+        redacted_resume = runtime.profiles.resume_for_llm()
+
+        bank_category = None if body.interview_type == "general" else body.interview_type
+        bank_candidates = runtime.banks.list_questions(
+            category=bank_category,
+            level=target_level,
+            jd_text=jd_text or None,
+        )
+        if not bank_candidates and bank_category:
+            # Relax level filter so users always get rich curated questions for their format
+            bank_candidates = runtime.banks.list_questions(
+                category=bank_category,
+                jd_text=jd_text or None,
+            )
+        if not bank_candidates:
+            bank_candidates = runtime.banks.list_questions(jd_text=jd_text or None)
+
+        selected_qid = body.selected_question_id.strip() if body.selected_question_id else None
+        if selected_qid:
+            picked = runtime.banks.get_question(selected_qid)
+            if picked is not None:
+                bank_candidates = [picked] + [
+                    q for q in bank_candidates if q.get("id") != picked.get("id")
+                ]
+
+        cfg = PracticeConfig(
+            interview_type=body.interview_type,
+            question_source=body.question_source,
+            target_level=target_level,
+            coach_style=body.coach_style,
+            live_coach_nudges=body.live_coach_nudges,
+            voice_enabled=body.voice_enabled,
+            question_count=body.question_count,
+            selected_question_id=selected_qid,
+        )
+
+        try:
+            planned_raw, opening = await runtime.llm.generate_practice_plan(
+                role_title=role_title,
+                company=company,
+                interview_type=cfg.interview_type,
+                target_level=cfg.target_level,
+                question_source=cfg.question_source,
+                question_count=cfg.question_count,
+                bank_candidates=bank_candidates,
+                redacted_resume=redacted_resume,
+                jd_text=jd_text,
+                selected_question_id=cfg.selected_question_id,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"AI interviewer is temporarily unavailable while preparing questions: {exc}",
+            ) from exc
+
+        questions: list[PracticeQuestionItem] = []
+        for idx, item in enumerate(planned_raw):
+            q_item = PracticeQuestionItem.model_validate(
+                {
+                    **item,
+                    "status": "active" if idx == 0 else "pending",
+                }
+            )
+            questions.append(q_item)
+
+        if not questions:
+            questions.append(
+                PracticeQuestionItem(
+                    source="bank",
+                    category=cfg.interview_type,
+                    title="Core Experience Walkthrough",
+                    competency="Ownership & Impact",
+                    prompt=f"Tell me about a challenging project you led that best prepares you for {role_title}.",
+                    carl_focus="Clear Context, your personal Actions, measurable Result, and Learning.",
+                    status="active",
+                )
+            )
+
+        first_q = questions[0]
+        intro_text = f"{opening.strip()}\n\n{first_q.prompt.strip()}" if opening.strip() else first_q.prompt.strip()
+        opening_turn = PracticeTurn(
+            role="interviewer",
+            question_id=first_q.id,
+            text=intro_text,
+        )
+
+        session = PracticeSession(
+            role_title=role_title,
+            company=company,
+            config=cfg,
+            phase="active",
+            questions=questions,
+            current_question_index=0,
+            turns=[opening_turn],
+        )
+        await asyncio.to_thread(runtime.practice_store.save, session)
+        return {
+            "session": _serialize_practice_session(runtime, session),
+            "opening_turn": opening_turn.model_dump(),
+        }
+
+    @app.post("/api/practice/{session_id}/turn")
+    async def submit_practice_turn(session_id: str, body: PracticeTurnRequest) -> dict[str, Any]:
+        answer_text = (body.text or "").strip()
+        if not answer_text:
+            raise HTTPException(status_code=400, detail="Answer text cannot be empty.")
+        if len(answer_text) > MAX_PRACTICE_TURN_CHARS:
+            raise HTTPException(status_code=413, detail="Answer exceeds maximum allowed length.")
+        _check_practice_not_debriefing(runtime, session_id, "submit_turn")
+
+        async with runtime.practice_lock(session_id):
+            session = await asyncio.to_thread(runtime.practice_store.get, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="Practice session not found.")
+            phase = _require_practice_event(runtime, session, "submit_turn")
+
+            cur_q = session.current_question()
+            if cur_q is None:
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="submit_turn",
+                    allowed_events=[],
+                    remediation="No active question in this practice session.",
+                )
+                raise HTTPException(status_code=409, detail=err.to_dict())
+            if body.expected_question_id and body.expected_question_id != cur_q.id:
+                allowed, _ = compute_allowed_practice_events(session, phase=phase)
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="submit_turn",
+                    allowed_events=allowed,
+                    remediation="Active question has already advanced; refresh and answer the current question.",
+                )
+                raise HTTPException(status_code=409, detail=err.to_dict())
+
+            try:
+                _merge_workspace_context(session, body.workspace_context)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
+            next_q = (
+                session.questions[session.current_question_index + 1]
+                if (session.current_question_index + 1) < len(session.questions)
+                else None
+            )
+
+            cand_turn = PracticeTurn(
+                role="candidate",
+                question_id=cur_q.id,
+                text=answer_text,
+            )
+            recent_with_cand = [t.model_dump() for t in session.turns[-9:]] + [cand_turn.model_dump()]
+
+            try:
+                reply = await runtime.llm.generate_practice_interviewer_reply(
+                    role_title=session.role_title,
+                    company=session.company,
+                    interview_type=session.config.interview_type,
+                    target_level=session.config.target_level,
+                    coach_style=session.config.coach_style,
+                    current_question=cur_q.model_dump(),
+                    next_question=next_q.model_dump() if next_q else None,
+                    recent_turns=recent_with_cand,
+                    candidate_answer=answer_text,
+                    follow_up_count=cur_q.follow_up_count,
+                    existing_carl=dict(cur_q.carl_signals),
+                    workspace_context=session.workspace_context or None,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"AI interviewer could not reply right now: {exc}",
+                ) from exc
+
+            carl_signals = reply.get("carl_signals") or estimate_carl_heuristic(
+                answer_text, cur_q.carl_signals
+            )
+            cur_q.carl_signals = dict(carl_signals)
+            cur_q.follow_up_count += 1
+            cand_turn.carl_signals = dict(carl_signals)
+
+            nudge = reply.get("coach_nudge")
+            if session.config.live_coach_nudges and isinstance(nudge, dict) and nudge.get("message"):
+                session.live_nudge = nudge
+                cand_turn.coach_tip = str(nudge["message"])
+            else:
+                session.live_nudge = None
+
+            should_advance = bool(reply.get("should_advance", False))
+            reply_text = str(reply.get("interviewer_reply") or "").strip()
+            target_q_id = cur_q.id
+
+            if should_advance:
+                cur_q.status = "completed"
+                if next_q is not None:
+                    session.current_question_index += 1
+                    next_q.status = "active"
+                    target_q_id = next_q.id
+                    prompt_probe = next_q.prompt.strip()[:36].lower()
+                    if prompt_probe and prompt_probe not in reply_text.lower():
+                        reply_text = f"{reply_text}\n\n{next_q.prompt.strip()}" if reply_text else next_q.prompt.strip()
+                else:
+                    session.phase = PracticePhase.AWAITING_DEBRIEF.value
+
+            interviewer_turn = PracticeTurn(
+                role="interviewer",
+                question_id=target_q_id,
+                text=reply_text or "Thanks for sharing that — let's keep going.",
+            )
+            session.turns.append(cand_turn)
+            session.turns.append(interviewer_turn)
+            await asyncio.to_thread(runtime.practice_store.save, session)
+            return {
+                "session": _serialize_practice_session(runtime, session),
+                "reply": reply,
+                "interviewer_turn": interviewer_turn.model_dump(),
+            }
+
+    @app.post("/api/practice/{session_id}/hint")
+    async def request_practice_hint(session_id: str, body: PracticeHintRequest | None = None) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "request_hint")
+        async with runtime.practice_lock(session_id):
+            session = await asyncio.to_thread(runtime.practice_store.get, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="Practice session not found.")
+            phase = _require_practice_event(runtime, session, "request_hint")
+
+            if body and body.workspace_context:
+                try:
+                    _merge_workspace_context(session, body.workspace_context)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+
+            cur_q = session.current_question()
+            if cur_q is None:
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="request_hint",
+                    allowed_events=[],
+                    remediation="No active question in this practice session.",
+                )
+                raise HTTPException(status_code=409, detail=err.to_dict())
+
+            try:
+                hint_text = await runtime.llm.generate_practice_hint(
+                    interview_type=session.config.interview_type,
+                    target_level=session.config.target_level,
+                    current_question=cur_q.model_dump(),
+                    recent_turns=[t.model_dump() for t in session.turns[-8:]],
+                    workspace_context=session.workspace_context or None,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"AI coach could not generate a hint right now: {exc}",
+                ) from exc
+            coach_turn = PracticeTurn(
+                role="coach",
+                question_id=cur_q.id,
+                text=hint_text,
+            )
+            session.turns.append(coach_turn)
+            session.live_nudge = {"tone": "tip", "message": hint_text}
+            await asyncio.to_thread(runtime.practice_store.save, session)
+            return {
+                "session": _serialize_practice_session(runtime, session),
+                "hint": hint_text,
+                "coach_turn": coach_turn.model_dump(),
+            }
+
+    @app.post("/api/practice/{session_id}/next")
+    async def advance_practice_question(
+        session_id: str,
+        body: PracticeNextRequest | None = None,
+    ) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "advance_question")
+        async with runtime.practice_lock(session_id):
+            session = await asyncio.to_thread(runtime.practice_store.get, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="Practice session not found.")
+            phase = _require_practice_event(runtime, session, "advance_question")
+
+            cur_q = session.current_question()
+            if (
+                body
+                and body.expected_question_id
+                and cur_q is not None
+                and body.expected_question_id != cur_q.id
+            ):
+                allowed, _ = compute_allowed_practice_events(session, phase=phase)
+                err = InvalidStateTransitionError(
+                    machine="practice_phase",
+                    current_state=phase.value,
+                    event="advance_question",
+                    allowed_events=allowed,
+                    remediation="Active question has already advanced; refresh before advancing again.",
+                )
+                raise HTTPException(status_code=409, detail=err.to_dict())
+
+            if cur_q is not None:
+                cur_q.status = "completed"
+
+            if session.current_question_index + 1 < len(session.questions):
+                session.current_question_index += 1
+                next_q = session.questions[session.current_question_index]
+                next_q.status = "active"
+                session.live_nudge = None
+                turn = PracticeTurn(
+                    role="interviewer",
+                    question_id=next_q.id,
+                    text=f"Great, let's move on to the next question:\n\n{next_q.prompt.strip()}",
+                )
+                session.turns.append(turn)
+                await asyncio.to_thread(runtime.practice_store.save, session)
+                return {
+                    "session": _serialize_practice_session(runtime, session),
+                    "has_more": True,
+                    "interviewer_turn": turn.model_dump(),
+                }
+
+            session.phase = PracticePhase.AWAITING_DEBRIEF.value
+            session.live_nudge = None
+            await asyncio.to_thread(runtime.practice_store.save, session)
+            return {"session": _serialize_practice_session(runtime, session), "has_more": False}
+
+    @app.post("/api/practice/{session_id}/workspace")
+    async def update_practice_workspace(
+        session_id: str,
+        body: PracticeWorkspaceUpdateRequest,
+    ) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "update_workspace")
+        async with runtime.practice_lock(session_id):
+            session = await asyncio.to_thread(runtime.practice_store.get, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="Practice session not found.")
+            _require_practice_event(runtime, session, "update_workspace")
+            try:
+                _merge_workspace_context(session, body.workspace_context)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            await asyncio.to_thread(runtime.practice_store.save, session)
+            return {
+                "ok": True,
+                "workspace_context": session.workspace_context,
+                "state_machines": serialize_practice_state_machines(session),
+            }
+
+    @app.post("/api/practice/{session_id}/debrief")
+    async def generate_practice_debrief(session_id: str) -> dict[str, Any]:
+        _check_practice_not_debriefing(runtime, session_id, "generate_debrief")
+        async with runtime.practice_lock(session_id):
+            session = await asyncio.to_thread(runtime.practice_store.get, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="Practice session not found.")
+            _require_practice_event(runtime, session, "generate_debrief")
+            if session.phase == PracticePhase.COMPLETED.value and session.debrief is not None:
+                return {
+                    "session": _serialize_practice_session(runtime, session),
+                    "debrief": session.debrief,
+                }
+            questions_snapshot = [
+                {**q.model_dump(), "status": "completed" if q.status == "active" else q.status}
+                for q in session.questions
+            ]
+            runtime.practice_debrief_jobs[session.id] = AsyncJobState.RUNNING
+            try:
+                try:
+                    debrief = await runtime.llm.generate_practice_debrief(
+                        role_title=session.role_title,
+                        company=session.company,
+                        interview_type=session.config.interview_type,
+                        target_level=session.config.target_level,
+                        questions=questions_snapshot,
+                        turns=[t.model_dump() for t in session.turns],
+                        workspace_context=session.workspace_context or None,
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Could not generate coaching debrief right now: {exc}",
+                    ) from exc
+                for q in session.questions:
+                    if q.status == "active":
+                        q.status = "completed"
+                session.debrief = debrief
+                session.phase = PracticePhase.COMPLETED.value
+                session.live_nudge = None
+                await AddonManager._await_uninterruptible(
+                    asyncio.to_thread(runtime.practice_store.save, session)
+                )
+            finally:
+                runtime.practice_debrief_jobs.pop(session.id, None)
+
+            return {
+                "session": _serialize_practice_session(runtime, session),
+                "debrief": debrief,
+            }
+
+    @app.post("/api/practice/{session_id}/retry")
+    async def submit_practice_retry(session_id: str, body: PracticeRetryRequest) -> dict[str, Any]:
+        retry_text = (body.answer_text or "").strip()
+        if not retry_text:
+            raise HTTPException(status_code=400, detail="Retry answer cannot be empty.")
+        if len(retry_text) > MAX_PRACTICE_TURN_CHARS:
+            raise HTTPException(status_code=413, detail="Retry answer exceeds maximum allowed length.")
+        _check_practice_not_debriefing(runtime, session_id, "submit_retry")
+
+        async with runtime.practice_lock(session_id):
+            session = await asyncio.to_thread(runtime.practice_store.get, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="Practice session not found.")
+            _require_practice_event(runtime, session, "submit_retry")
+
+            drill = session.debrief.get("retry_drill") if isinstance(session.debrief, dict) else {}
+            if not isinstance(drill, dict):
+                drill = {}
+
+            if body.question_id is not None and body.question_id.strip():
+                target_q = next((q for q in session.questions if q.id == body.question_id.strip()), None)
+                if target_q is None:
+                    raise HTTPException(status_code=400, detail="Unknown question_id for this practice session.")
+            else:
+                q_id = drill.get("question_id") or (session.questions[0].id if session.questions else None)
+                target_q = next((q for q in session.questions if q.id == q_id), None) or (
+                    session.questions[0] if session.questions else None
+                )
+
+            drill_focus = body.focus.strip() or str(drill.get("focus") or "Strengthen CARL clarity & impact")
+            drill_prompt = str(drill.get("prompt") or (target_q.prompt if target_q else "Re-deliver your sharpest 45-second answer."))
+
+            orig_answers = [
+                t.text
+                for t in session.turns
+                if t.role == "candidate" and not t.is_retry and (not target_q or t.question_id == target_q.id)
+            ]
+            original_answer = "\n\n".join(orig_answers) or "No prior answer recorded."
+
+            try:
+                feedback = await runtime.llm.evaluate_practice_retry(
+                    role_title=session.role_title,
+                    target_level=session.config.target_level,
+                    drill_focus=drill_focus,
+                    drill_prompt=drill_prompt,
+                    original_answer=original_answer,
+                    retry_answer=retry_text,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Could not evaluate retry right now: {exc}",
+                ) from exc
+
+            retry_turn = PracticeTurn(
+                role="candidate",
+                question_id=target_q.id if target_q else None,
+                text=retry_text,
+                is_retry=True,
+                carl_signals=feedback.get("carl_after") if isinstance(feedback.get("carl_after"), dict) else None,
+            )
+            session.turns.append(retry_turn)
+            session.retry_history.append(
+                {
+                    "id": short_id("retry"),
+                    "question_id": target_q.id if target_q else None,
+                    "focus": drill_focus,
+                    "prompt": drill_prompt,
+                    "candidate_answer": retry_text,
+                    "feedback": feedback,
+                    "timestamp_ms": int(time.time() * 1000),
+                }
+            )
+            await asyncio.to_thread(runtime.practice_store.save, session)
+            return {
+                "session": _serialize_practice_session(runtime, session),
+                "feedback": feedback,
+            }
+
+    @app.get("/api/practice/{session_id}/markdown")
+    async def export_practice_markdown(session_id: str) -> PlainTextResponse:
+        if not PRACTICE_SESSION_ID_RE.match(session_id or ""):
+            raise HTTPException(status_code=404, detail="Practice session not found.")
+        session = await asyncio.to_thread(runtime.practice_store.get, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Practice session not found.")
+        safe_id = re.sub(r"[^A-Za-z0-9_\-]", "_", session.id)
+        return PlainTextResponse(
+            content=session.to_markdown(),
+            headers={"Content-Disposition": f'attachment; filename="{safe_id}_practice.md"'},
+        )
 
     @app.get("/api/providers/discover")
     async def discover_providers() -> dict[str, Any]:
@@ -1036,6 +2308,51 @@ def create_app(
             await final_seg_queue.put(None)
             await seg_worker_task
 
+    @app.get("/static/js_sandbox_worker.js")
+    async def serve_js_sandbox_worker() -> FileResponse:
+        worker_path = STATIC_DIR / "js_sandbox_worker.js"
+        if not worker_path.is_file():
+            raise HTTPException(status_code=404, detail="JS sandbox worker not found.")
+        return FileResponse(
+            path=worker_path,
+            media_type="application/javascript; charset=utf-8",
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    "script-src 'unsafe-eval'; "
+                    "connect-src 'none'; "
+                    "worker-src 'none'; "
+                    "child-src 'none';"
+                ),
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/static/py_sandbox_worker.js")
+    async def serve_py_sandbox_worker(request: Request) -> FileResponse:
+        worker_path = STATIC_DIR / "py_sandbox_worker.js"
+        if not worker_path.is_file():
+            raise HTTPException(status_code=404, detail="Python sandbox worker not found.")
+        scheme = "https" if request.url.scheme == "https" else "http"
+        netloc = re.sub(r"[^A-Za-z0-9._:\[\]-]", "", request.url.netloc or "")
+        pyodide_prefix = f"{scheme}://{netloc}/api/addons/pyodide/" if netloc else "'none'"
+        return FileResponse(
+            path=worker_path,
+            media_type="application/javascript; charset=utf-8",
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    f"script-src {pyodide_prefix} 'unsafe-eval' 'wasm-unsafe-eval'; "
+                    f"connect-src {pyodide_prefix}; "
+                    "worker-src 'none'; "
+                    "child-src 'none';"
+                ),
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -1514,3 +2831,59 @@ def _serialize_session_obj(runtime: AppRuntime, session: InterviewSession) -> di
         "invariant_violations": violations,
     }
     return data
+
+
+def _serialize_practice_session(
+    runtime: SessionRuntime,
+    session: PracticeSession,
+) -> dict[str, Any]:
+    """Serialize a PracticeSession with its canonical derived phase, allowed events, and invariants."""
+    debrief_job = runtime.practice_debrief_jobs.get(session.id, AsyncJobState.IDLE)
+    sm = serialize_practice_state_machines(session, debrief_job=debrief_job)
+    data = session.model_dump()
+    data["phase"] = sm["practice"]["phase"]
+    data["state_machines"] = sm
+    return data
+
+
+def _check_practice_not_debriefing(
+    runtime: SessionRuntime,
+    session_id: str,
+    event: str,
+) -> None:
+    """Fail fast with structured 409 transition_rejected if a debrief is actively running."""
+    if not PRACTICE_SESSION_ID_RE.match(session_id or ""):
+        raise HTTPException(status_code=404, detail="Practice session not found.")
+    if runtime.practice_debrief_jobs.get(session_id) == AsyncJobState.RUNNING:
+        err = InvalidStateTransitionError(
+            machine="practice_phase",
+            current_state=PracticePhase.DEBRIEFING.value,
+            event=event,
+            allowed_events=[],
+            remediation="Wait for the CARL Debrief to finish generating.",
+        )
+        raise HTTPException(status_code=409, detail=err.to_dict())
+
+
+def _require_practice_event(
+    runtime: SessionRuntime,
+    session: PracticeSession,
+    event: str,
+) -> PracticePhase:
+    """Enforce PracticePhase transition rules and raise structured 409 transition_rejected when blocked."""
+    debrief_job = runtime.practice_debrief_jobs.get(session.id, AsyncJobState.IDLE)
+    phase = derive_practice_phase(session, debrief_job=debrief_job)
+    allowed, blocked = compute_allowed_practice_events(session, phase=phase)
+    if event not in allowed:
+        err = InvalidStateTransitionError(
+            machine="practice_phase",
+            current_state=phase.value,
+            event=event,
+            allowed_events=allowed,
+            remediation=blocked.get(
+                event,
+                f"Event '{event}' is not permitted in state '{phase.value}'.",
+            ),
+        )
+        raise HTTPException(status_code=409, detail=err.to_dict())
+    return phase

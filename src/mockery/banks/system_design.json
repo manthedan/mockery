@@ -1,0 +1,269 @@
+{
+  "pack_id": "system_design_core",
+  "title": "System Design Playbooks",
+  "category": "system_design",
+  "version": "1.0",
+  "description": "Structured system design prompts with interviewer playbooks, deep-dive angles, and JD tailoring hooks.",
+  "questions": [
+    {
+      "id": "sd_ai_stream_01",
+      "competency": "AI & Full-Stack Platform",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Streaming AI Assistant & Multi-Turn Workspace",
+      "prompt": "Design a consumer and enterprise web workspace for a streaming AI assistant (like Claude.ai) that supports long-running tool calls, artifact previews, multi-device sync, and conversation branching.",
+      "playbook": {
+        "core_requirements": [
+          "Low-latency token streaming (SSE/WebSocket) with graceful reconnect and partial-response resumption",
+          "Conversation tree / branching history stored cleanly across devices",
+          "Safe sandboxed rendering of generated artifacts & concurrent tool invocations",
+          "Per-tenant rate limits, quota accounting, and zero-data-retention enterprise tiers"
+        ],
+        "deep_dives": [
+          "Client reconnect mid-stream: how do you resume from token offset N without duplicating or losing tokens?",
+          "Backpressure & fan-out when the same conversation is open in two tabs or shared in an org",
+          "Context assembly latency when attaching large files, MCP connectors, and organizational memory"
+        ],
+        "level_extensions": {
+          "L4": "Clean end-to-end client/API/DB flow, SSE streaming lifecycle, basic auth and pagination.",
+          "L5": "Resumable stream buffers (e.g. Redis Streams), idempotent message writes, sandbox isolation, latency budgets.",
+          "L6": "Multi-region inference routing, KV-cache affinity, enterprise compliance isolation (FedRAMP/ZDR), graceful degradation."
+        }
+      },
+      "jd_tags": ["full-stack", "react", "typescript", "ai", "llm", "streaming", "enterprise", "developer experience"]
+    },
+    {
+      "id": "sd_collab_01",
+      "competency": "Real-Time Collaborative Systems",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Real-Time Collaborative Document & Commenting Studio",
+      "prompt": "Design a real-time collaborative editor (like Notion or Google Docs) supporting live cursors, offline edits that sync on reconnect, inline comments, and version history.",
+      "playbook": {
+        "core_requirements": [
+          "Sub-100ms local typing feel with optimistic UI updates",
+          "Conflict resolution across concurrent editors (CRDT vs. OT trade-offs)",
+          "Presence indicators (cursors/selections) separated from durable document mutations",
+          "Snapshotting & compaction so opening a 2-year-old doc is fast"
+        ],
+        "deep_dives": [
+          "CRDT (Yjs/Automerge) vs. central OT server: memory overhead, undo semantics, and schema migrations",
+          "Sticky WebSocket routing to document rooms & clean failover when a room host dies",
+          "Anchoring inline comments when surrounding text is edited or deleted"
+        ],
+        "level_extensions": {
+          "L4": "Clear WebSocket room model, persistence of ops + periodic snapshots, simple presence.",
+          "L5": "CRDT vs OT trade-off mastery, offline merge recovery, permission revocation mid-session.",
+          "L6": "Cross-region active-active docs, huge document sharding, enterprise audit logs & e-discovery."
+        }
+      },
+      "jd_tags": ["full-stack", "frontend", "react", "typescript", "websocket", "collaboration", "crdt"]
+    },
+    {
+      "id": "sd_ext_mcp_01",
+      "competency": "Extensibility & Developer Platform",
+      "levels": ["L5", "L6"],
+      "title": "Enterprise Connector & Plugin Execution Platform",
+      "prompt": "Design an extensibility platform that lets enterprise admins install third-party plugins and MCP connectors, grant fine-grained per-user OAuth permissions, and safely execute external tool calls during live workflows.",
+      "playbook": {
+        "core_requirements": [
+          "Connector registry, versioning, and admin approval workflows",
+          "Per-user delegated OAuth token vault with refresh and revocation",
+          "Sandboxed execution / egress policies, timeouts, retries, and circuit breakers for flaky third-party APIs",
+          "Full audit trail and observability dashboard for enterprise admins"
+        ],
+        "deep_dives": [
+          "Preventing confused-deputy / SSRF / prompt-injection-triggered data exfiltration across connectors",
+          "Handling slow or stalled external tools without exhausting worker pools",
+          "Token refresh storms and least-privilege scope scoping per workspace/team"
+        ],
+        "level_extensions": {
+          "L4": "Registry CRUD, OAuth token storage, async tool invocation with timeouts.",
+          "L5": "Security boundaries, circuit breaking, idempotency, admin RBAC & audit logging.",
+          "L6": "Zero-trust tenant isolation, customer-managed encryption keys, multi-cloud private link egress."
+        }
+      },
+      "jd_tags": ["enterprise", "platform", "mcp", "plugins", "security", "oauth", "developer experience", "full-stack"]
+    },
+    {
+      "id": "sd_rbac_01",
+      "competency": "Enterprise Foundations",
+      "levels": ["L5", "L6"],
+      "title": "Multi-Tenant Identity, Permissions & Admin Analytics",
+      "prompt": "Design an enterprise authorization and admin observability system (similar to Google Zanzibar / Fine-Grained RBAC + Usage Analytics) serving multiple products across an organization.",
+      "playbook": {
+        "core_requirements": [
+          "Low-latency permission checks (<10ms p99) across orgs, workspaces, groups, and individual resources",
+          "SSO/SCIM provisioning and near-immediate access revocation",
+          "Real-time + historical admin analytics (seat utilization, token spend, audit export)",
+          "Consistent policy enforcement across web app, API, and CLI surfaces"
+        ],
+        "deep_dives": [
+          "Cache invalidation vs. staleness bounds when a user is removed from a sensitive group",
+          "Avoiding N+1 permission checks on list/search endpoints",
+          "Separating transactional auth writes from OLAP analytics pipelines"
+        ],
+        "level_extensions": {
+          "L4": "Clean relational RBAC schema, JWT/session strategy, basic event ingestion for analytics.",
+          "L5": "Graph/ReBAC modeling, cache consistency (zookies/version tokens), list filtering at scale.",
+          "L6": "Cross-product policy federation, strict compliance/SOC2/FedRAMP auditability, zero-downtime policy rollouts."
+        }
+      },
+      "jd_tags": ["enterprise", "identity", "permissions", "security", "analytics", "backend", "full-stack"]
+    },
+    {
+      "id": "sd_ratelimit_01",
+      "competency": "Distributed Systems & API Platform",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Distributed API Gateway, Rate Limiter & Token Quota System",
+      "prompt": "Design a globally distributed API gateway and rate-limiting service for a high-throughput developer API that enforces both requests-per-minute and streaming token-per-minute quotas.",
+      "playbook": {
+        "core_requirements": [
+          "Sub-5ms gateway overhead on the hot path",
+          "Support both pre-flight RPM limits and post-response token/cost accounting",
+          "Accurate burst handling without race conditions across concurrent workers",
+          "Graceful fail-open/fail-closed behavior if the rate-limit store degrades"
+        ],
+        "deep_dives": [
+          "Token bucket / sliding window atomic updates in Redis Lua vs. local leaky-bucket leasing",
+          "Handling streaming responses where final token count isn't known until stream completion",
+          "Multi-region quota synchronization and noisy-neighbor isolation"
+        ],
+        "level_extensions": {
+          "L4": "Single-region Redis token bucket, clear HTTP 429 headers and retry semantics.",
+          "L5": "Local quota leases to cut Redis RTT, reserve-then-reconcile for streaming tokens, failover policy.",
+          "L6": "Global hierarchical quotas (org -> workspace -> key), hot-key sharding, billing ledger reconciliation."
+        }
+      },
+      "jd_tags": ["backend", "api", "distributed", "platform", "developer experience", "scale"]
+    },
+    {
+      "id": "sd_context_rag_01",
+      "competency": "Search & Knowledge Retrieval",
+      "levels": ["L5", "L6"],
+      "title": "Permission-Aware Enterprise Knowledge Search & Memory",
+      "prompt": "Design an enterprise retrieval layer that indexes documents from Slack, Drive, GitHub, and Notion, stays fresh within minutes, and strictly respects each user's source permissions at query time.",
+      "playbook": {
+        "core_requirements": [
+          "Incremental connector ingestion (webhooks + polling fallback) and chunking pipeline",
+          "Hybrid retrieval (lexical BM25 + dense embeddings + reranking)",
+          "Strict ACL enforcement so users never see snippets from docs they lost access to",
+          "Citation provenance linking retrieved snippets back to exact source versions"
+        ],
+        "deep_dives": [
+          "Pre-filtering vs. post-filtering ACLs in vector search (and what breaks with large group memberships)",
+          "Handling deletions and permission revocations within strict SLAs",
+          "Evaluating retrieval quality offline and online (recall@k, latency vs. accuracy)"
+        ],
+        "level_extensions": {
+          "L4": "Ingestion queue, chunker/embedder workers, vector + keyword search with basic ACL check.",
+          "L5": "ACL sync & pre-filter indexing, incremental re-indexing, hybrid score fusion, freshness SLAs.",
+          "L6": "Multi-tenant index isolation, per-tenant encryption, staleness bounds, continuous eval feedback loop."
+        }
+      },
+      "jd_tags": ["enterprise", "search", "retrieval", "context", "ai", "backend", "full-stack"]
+    },
+    {
+      "id": "sd_obs_01",
+      "competency": "Observability & Developer Tools",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Developer Observability, Trace Explorer & Prompt Evals UI",
+      "prompt": "Design a developer observability console that ingests high-volume request/agent traces, renders interactive waterfall timelines in the browser, and lets teams run side-by-side evaluations.",
+      "playbook": {
+        "core_requirements": [
+          "High-throughput async ingestion API that never slows down customer production traffic",
+          "Fast faceted search & waterfall visualization over nested multi-step traces",
+          "PII scrubbing and configurable retention policies",
+          "Dataset curation + batch evaluation runner with diff UI"
+        ],
+        "deep_dives": [
+          "Storage layout (ClickHouse/columnar + object storage for large payloads) and hot/cold tiering",
+          "Virtualizing massive trace trees and streaming live logs in a React frontend",
+          "Tail-based sampling vs. full capture for error traces"
+        ],
+        "level_extensions": {
+          "L4": "Buffered ingestion -> queue -> columnar store, clean React waterfall UI with pagination.",
+          "L5": "Payload offloading to blob store, tail sampling, virtualized UI performance, eval job orchestration.",
+          "L6": "Multi-tenant ingestion isolation, cost-controlled retention, real-time anomaly alerting."
+        }
+      },
+      "jd_tags": ["developer experience", "observability", "frontend", "react", "full-stack", "analytics"]
+    },
+    {
+      "id": "sd_feed_01",
+      "competency": "Consumer Scale & Data Flows",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Real-Time Notification & Activity Feed System",
+      "prompt": "Design a multi-channel notification and activity feed system (in-app, email, push, Slack) with user preferences, deduplication, digest batching, and read-state sync across devices.",
+      "playbook": {
+        "core_requirements": [
+          "Fan-out delivery across multiple channels with per-user quiet hours and preferences",
+          "Idempotent event ingestion and smart collapsing ('Alex and 4 others commented')",
+          "Real-time badge count and read-state sync across mobile + web",
+          "Delivery tracking, retries with exponential backoff, and dead-letter handling"
+        ],
+        "deep_dives": [
+          "Fan-out-on-write vs. fan-out-on-read for high-follower or org-wide broadcasts",
+          "Exactly-once user perception via idempotency keys & deduplication windows",
+          "Scheduling delayed digests cleanly without thundering herds at 9:00 AM"
+        ],
+        "level_extensions": {
+          "L4": "Event queue, preference lookup, channel workers, cursor-paginated feed API.",
+          "L5": "Hybrid fan-out, grouping/collapsing pipeline, provider fallback & backpressure.",
+          "L6": "Global priority lanes (OTP vs marketing), delivery SLOs, multi-region active-active read state."
+        }
+      },
+      "jd_tags": ["full-stack", "backend", "consumer", "growth", "scale", "distributed"]
+    },
+    {
+      "id": "sd_growth_exp_01",
+      "competency": "Growth & Experimentation",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Feature Flagging & Live A/B Experimentation Platform",
+      "prompt": "Design a feature-flag and live experimentation platform used by web, mobile, and backend services to safely ramp launches, run A/B tests, and auto-rollback regressions.",
+      "playbook": {
+        "core_requirements": [
+          "Zero-network-hop (<1ms) local flag evaluation in SDKs with deterministic bucketing",
+          "Instant global propagation (<5s) for emergency kill switches",
+          "Exposure logging joined cleanly with product/revenue metrics without sample ratio mismatch",
+          "Mutual exclusion groups and guardrails for automated rollback"
+        ],
+        "deep_dives": [
+          "Consistent hashing (user_id + experiment_salt) so changing rollout % doesn't flip existing users",
+          "Preventing flicker on SSR/React hydration when assigning client-side experiments",
+          "Streaming rule-config updates via SSE/CDN edge caches at millions of connected clients"
+        ],
+        "level_extensions": {
+          "L4": "Rule schema, deterministic hash bucketing, CDN-cached SDK config + exposure events.",
+          "L5": "SSE/delta sync, SSR hydration consistency, SRM detection, staged rollout guardrails.",
+          "L6": "Cross-layer experiment isolation, sequential testing stats pipeline, enterprise RBAC on kill switches."
+        }
+      },
+      "jd_tags": ["growth", "full-stack", "react", "typescript", "experimentation", "analytics"]
+    },
+    {
+      "id": "sd_jobs_01",
+      "competency": "Workflow & Async Orchestration",
+      "levels": ["L4", "L5", "L6"],
+      "title": "Durable Long-Running Agent & Background Workflow Engine",
+      "prompt": "Design a durable workflow execution engine that runs multi-step background jobs (including human-in-the-loop approvals and external API calls) that can pause for hours and resume cleanly after crashes.",
+      "playbook": {
+        "core_requirements": [
+          "Step-level checkpointing so completed side effects aren't re-executed on crash recovery",
+          "Pause/resume for human approvals, timers, and webhook callbacks",
+          "Per-tenant concurrency limits and fair scheduling across noisy tenants",
+          "Live status streaming and cancellation propagation into running steps"
+        ],
+        "deep_dives": [
+          "State-machine / event-sourced log vs. relational workflow table with lease locking",
+          "Handling zombie workers via heartbeats, fencing tokens, and idempotency keys",
+          "Fair queuing across tenants when one customer submits 100k workflows"
+        ],
+        "level_extensions": {
+          "L4": "DB-backed job state machine, worker polling with visibility timeouts, retries.",
+          "L5": "Checkpointed step ledger, fencing tokens, tenant fair queuing, live progress UI.",
+          "L6": "Workflow code versioning for in-flight runs, multi-region failover, deterministic replay."
+        }
+      },
+      "jd_tags": ["backend", "agents", "workflow", "distributed", "platform", "full-stack"]
+    }
+  ]
+}

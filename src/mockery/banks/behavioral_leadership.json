@@ -1,0 +1,230 @@
+{
+  "pack_id": "behavioral_leadership_core",
+  "title": "Behavioral & Leadership Core",
+  "category": "behavioral",
+  "version": "1.0",
+  "description": "Curated behavioral and engineering leadership prompts tagged by competency and level, with CARL coaching hooks.",
+  "questions": [
+    {
+      "id": "beh_own_01",
+      "competency": "Ownership & 0-to-1",
+      "levels": ["L4", "L5", "L6"],
+      "prompt": "Tell me about a time you took an ambiguous problem from 0 to 1 where nobody had defined the roadmap yet.",
+      "follow_ups": [
+        "What assumptions did you validate first, and which ones turned out to be wrong?",
+        "Where did you cut scope to ship something real instead of over-building?",
+        "What would you design differently if you started that project over today?"
+      ],
+      "carl_focus": "Make your personal framing in Context crisp, highlight concrete trade-offs in Action, and close with a genuine Learning you now reuse."
+    },
+    {
+      "id": "beh_own_02",
+      "competency": "Ownership & 0-to-1",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Describe a project where you spotted a structural problem outside your immediate scope and decided to own fixing it.",
+      "follow_ups": [
+        "How did you earn buy-in from the team that originally owned that system?",
+        "What did you have to deprioritize or negotiate to make time for it?"
+      ],
+      "carl_focus": "Explain why you intervened rather than escalating, and show how the fix stuck after you moved on."
+    },
+    {
+      "id": "beh_inf_01",
+      "competency": "Influence Without Authority",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Tell me about a time you had to drive cross-team alignment on a technical direction when partner teams had competing priorities.",
+      "follow_ups": [
+        "What was the strongest objection from the skeptical team, and how did you address it?",
+        "Did you change part of your proposal based on their feedback?"
+      ],
+      "carl_focus": "Show empathy for the other team's constraints before explaining how you built shared alignment."
+    },
+    {
+      "id": "beh_inf_02",
+      "competency": "Influence Without Authority",
+      "levels": ["L4", "L5", "L6"],
+      "prompt": "Describe a time you convinced engineering leadership or product partners to change course based on data or a prototype.",
+      "follow_ups": [
+        "What made the evidence compelling enough to shift a committed plan?",
+        "What was the cost of switching late, and how did you de-risk it?"
+      ],
+      "carl_focus": "Pair the prototype/data moment with the concrete business or user outcome in Result."
+    },
+    {
+      "id": "beh_conf_01",
+      "competency": "Conflict & Pushback",
+      "levels": ["L4", "L5", "L6", "EM"],
+      "prompt": "Tell me about a strong technical disagreement you had with a peer or senior engineer. How did you work through it?",
+      "follow_ups": [
+        "Looking back, what parts of their argument were actually right?",
+        "How did the working relationship feel after the decision landed?"
+      ],
+      "carl_focus": "Avoid villainizing the other person — great answers highlight curiosity, principled criteria, and commit-or-disagree maturity."
+    },
+    {
+      "id": "beh_conf_02",
+      "competency": "Conflict & Pushback",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Tell me about a time you pushed back on a product requirement or aggressive deadline because of quality, safety, or reliability concerns.",
+      "follow_ups": [
+        "What alternative path did you propose instead of just saying no?",
+        "How did you frame the engineering risk in terms product stakeholders cared about?"
+      ],
+      "carl_focus": "Highlight how you offered concrete options and trade-offs rather than a flat veto."
+    },
+    {
+      "id": "beh_fail_01",
+      "competency": "Failure & Recovery",
+      "levels": ["L4", "L5", "L6", "EM"],
+      "prompt": "Walk me through a meaningful technical mistake or launch incident you caused or owned. What happened and what changed afterward?",
+      "follow_ups": [
+        "What was the earliest warning sign you missed in hindsight?",
+        "What systemic safeguard did you put in place so a teammate couldn't hit the same trap?"
+      ],
+      "carl_focus": "Own the mistake directly without deflecting, then spend half your answer on the systemic Learning."
+    },
+    {
+      "id": "beh_fail_02",
+      "competency": "Failure & Recovery",
+      "levels": ["L5", "L6"],
+      "prompt": "Tell me about a feature or architecture you invested significant time into that didn't pan out the way you hoped.",
+      "follow_ups": [
+        "How did you recognize it was time to pivot or sunset it instead of sinking more cost?",
+        "How did you communicate that call to stakeholders?"
+      ],
+      "carl_focus": "Show intellectual honesty and a clear lesson that changed how you scope future bets."
+    },
+    {
+      "id": "beh_amb_01",
+      "competency": "Navigating Ambiguity",
+      "levels": ["L4", "L5", "L6"],
+      "prompt": "Describe a time requirements or priorities shifted mid-project. How did you adapt without losing momentum or quality?",
+      "follow_ups": [
+        "How did you protect the team from thrash while re-scoping?",
+        "Which architectural decisions turned out to make the pivot easier or harder?"
+      ],
+      "carl_focus": "Explain the decision framework you used under uncertainty, not just the timeline of events."
+    },
+    {
+      "id": "beh_amb_02",
+      "competency": "Navigating Ambiguity",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Tell me about a time you had to make an important technical call with incomplete information and tight time pressure.",
+      "follow_ups": [
+        "How did you distinguish reversible decisions from irreversible ones?",
+        "What monitoring or escape hatches did you build in case the bet was wrong?"
+      ],
+      "carl_focus": "Emphasize how you bounded risk and what signal told you the call was working."
+    },
+    {
+      "id": "beh_craft_01",
+      "competency": "Engineering Standards & Craft",
+      "levels": ["L5", "L6"],
+      "prompt": "Tell me about a time you raised the bar on code quality, architecture, or developer experience across your team.",
+      "follow_ups": [
+        "How did you get engineers to adopt the standard willingly rather than seeing it as bureaucracy?",
+        "How did you measure whether it actually sped people up or reduced bugs?"
+      ],
+      "carl_focus": "Ground your standard in a real pain point and show measurable or observable adoption."
+    },
+    {
+      "id": "beh_craft_02",
+      "competency": "Engineering Standards & Craft",
+      "levels": ["L4", "L5", "L6"],
+      "prompt": "Describe a complex performance, reliability, or debugging investigation where the root cause surprised you.",
+      "follow_ups": [
+        "What dead ends did you rule out along the way, and what instrumentation unlocked the answer?",
+        "How did you prevent regressions after fixing it?"
+      ],
+      "carl_focus": "Walk cleanly through your hypothesis-testing loop so the interviewer sees structured engineering judgment."
+    },
+    {
+      "id": "beh_prod_01",
+      "competency": "Product & User Thinking",
+      "levels": ["L4", "L5", "L6"],
+      "prompt": "Tell me about a time you worked directly with users, customers, or designers to reshape a feature in a way that materially improved the product.",
+      "follow_ups": [
+        "What user insight would you have missed if you had only built from the spec?",
+        "How did you balance polish and accessibility with shipping speed?"
+      ],
+      "carl_focus": "Connect the user empathy directly to the engineering changes you made and the behavioral shift in Result."
+    },
+    {
+      "id": "beh_prod_02",
+      "competency": "Product & User Thinking",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Describe a time you simplified a complex product or technical workflow instead of adding another knob or feature.",
+      "follow_ups": [
+        "What resistance did you face when proposing to remove or hide complexity?",
+        "How did you verify power users weren't hurt by the simplification?"
+      ],
+      "carl_focus": "Show taste and judgment: why subtraction beat addition, and what changed for users afterward."
+    },
+    {
+      "id": "beh_ment_01",
+      "competency": "Mentorship & Team Multiplication",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Tell me about a time you mentored or unblocked a teammate who was struggling on a high-stakes deliverable.",
+      "follow_ups": [
+        "How did you avoid just taking over the keyboard yourself?",
+        "What habits or skills did they carry forward into future projects?"
+      ],
+      "carl_focus": "Show coaching craft — how you diagnosed the gap and helped them grow rather than hero-fixing."
+    },
+    {
+      "id": "beh_ment_02",
+      "competency": "Mentorship & Team Multiplication",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Describe how you've given difficult, constructive feedback to a peer or collaborator. How did you approach it?",
+      "follow_ups": [
+        "How did you prepare so the feedback felt specific and supportive rather than personal?",
+        "What changed after that conversation?"
+      ],
+      "carl_focus": "Highlight care, specificity, and observable follow-through."
+    },
+    {
+      "id": "beh_exec_01",
+      "competency": "Execution & Delivery",
+      "levels": ["L4", "L5", "L6"],
+      "prompt": "Tell me about the most technically complex full-stack or multi-system launch you led end to end.",
+      "follow_ups": [
+        "Which integration boundary carried the highest risk, and how did you test it safely?",
+        "How did you stage the rollout and decide when it was safe to ramp to 100%?"
+      ],
+      "carl_focus": "Keep Context to 30 seconds so you have room for the hardest Action decisions and real launch Result."
+    },
+    {
+      "id": "beh_exec_02",
+      "competency": "Execution & Delivery",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Tell me about a time you intentionally took on technical debt to hit a critical milestone — and how you managed paying it down later.",
+      "follow_ups": [
+        "How did you isolate the shortcut so it wouldn't spread across the codebase?",
+        "Did you actually pay it back, or did it turn out not to matter?"
+      ],
+      "carl_focus": "Great pragmatic answers show deliberate boundaries and honest hindsight in Learning."
+    },
+    {
+      "id": "beh_lead_01",
+      "competency": "Technical Vision & Strategy",
+      "levels": ["L6", "EM"],
+      "prompt": "Describe a multi-quarter technical strategy or platform migration you conceived and drove across multiple teams.",
+      "follow_ups": [
+        "How did you sequence early wins so teams saw value before the full migration finished?",
+        "What parts of the original vision did you have to revise halfway through?"
+      ],
+      "carl_focus": "Explain the thesis, sequencing strategy, and org-level adoption metrics clearly."
+    },
+    {
+      "id": "beh_lead_02",
+      "competency": "Technical Vision & Strategy",
+      "levels": ["L5", "L6", "EM"],
+      "prompt": "Tell me about a time you evaluated a new technology or AI capability and turned it into a practical, reliable product experience.",
+      "follow_ups": [
+        "How did you handle non-determinism, latency, or failure modes so users could trust it?",
+        "How did you evaluate quality before and after shipping?"
+      ],
+      "carl_focus": "Highlight evaluation rigor, UX guardrails, and what you learned about real-world reliability."
+    }
+  ]
+}

@@ -9,8 +9,13 @@ wheels/
 # Virtual environments
 .venv
 
-# Local config & saved transcripts
+# Local config, saved transcripts & offline GEPA run outputs
 .env
 .env.local
 sessions/
+models/
+practice/
+profiles/
+addons.json
+evals/runs/
 .DS_Store
