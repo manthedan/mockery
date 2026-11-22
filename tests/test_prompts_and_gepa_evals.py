@@ -504,6 +504,7 @@ def test_runtime_task_settings_endpoint_key_isolation_and_error_sanitization() -
         "suggest_probes": 0.35,
         "practice_retry_eval": 0.35,
         "practice_hint": 0.4,
+        "practice_debrief": 0.35,
     }
     assert compute_max_tokens("triage_window", {"incoming_utterances": [{}]}) == 450
     assert compute_max_tokens("triage_window", {"incoming_utterances": [{}, {}, {}]}) == 660
@@ -732,3 +733,80 @@ def test_gepa_cli_transport_parsing_preflight_and_runners(
     assert reflect_fn([{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]) == '{"ok": true}'
     assert seen[-1]["system"] == "S"
     assert seen[-1]["user"] == "U"
+
+
+def test_practice_debrief_dataset_and_scorer() -> None:
+    from evals.metrics import score_practice_debrief
+
+    rows = load_jsonl_dataset(DATASETS_DIR / "practice_debrief.jsonl")
+    validate_dataset("practice_debrief", rows)
+    train, val = split_dataset(rows)
+    assert len(train) >= 6
+    assert len(val) >= 4
+
+    ex = rows[0]
+    assert render_system_prompt_for_example("practice_debrief", ex).strip()
+    assert build_user_prompt_for_example("practice_debrief", ex).strip()
+    assert compute_max_tokens("practice_debrief", ex) == 1600
+    assert TARGET_TEMPERATURES["practice_debrief"] == 0.35
+
+    good_json = json.dumps(
+        {
+            "overall_encouragement": "Strong ownership on your webhook outage story, and a crisp start on cross-team trade-offs.",
+            "top_strengths": [
+                "Led incident command and isolated the poison-pill partner into a dead-letter shard within 28 minutes.",
+                "Followed up with an automated canary check that prevented repeat certificate outages.",
+            ],
+            "carl_primer": "CARL turns strong engineering work into unmistakable L5 ownership by naming measurable impact and lasting takeaways.",
+            "question_reviews": [
+                {
+                    "question_id": "q_01",
+                    "title": "Production Outage Mitigation",
+                    "prompt": "Tell me about a high-severity production outage you owned end to end.",
+                    "carl": {"context": "strong", "action": "strong", "result": "strong", "learning": "strong"},
+                    "strength": "Clear metrics on the 1.8M backlog, 28-minute hotfix, and proactive canary check.",
+                    "coaching_tip": "Highlight how you coordinated updates with support during the drain.",
+                    "carl_reframe": "Context: 1.8M backed-up webhooks. Action: isolated dead-letter shard and shipped jitter fix. Result: drained in 28 minutes with zero lost orders and added cert canaries.",
+                },
+                {
+                    "question_id": "q_02",
+                    "title": "Cross-Team API Disagreement",
+                    "prompt": "Tell me about a time you disagreed with another team on a technical approach.",
+                    "carl": {"context": "strong", "action": "partial", "result": "missing", "learning": "missing"},
+                    "strength": "You framed the GraphQL vs REST caching tension concisely.",
+                    "coaching_tip": "Name the exact contract you agreed on, the latency outcome, and what changed for future API reviews.",
+                    "carl_reframe": "I met the mobile lead to benchmark REST cache hit rates against GraphQL queries, agreed on a thin BFF endpoint that kept p99 under 40ms, and documented an API decision rubric.",
+                },
+            ],
+            "retry_drill": {
+                "question_id": "q_02",
+                "focus": "Quantify Result & Add Learning (45s)",
+                "prompt": "In 45 seconds, close your GraphQL vs REST story with the concrete outcome and one team-wide lesson.",
+            },
+        }
+    )
+    score, info = score_practice_debrief(good_json, ex)
+    assert score >= 0.95, info
+
+    # Mangled question_id + inflated CARL + wrong retry_drill should drop sharply
+    bad_json = json.dumps(
+        {
+            "overall_encouragement": "Great job.",
+            "top_strengths": ["Nice answer."],
+            "carl_primer": "Use CARL.",
+            "question_reviews": [
+                {
+                    "question_id": "Q1",
+                    "title": "Outage",
+                    "prompt": "Outage",
+                    "carl": {"context": "strong", "action": "strong", "result": "strong", "learning": "strong"},
+                    "strength": "Good.",
+                    "coaching_tip": "Keep going.",
+                    "carl_reframe": "Reframe.",
+                }
+            ],
+            "retry_drill": {"question_id": "q_01", "focus": "Polish", "prompt": "Try again."},
+        }
+    )
+    bad_score, bad_info = score_practice_debrief(bad_json, ex)
+    assert bad_score < 0.55, bad_info
