@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -271,6 +272,50 @@ def _parse_agy_model_spec(model_spec: str) -> tuple[str, str | None]:
     return stripped, None
 
 
+AGY_DENY_ALL_SETTINGS = json.dumps(
+    {
+        "permissions": {
+            "deny": [
+                "command(*)",
+                "write_file(*)",
+                "read_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+                "mcp(*)",
+            ]
+        }
+    },
+    separators=(",", ":"),
+)
+
+_GEMINI_DENY_ALL_POLICY_TOML = (
+    '[[rule]]\n'
+    'name = "Deny all tools in Mockery"\n'
+    'toolName = "*"\n'
+    'decision = "deny"\n'
+    'priority = 999\n'
+    'denyMessage = "Tools are disabled in Mockery."\n'
+)
+
+_WARM_SPARE_SYSTEM_PROMPT = (
+    "You are a stateless single-turn engine. Follow the instructions inside <INSTRUCTIONS> "
+    "strictly and reply with ONLY the requested output format."
+)
+_WARM_SPARE_TTL_SEC = 180.0
+
+
+class _WarmSpareFallbackError(RuntimeError):
+    """Raised when a pre-spawned warm CLI spare dies before producing output; triggers one-shot fallback."""
+
+
+@dataclass
+class _WarmCLISpare:
+    backend: str  # "agy" | "claude"
+    model_key: tuple[str, str | None]
+    proc: asyncio.subprocess.Process
+    created_at: float
+
+
 def _cli_sandbox_cwd() -> Path:
     """
     Return an empty private working directory for one-shot CLI LLM calls so agentic CLIs
@@ -283,6 +328,18 @@ def _cli_sandbox_cwd() -> Path:
     except OSError:
         pass
     return sandbox
+
+
+def _gemini_deny_policy_path() -> Path:
+    """Materialize a 0600 deny-all Gemini CLI Policy Engine TOML inside the private CLI sandbox."""
+    policy_path = _cli_sandbox_cwd() / "gemini_deny_all_tools.toml"
+    try:
+        if not policy_path.is_file() or policy_path.read_text(encoding="utf-8") != _GEMINI_DENY_ALL_POLICY_TOML:
+            policy_path.write_text(_GEMINI_DENY_ALL_POLICY_TOML, encoding="utf-8")
+            os.chmod(policy_path, 0o600)
+    except OSError:
+        pass
+    return policy_path
 
 
 def _build_cached_user_blocks(user: str, cache_prefix_len: int) -> str | list[dict[str, Any]]:
@@ -298,11 +355,39 @@ def _build_cached_user_blocks(user: str, cache_prefix_len: int) -> str | list[di
     return user
 
 
+async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        if proc.stdin is not None and not proc.stdin.is_closing():
+            proc.stdin.close()
+    except Exception:
+        pass
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=1.5)
+    except (TimeoutError, asyncio.TimeoutError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.5)
+        except Exception:
+            pass
+
+
 class InterviewCopilotLLM:
     def __init__(self, config: LLMRuntimeConfig) -> None:
         self.config = config
         self._cached_client: AsyncOpenAI | None = None
         self._cached_client_key: tuple[str, str] | None = None
+        self._warm_spare: _WarmCLISpare | None = None
+        self._warm_spare_lock = asyncio.Lock()
+        self._warm_spare_tasks: set[asyncio.Task[Any]] = set()
 
     def _client(self) -> AsyncOpenAI:
         key = self.config.api_key.strip() or "ollama-local"
@@ -314,6 +399,7 @@ class InterviewCopilotLLM:
         return self._cached_client
 
     async def aclose(self) -> None:
+        await self.invalidate_warm_spare()
         if self._cached_client is not None:
             try:
                 await self._cached_client.close()
@@ -321,6 +407,258 @@ class InterviewCopilotLLM:
                 pass
             self._cached_client = None
             self._cached_client_key = None
+
+    @staticmethod
+    def _cli_model_key(backend: str, model: str) -> tuple[str, str | None]:
+        cleaned = re.sub(rf"^{re.escape(backend)}/", "", model.strip())
+        return _parse_agy_model_spec(cleaned)
+
+    @staticmethod
+    def _build_agy_warm_args(model_name: str, effort: str | None) -> list[str]:
+        args = [
+            "agy",
+            "--model",
+            model_name,
+            "--disable-slash-commands",
+            "--sandbox",
+            "--settings",
+            AGY_DENY_ALL_SETTINGS,
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+        ]
+        if effort:
+            args.extend(["--effort", effort])
+        return args
+
+    @staticmethod
+    def _build_claude_warm_args(model_name: str, effort: str | None) -> list[str]:
+        args = [
+            "claude",
+            "-p",
+            "--no-session-persistence",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",
+            "--disable-slash-commands",
+            "--system-prompt",
+            _WARM_SPARE_SYSTEM_PROMPT,
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ]
+        if model_name:
+            args.extend(["--model", model_name])
+        if effort:
+            args.extend(["--effort", effort])
+        return args
+
+    def prewarm_fast_model(self) -> None:
+        """
+        Best-effort pre-spawn of a single disposable warm CLI spare (`agy` or `claude`)
+        so the next interactive Practice turn or Live Copilot `D` press skips 2–7s of CLI boot.
+        """
+        backend = self.config.cli_backend
+        if backend not in ("agy", "claude") or not self.config.is_configured:
+            return
+        model = (self.config.fast_model or "").strip()
+        if not model:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._ensure_warm_spare(backend, model))
+        self._warm_spare_tasks.add(task)
+        task.add_done_callback(self._warm_spare_tasks.discard)
+
+    async def _ensure_warm_spare(self, backend: str, model: str) -> None:
+        model_key = self._cli_model_key(backend, model)
+        now = time.monotonic()
+        stale: _WarmCLISpare | None = None
+        async with self._warm_spare_lock:
+            cur = self._warm_spare
+            if cur is not None:
+                alive = cur.proc.returncode is None and (now - cur.created_at) < _WARM_SPARE_TTL_SEC
+                if alive and cur.backend == backend and cur.model_key == model_key:
+                    return
+                stale = cur
+                self._warm_spare = None
+        if stale is not None:
+            await _terminate_proc(stale.proc)
+
+        model_name, effort = model_key
+        args = (
+            self._build_agy_warm_args(model_name, effort)
+            if backend == "agy"
+            else self._build_claude_warm_args(model_name, effort)
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=str(_cli_sandbox_cwd()),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            logger.debug("Warm CLI spare pre-spawn skipped for %s: %s", backend, exc)
+            return
+
+        spare = _WarmCLISpare(
+            backend=backend,
+            model_key=model_key,
+            proc=proc,
+            created_at=time.monotonic(),
+        )
+        discard: _WarmCLISpare | None = None
+        async with self._warm_spare_lock:
+            if self._warm_spare is not None:
+                discard = spare
+            else:
+                self._warm_spare = spare
+        if discard is not None:
+            await _terminate_proc(discard.proc)
+
+    async def _pop_warm_spare(self, backend: str, model: str) -> _WarmCLISpare | None:
+        model_key = self._cli_model_key(backend, model)
+        now = time.monotonic()
+        stale: _WarmCLISpare | None = None
+        async with self._warm_spare_lock:
+            cur = self._warm_spare
+            if cur is None:
+                return None
+            alive = cur.proc.returncode is None and (now - cur.created_at) < _WARM_SPARE_TTL_SEC
+            if not alive:
+                stale = cur
+                self._warm_spare = None
+                cur = None
+            elif cur.backend == backend and cur.model_key == model_key:
+                self._warm_spare = None
+                return cur
+            else:
+                return None
+        if stale is not None:
+            await _terminate_proc(stale.proc)
+        return None
+
+    async def invalidate_warm_spare(self) -> None:
+        for t in list(self._warm_spare_tasks):
+            if not t.done():
+                t.cancel()
+        self._warm_spare_tasks.clear()
+        stale: _WarmCLISpare | None = None
+        async with self._warm_spare_lock:
+            stale = self._warm_spare
+            self._warm_spare = None
+        if stale is not None:
+            await _terminate_proc(stale.proc)
+
+    async def _run_warm_spare_turn(
+        self,
+        spare: _WarmCLISpare,
+        *,
+        combined_prompt: str,
+        timeout: float,
+        expect_json: bool,
+        on_delta: Callable[[str], Awaitable[None]] | None,
+    ) -> str:
+        """
+        Execute one single turn on a disposable pre-spawned `agy` or `claude` process,
+        then terminate/reap the process so zero state accumulates across calls.
+        """
+        proc = spare.proc
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        envelope = (
+            {"event": "user", "message": {"role": "user", "content": combined_prompt}}
+            if spare.backend == "agy"
+            else {"type": "user", "message": {"role": "user", "content": combined_prompt}}
+        )
+        wire_line = (json.dumps(envelope, ensure_ascii=False) + "\n").encode("utf-8")
+        deadline = time.monotonic() + timeout
+        streamed_chunks: list[str] = []
+        final_text: str | None = None
+        use_deltas = on_delta is not None and not expect_json
+
+        stderr_task = asyncio.create_task(proc.stderr.read())
+        try:
+            try:
+                proc.stdin.write(wire_line)
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                raise _WarmSpareFallbackError(f"{spare.backend} warm spare stdin failed: {exc}") from exc
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                line_b = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                if not line_b:
+                    break
+                line = line_b.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if spare.backend == "agy":
+                    ev_type = ev.get("event")
+                    if ev_type == "step_update":
+                        su = ev.get("step_update") or {}
+                        if su.get("step_type") == "agent_response":
+                            delta = su.get("text_delta")
+                            if isinstance(delta, str) and delta:
+                                streamed_chunks.append(delta)
+                                if use_deltas and on_delta is not None:
+                                    await on_delta(delta)
+                    elif ev_type == "result":
+                        res_obj = ev.get("result")
+                        if isinstance(res_obj, dict):
+                            status = res_obj.get("status")
+                            if status and status != "SUCCESS":
+                                raise RuntimeError(f"agy status={status}: {res_obj.get('error', '')}")
+                            final_text = str(res_obj.get("response", "")).strip()
+                        break
+                else:
+                    ev_type = ev.get("type")
+                    if ev_type == "stream_event":
+                        inner = ev.get("event") or {}
+                        if inner.get("type") == "content_block_delta":
+                            delta_obj = inner.get("delta") or {}
+                            txt = delta_obj.get("text")
+                            if isinstance(txt, str) and txt:
+                                streamed_chunks.append(txt)
+                                if use_deltas and on_delta is not None:
+                                    await on_delta(txt)
+                    elif ev_type == "result":
+                        if ev.get("is_error"):
+                            raise RuntimeError(f"claude CLI error: {str(ev.get('result', ''))[:300]}")
+                        final_text = str(ev.get("result", "")).strip()
+                        break
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"{spare.backend} warm CLI timed out after {timeout:.0f}s")
+        finally:
+            await _terminate_proc(proc)
+            try:
+                stderr_b = await asyncio.wait_for(stderr_task, timeout=1.0)
+            except Exception:
+                stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
+                stderr_b = b""
+
+        if final_text is not None and final_text:
+            return final_text
+        joined = "".join(streamed_chunks).strip()
+        if joined:
+            return joined
+        stderr = stderr_b.decode("utf-8", errors="replace").strip()
+        raise _WarmSpareFallbackError(f"{spare.backend} warm CLI returned empty response: {stderr[:300]}")
 
     async def _call_agy_cli(
         self,
@@ -339,12 +677,32 @@ class InterviewCopilotLLM:
             else "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY the requested Markdown response."
         )
         combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
+
+        spare = await self._pop_warm_spare("agy", model)
+        if spare is not None:
+            try:
+                result = await self._run_warm_spare_turn(
+                    spare,
+                    combined_prompt=combined,
+                    timeout=timeout,
+                    expect_json=expect_json,
+                    on_delta=on_delta,
+                )
+                if self._cli_model_key("agy", model) == self._cli_model_key("agy", self.config.fast_model):
+                    self.prewarm_fast_model()
+                return result
+            except _WarmSpareFallbackError as exc:
+                logger.debug("agy warm spare fallback to one-shot: %s", exc)
+
         use_stream = on_delta is not None and not expect_json
         args = [
             "agy",
             "--model",
             model_name,
             "--disable-slash-commands",
+            "--sandbox",
+            "--settings",
+            AGY_DENY_ALL_SETTINGS,
             "--output-format",
             "stream-json" if use_stream else "json",
         ]
@@ -419,6 +777,7 @@ class InterviewCopilotLLM:
             proc.kill()
             await proc.wait()
             stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
             raise TimeoutError(f"agy CLI timed out after {timeout:.0f}s")
 
         stderr = stderr_b.decode("utf-8", errors="replace").strip()
@@ -489,12 +848,34 @@ class InterviewCopilotLLM:
             else "Reply with ONLY the requested Markdown response."
         )
         sys_prompt = f"{system.strip()}\n\n{format_rule}".strip()
+
+        spare = await self._pop_warm_spare("claude", model)
+        if spare is not None:
+            combined = f"<INSTRUCTIONS>\n{sys_prompt}\n</INSTRUCTIONS>\n\n<INPUT>\n{user}\n</INPUT>"
+            try:
+                result = await self._run_warm_spare_turn(
+                    spare,
+                    combined_prompt=combined,
+                    timeout=timeout,
+                    expect_json=expect_json,
+                    on_delta=on_delta,
+                )
+                if self._cli_model_key("claude", model) == self._cli_model_key("claude", self.config.fast_model):
+                    self.prewarm_fast_model()
+                return result
+            except _WarmSpareFallbackError as exc:
+                logger.debug("claude warm spare fallback to one-shot: %s", exc)
+
         args = [
             "claude",
             "-p",
             "--no-session-persistence",
             "--tools",
             "",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",
+            "--disable-slash-commands",
             "--output-format",
             "text",
         ]
@@ -549,6 +930,16 @@ class InterviewCopilotLLM:
                 "never",
                 "-s",
                 "read-only",
+                "--disable",
+                "shell_tool",
+                "--disable",
+                "unified_exec",
+                "--disable",
+                "apps",
+                "--disable",
+                "browser_use",
+                "-c",
+                "mcp_servers={}",
                 "-o",
                 out_path,
             ]
@@ -598,7 +989,19 @@ class InterviewCopilotLLM:
             else "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY the requested Markdown response."
         )
         combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
-        args = ["gemini", "-o", "text"]
+        args = [
+            "gemini",
+            "--approval-mode",
+            "plan",
+            "-e",
+            "none",
+            "--allowed-mcp-server-names",
+            "",
+            "--admin-policy",
+            str(_gemini_deny_policy_path()),
+            "-o",
+            "text",
+        ]
         if clean_model:
             args.extend(["-m", clean_model])
         args.extend(["-p", ""])
