@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <b>Local-first mock interview studio for Apple Silicon (M1–M4).</b><br>
+  <b>Local-first mock interview studio for Apple Silicon.</b><br>
   Practice the interview out loud. Then run one for someone else.
 </p>
 
@@ -114,7 +114,7 @@ Unretouched v0.2 screens captured straight from the running app with synthetic d
 
 ## Install
 
-> **Requirements:** a Mac with Apple Silicon (M1–M4). Google Chrome is recommended for dual-track Google Meet tab capture.
+> **Requirements:** a Mac with Apple Silicon. Google Chrome is recommended for dual-track Google Meet tab capture.
 
 ### One-line installer
 
