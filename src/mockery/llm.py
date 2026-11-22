@@ -435,55 +435,13 @@ class InterviewCopilotLLM:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        if on_delta is None:
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                raise TimeoutError(f"pi CLI timed out after {timeout:.0f}s")
-
-            stdout = stdout_b.decode("utf-8", errors="replace").strip()
-            stderr = stderr_b.decode("utf-8", errors="replace").strip()
-            if proc.returncode != 0:
-                raise RuntimeError(f"pi CLI exited {proc.returncode}: {(stderr or stdout)[:300]}")
-            return stdout
-
-        deadline = time.monotonic() + timeout
-        decoder = codecs.getincrementaldecoder("utf-8")("replace")
-        chunks: list[str] = []
-        assert proc.stdout is not None and proc.stderr is not None
-        stderr_task = asyncio.create_task(proc.stderr.read())
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError()
-                data = await asyncio.wait_for(proc.stdout.read(256), timeout=remaining)
-                if not data:
-                    tail = decoder.decode(b"", final=True)
-                    if tail:
-                        chunks.append(tail)
-                        await on_delta(tail)
-                    break
-                text_chunk = decoder.decode(data, final=False)
-                if text_chunk:
-                    chunks.append(text_chunk)
-                    await on_delta(text_chunk)
-            remaining = max(0.1, deadline - time.monotonic())
-            await asyncio.wait_for(proc.wait(), timeout=remaining)
-            stderr_b = await stderr_task
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            stderr_task.cancel()
-            raise TimeoutError(f"pi CLI timed out after {timeout:.0f}s")
-
-        stdout = "".join(chunks).strip()
-        stderr = stderr_b.decode("utf-8", errors="replace").strip()
-        if proc.returncode != 0:
-            raise RuntimeError(f"pi CLI exited {proc.returncode}: {(stderr or stdout)[:300]}")
-        return stdout
+        return await self._communicate_or_stream_cli(
+            proc,
+            name="pi CLI",
+            stdin_text=None,
+            timeout=timeout,
+            on_delta=on_delta,
+        )
 
     async def _call_claude_cli(
         self,
@@ -633,15 +591,15 @@ class InterviewCopilotLLM:
         proc: asyncio.subprocess.Process,
         *,
         name: str,
-        stdin_text: str,
+        stdin_text: str | None,
         timeout: float,
         on_delta: Callable[[str], Awaitable[None]] | None,
     ) -> str:
-        stdin_bytes = stdin_text.encode("utf-8")
+        stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
         if on_delta is None:
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 raise TimeoutError(f"{name} timed out after {timeout:.0f}s")
@@ -651,15 +609,17 @@ class InterviewCopilotLLM:
                 raise RuntimeError(f"{name} exited {proc.returncode}: {(stderr or stdout)[:300]}")
             return stdout
 
-        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        assert proc.stdout is not None and proc.stderr is not None
         deadline = time.monotonic() + timeout
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         chunks: list[str] = []
         stderr_task = asyncio.create_task(proc.stderr.read())
         try:
-            proc.stdin.write(stdin_bytes)
-            await proc.stdin.drain()
-            proc.stdin.close()
+            if stdin_bytes is not None:
+                assert proc.stdin is not None
+                proc.stdin.write(stdin_bytes)
+                await proc.stdin.drain()
+                proc.stdin.close()
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -814,15 +774,6 @@ class InterviewCopilotLLM:
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         cli = self.config.cli_backend
-        if cli == "agy":
-            return await self._call_agy_cli(
-                model=model,
-                system=system,
-                user=user,
-                timeout=timeout,
-                expect_json=expect_json,
-                on_delta=on_delta,
-            )
         if cli == "pi":
             return await self._call_pi_cli(
                 model=model,
@@ -831,26 +782,14 @@ class InterviewCopilotLLM:
                 timeout=timeout,
                 on_delta=on_delta,
             )
-        if cli == "claude":
-            return await self._call_claude_cli(
-                model=model,
-                system=system,
-                user=user,
-                timeout=timeout,
-                expect_json=expect_json,
-                on_delta=on_delta,
-            )
-        if cli == "codex":
-            return await self._call_codex_cli(
-                model=model,
-                system=system,
-                user=user,
-                timeout=timeout,
-                expect_json=expect_json,
-                on_delta=on_delta,
-            )
-        if cli == "gemini":
-            return await self._call_gemini_cli(
+        cli_dispatch = {
+            "agy": self._call_agy_cli,
+            "claude": self._call_claude_cli,
+            "codex": self._call_codex_cli,
+            "gemini": self._call_gemini_cli,
+        }
+        if cli in cli_dispatch:
+            return await cli_dispatch[cli](
                 model=model,
                 system=system,
                 user=user,
@@ -2244,38 +2183,29 @@ async def _probe_omlx(timeout: float = 0.6) -> dict[str, Any]:
     return {"running": False, "models": [], "base_url": base_url, "auth_required": False}
 
 
-async def _probe_ollama(timeout: float = 0.6) -> dict[str, Any]:
+async def _probe_local_http_models(url: str, list_key: str, item_key: str, timeout: float = 0.6) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=timeout) as http:
-            resp = await http.get("http://127.0.0.1:11434/api/tags")
+            resp = await http.get(url)
             if resp.status_code == 200:
                 data = resp.json()
                 models = [
-                    str(m.get("name", "")).strip()
-                    for m in (data.get("models") or [])
-                    if isinstance(m, dict) and m.get("name")
+                    str(m.get(item_key, "")).strip()
+                    for m in (data.get(list_key) or [])
+                    if isinstance(m, dict) and m.get(item_key)
                 ]
                 return {"running": True, "models": models}
     except Exception:
         pass
     return {"running": False, "models": []}
+
+
+async def _probe_ollama(timeout: float = 0.6) -> dict[str, Any]:
+    return await _probe_local_http_models("http://127.0.0.1:11434/api/tags", "models", "name", timeout)
 
 
 async def _probe_lmstudio(timeout: float = 0.6) -> dict[str, Any]:
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as http:
-            resp = await http.get("http://127.0.0.1:1234/v1/models")
-            if resp.status_code == 200:
-                data = resp.json()
-                models = [
-                    str(m.get("id", "")).strip()
-                    for m in (data.get("data") or [])
-                    if isinstance(m, dict) and m.get("id")
-                ]
-                return {"running": True, "models": models}
-    except Exception:
-        pass
-    return {"running": False, "models": []}
+    return await _probe_local_http_models("http://127.0.0.1:1234/v1/models", "data", "id", timeout)
 
 
 async def discover_available_providers() -> dict[str, Any]:

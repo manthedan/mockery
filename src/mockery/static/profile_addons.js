@@ -1067,14 +1067,12 @@ export function createProfileAddonsController({
     }
   }
 
-  async function installPack(packId) {
-    if (!packId || !sharedPackOps.begin(packId, "installing")) return;
-    showToast(`Downloading ${packId.replace(/_/g, " ")}…`, 3000);
+  async function runPackOp(packId, { op, url, method, startToast, okToast, okMs, failFallback, errPrefix }) {
+    if (!packId || !sharedPackOps.begin(packId, op)) return false;
+    if (startToast) showToast(startToast, 3000);
     let refreshedFromResponse = false;
     try {
-      const res = await fetch(`/api/addons/${encodeURIComponent(packId)}/install`, {
-        method: "POST",
-      });
+      const res = await fetch(url, { method });
       const data = await res.json().catch(() => ({}));
       if (data.addons) {
         local.addons = data.addons;
@@ -1087,13 +1085,13 @@ export function createProfileAddonsController({
         renderProfileSummaryIndicators();
       }
       if (!res.ok) {
-        showToast(formatApiDetail(data.detail, `Install failed (${res.status})`), 4000);
+        showToast(formatApiDetail(data.detail, failFallback(res.status)), 4000);
         return false;
       }
-      showToast("Add-on installed and ready.", 2400);
+      showToast(okToast, okMs);
       return true;
     } catch (err) {
-      showToast(`Install failed: ${err.message || "network error"}`);
+      showToast(`${errPrefix}: ${err.message || "network error"}`);
       return false;
     } finally {
       sharedPackOps.end(packId);
@@ -1103,39 +1101,29 @@ export function createProfileAddonsController({
     }
   }
 
-  async function uninstallPack(packId) {
-    if (!packId || !sharedPackOps.begin(packId, "uninstalling")) return false;
-    let refreshedFromResponse = false;
-    try {
-      const res = await fetch(`/api/addons/${encodeURIComponent(packId)}`, {
-        method: "DELETE",
-      });
-      const data = await res.json().catch(() => ({}));
-      if (data.addons) {
-        local.addons = data.addons;
-        state.addons = data.addons;
-        refreshedFromResponse = true;
-        if (typeof onAddonsChange === "function") onAddonsChange(data.addons, data.tts || null);
-      }
-      if (data.profile) {
-        local.profile = data.profile;
-        renderProfileSummaryIndicators();
-      }
-      if (!res.ok) {
-        showToast(formatApiDetail(data.detail, "Could not remove add-on."), 4000);
-        return false;
-      }
-      showToast("Add-on removed from local cache.", 2200);
-      return true;
-    } catch (err) {
-      showToast(`Remove failed: ${err.message || "network error"}`);
-      return false;
-    } finally {
-      sharedPackOps.end(packId);
-      if (!refreshedFromResponse) {
-        await refreshAddons();
-      }
-    }
+  function installPack(packId) {
+    return runPackOp(packId, {
+      op: "installing",
+      url: `/api/addons/${encodeURIComponent(packId)}/install`,
+      method: "POST",
+      startToast: `Downloading ${String(packId || "").replace(/_/g, " ")}…`,
+      okToast: "Add-on installed and ready.",
+      okMs: 2400,
+      failFallback: (status) => `Install failed (${status})`,
+      errPrefix: "Install failed",
+    });
+  }
+
+  function uninstallPack(packId) {
+    return runPackOp(packId, {
+      op: "uninstalling",
+      url: `/api/addons/${encodeURIComponent(packId)}`,
+      method: "DELETE",
+      okToast: "Add-on removed from local cache.",
+      okMs: 2200,
+      failFallback: () => "Could not remove add-on.",
+      errPrefix: "Remove failed",
+    });
   }
 
   function getStateSnapshot() {

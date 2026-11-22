@@ -361,238 +361,167 @@ export function deriveCodingRunnerState({
   pyodideUninstalling = false,
 } = {}) {
   const baseActions = ["switch_language", "edit_code", "reset_starter", "ask_ai_review"];
+  const make = (overrides) => ({
+    pillTone: "neutral",
+    canRun: false,
+    canCancel: false,
+    runButtonText: "Run Tests",
+    consoleTone: "neutral",
+    allowedActions: baseActions,
+    ...overrides,
+  });
 
   if (activeRun) {
     const runLang = activeRun.language || "javascript";
     const runLangLabel = runLang === "python" ? "Python" : "JS";
     if (runLang === language) {
       if (language === "python" && !activeRun.booted) {
-        return {
+        return make({
           status: "booting_pyodide",
           pillText: activeRun.phase === "loading" ? "Loading Python…" : "Starting Python…",
           pillTone: "running",
-          canRun: false,
           canCancel: true,
           runButtonText: "Running…",
           consoleMeta: "Starting isolated local Pyodide runtime…",
           consoleBodyDefault: "Booting local Python WASM runtime…",
-          consoleTone: "neutral",
           allowedActions: ["cancel_run", ...baseActions],
-        };
+        });
       }
-      return {
+      return make({
         status: "running",
         pillText: "Running…",
         pillTone: "running",
-        canRun: false,
         canCancel: true,
         runButtonText: "Running…",
         consoleMeta: "Running inside isolated sandbox…",
         consoleBodyDefault: "Executing tests…",
-        consoleTone: "neutral",
         allowedActions: ["cancel_run", ...baseActions],
-      };
+      });
     }
     const otherActions = ["cancel_run", ...baseActions];
     if (language === "python" && !pyodideInstalled && !pyodideInstalling && !pyodideUninstalling) {
       otherActions.splice(1, 0, "install_pyodide");
     }
-    return {
+    return make({
       status: "running_other_lang",
       pillText: `Running ${runLangLabel}…`,
       pillTone: "running",
-      canRun: false,
       canCancel: true,
       runButtonText: "Running…",
       consoleMeta: `${runLangLabel} test run is still in progress — cancel or wait to run here`,
       consoleBodyDefault: `Waiting for active ${runLangLabel} sandbox run to finish (or click Cancel).`,
-      consoleTone: "neutral",
       allowedActions: otherActions,
-    };
+    });
   }
 
   if (language === "pseudocode") {
-    return {
+    return make({
       status: "pseudocode",
       pillText: "Whiteboard Mode",
-      pillTone: "neutral",
-      canRun: false,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Whiteboard pseudocode mode (no test runner)",
       consoleBodyDefault: "Talk through your approach and click “Ask AI to review code” for feedback.",
-      consoleTone: "neutral",
-      allowedActions: baseActions,
-    };
+    });
   }
-
   if (language === "python" && pyodideUninstalling) {
-    return {
+    return make({
       status: "pyodide_uninstalling",
       pillText: "Removing Python…",
       pillTone: "running",
-      canRun: false,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Offline Python runner is being removed…",
       consoleBodyDefault: "Offline Python runner is currently being uninstalled.",
-      consoleTone: "neutral",
-      allowedActions: baseActions,
-    };
+    });
   }
-
   if (language === "python" && pyodideInstalling) {
-    return {
+    return make({
       status: "pyodide_installing",
       pillText: "Installing Python…",
       pillTone: "running",
-      canRun: false,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Downloading local Pyodide WASM pack…",
       consoleBodyDefault: "Installing offline Python runtime (~14 MB)…",
-      consoleTone: "neutral",
-      allowedActions: baseActions,
-    };
+    });
   }
-
   if (language === "python" && !pyodideInstalled) {
-    return {
+    return make({
       status: "pyodide_missing",
       pillText: "Python runner not added",
-      pillTone: "neutral",
-      canRun: false,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Add the Python runner above to run tests",
       consoleBodyDefault: "You can write Python now. Tests run on this Mac once the runner is added.",
-      consoleTone: "neutral",
       allowedActions: ["install_pyodide", ...baseActions],
-    };
+    });
   }
-
   if (!testsPresent) {
-    return {
+    return make({
       status: "no_tests",
       pillText: "No Tests",
-      pillTone: "neutral",
-      canRun: false,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "No tests to run",
       consoleBodyDefault: "Add executable assertions in the Test Suite tab to run tests.",
-      consoleTone: "neutral",
-      allowedActions: baseActions,
-    };
+    });
   }
+
+  const runnable = (overrides) => make({ canRun: true, allowedActions: ["run_tests", ...baseActions], ...overrides });
 
   if (cancelled || matchingResult?.status === "cancelled") {
-    return {
+    return runnable({
       status: "cancelled",
       pillText: "Cancelled",
-      pillTone: "neutral",
-      canRun: true,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Test run cancelled — press Run Tests to run again",
       consoleBodyDefault: "Test execution was cancelled before completion.",
-      consoleTone: "neutral",
-      allowedActions: ["run_tests", ...baseActions],
-    };
+    });
   }
-
   if (matchingResult?.status === "passed") {
     const ms = formatDurationMs(matchingResult.durationMs);
-    const msPill = ms ? ` · ${ms}` : "";
-    const msMeta = ms ? ` in ${ms}` : "";
-    return {
+    return runnable({
       status: "passed",
-      pillText: `Tests Passed${msPill}`,
+      pillText: `Tests Passed${ms ? ` · ${ms}` : ""}`,
       pillTone: "pass",
-      canRun: true,
-      canCancel: false,
-      runButtonText: "Run Tests",
-      consoleMeta: `All assertions passed${msMeta}`,
+      consoleMeta: `All assertions passed${ms ? ` in ${ms}` : ""}`,
       consoleBodyDefault: "Completed with no output.",
       consoleTone: "pass",
-      allowedActions: ["run_tests", ...baseActions],
-    };
+    });
   }
-
   if (matchingResult?.status === "timeout") {
-    return {
+    return runnable({
       status: "timeout",
       pillText: "Timed Out",
       pillTone: "fail",
-      canRun: true,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Execution terminated (timeout)",
       consoleBodyDefault: "Execution timed out.",
       consoleTone: "fail",
-      allowedActions: ["run_tests", ...baseActions],
-    };
+    });
   }
-
   if (matchingResult?.status === "failed") {
     const ms = formatDurationMs(matchingResult.durationMs);
-    const msMeta = ms ? ` after ${ms}` : "";
-    return {
+    return runnable({
       status: "failed",
       pillText: "Tests Failed",
       pillTone: "fail",
-      canRun: true,
-      canCancel: false,
-      runButtonText: "Run Tests",
-      consoleMeta: `Test failure${msMeta}`,
+      consoleMeta: `Test failure${ms ? ` after ${ms}` : ""}`,
       consoleBodyDefault: "Tests failed.",
       consoleTone: "fail",
-      allowedActions: ["run_tests", ...baseActions],
-    };
+    });
   }
-
   if (matchingResult?.status === "saved") {
-    return {
+    return runnable({
       status: "saved",
       pillText: "Ready",
-      pillTone: "neutral",
-      canRun: true,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Saved output",
       consoleBodyDefault: "Saved output.",
-      consoleTone: "neutral",
-      allowedActions: ["run_tests", ...baseActions],
-    };
+    });
   }
-
   if (staleResult) {
-    return {
+    return runnable({
       status: "stale",
       pillText: "Modified",
-      pillTone: "neutral",
-      canRun: true,
-      canCancel: false,
-      runButtonText: "Run Tests",
       consoleMeta: "Buffer edited since last run — press Run Tests to re-verify",
       consoleBodyDefault: "Previous test output cleared because the code or test suite changed.",
-      consoleTone: "neutral",
-      allowedActions: ["run_tests", ...baseActions],
-    };
+    });
   }
-
-  return {
+  return runnable({
     status: "ready",
     pillText: "Ready",
-    pillTone: "neutral",
-    canRun: true,
-    canCancel: false,
-    runButtonText: "Run Tests",
     consoleMeta: "Press Run Tests or ⌘/Ctrl+Enter",
     consoleBodyDefault: "No test runs yet for this language.",
-    consoleTone: "neutral",
-    allowedActions: ["run_tests", ...baseActions],
-  };
+  });
 }
 
 export function createCodingStudioPlugin({
@@ -652,7 +581,6 @@ export function createCodingStudioPlugin({
       testsByLang: initialWs.testsByLang,
       resultsByLang: initialResultsByLang,
       cancelledByLang: { javascript: null, python: null },
-      installingPyodide: false,
       hintsOpen: false,
       revealedHints: 0,
       lastLineCount: 0,
@@ -1293,7 +1221,6 @@ export function createCodingStudioPlugin({
 
     async function installPyodideInline() {
       if (!sharedPackOps.begin("pyodide_python", "installing")) return;
-      state.installingPyodide = true;
       renderPyBanner();
       renderStatusPill();
       renderConsole();
@@ -1326,7 +1253,6 @@ export function createCodingStudioPlugin({
         }
       } finally {
         sharedPackOps.end("pyodide_python");
-        state.installingPyodide = false;
         if (!refreshedFromResponse) {
           try {
             const freshRes = await fetch("/api/addons");

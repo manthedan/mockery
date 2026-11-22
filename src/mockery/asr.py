@@ -339,60 +339,9 @@ class FastTDTGreedyDecoder:
         return self._pred_out_buf
 
     def decode_enc_proj(self, enc_proj_np: np.ndarray) -> str:
-        n_frames = enc_proj_np.shape[0]
-        if n_frames == 0:
+        if enc_proj_np.shape[0] == 0:
             return ""
-
-        hs = self.hidden_size
-        h_list = [np.zeros(hs, dtype=np.float32) for _ in range(self.n_layers)]
-        c_list = [np.zeros(hs, dtype=np.float32) for _ in range(self.n_layers)]
-        pred_proj = self._lstm_and_pred_step(None, h_list, c_list)
-
-        tokens: list[int] = []
-        step = 0
-        new_symbols = 0
-        blank_id = self.blank_id
-        token_end = blank_id + 1
-        durations = self.durations
-        max_symbols = self.max_symbols
-        j_w = self._j_w
-        j_b = self._j_b
-        joint_in = self._joint_in_buf
-        logits = self._logits_buf
-        act_kind = self._act_kind
-
-        while step < n_frames:
-            np.add(enc_proj_np[step], pred_proj, out=joint_in)
-            if act_kind == "relu":
-                np.maximum(joint_in, 0.0, out=joint_in)
-            elif act_kind == "tanh":
-                np.tanh(joint_in, out=joint_in)
-            else:
-                np.negative(joint_in, out=joint_in)
-                np.exp(joint_in, out=joint_in)
-                joint_in += 1.0
-                np.reciprocal(joint_in, out=joint_in)
-
-            np.dot(j_w, joint_in, out=logits)
-            logits += j_b
-
-            pred_tok = int(np.argmax(logits[:token_end]))
-            dur_idx = int(np.argmax(logits[token_end:]))
-
-            if pred_tok != blank_id:
-                tokens.append(pred_tok)
-                pred_proj = self._lstm_and_pred_step(pred_tok, h_list, c_list)
-
-            jump = durations[dur_idx]
-            step += jump
-            if jump != 0:
-                new_symbols = 0
-            else:
-                new_symbols += 1
-                if new_symbols >= max_symbols:
-                    step += 1
-                    new_symbols = 0
-
+        tokens, _ = self.decode_enc_proj_stateful(enc_proj_np, state=None)
         if not tokens:
             return ""
         return tokenizer.decode(tokens, self.vocab)
