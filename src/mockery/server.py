@@ -1005,20 +1005,29 @@ def create_app(
                     )
 
             job_epoch = runtime.session_epoch
-            # LLM handles topic-shift card pivots (when needed) — never live speaker classification
+            # Zero-token warm-spare refresh when candidate speech crosses threshold during active capture
+            # so a `D` press minutes later never hits an expired 180s/600s CLI spare.
+            if (
+                decision.should_speculate_probes
+                and runtime.is_capturing
+                and runtime.llm_config.is_configured
+            ):
+                runtime.llm.prewarm_fast_model()
+
+            # LLM handles topic-shift card pivots (when needed) — never live speaker classification.
+            # Skip mid-speech background triage on local HTTP GPUs (oMLX/Ollama/LM Studio) so it never
+            # fights Parakeet MLX for Apple Silicon GPU/unified memory (end-of-session Regroup handles cards).
             if (
                 utt.final
                 and decision.needs_async_topic_check
                 and decision.qa_id
                 and runtime.llm_config.is_configured
+                and not runtime.llm_config.is_local_http
             ):
-                spawn_bg(
-                    run_turn_triage(
-                        target_session=target_session,
-                        utterance_id=utt.id,
-                        diarize=False,
-                        job_epoch=job_epoch,
-                    )
+                schedule_triage_batch(
+                    target_session=target_session,
+                    utterance_id=utt.id,
+                    job_epoch=job_epoch,
                 )
 
             # Dive Deeper probes run strictly on-demand when the interviewer presses `D`
@@ -1080,42 +1089,91 @@ def create_app(
                 runtime.role_orientation_inflight.discard(sid)
 
         triage_lock = asyncio.Lock()
+        pending_triage_ids: list[str] = []
+        triage_debounce_state: dict[str, Any] = {"task": None}
 
-        async def run_turn_triage(
+        def cancel_pending_triage() -> None:
+            pending_triage_ids.clear()
+            t = triage_debounce_state.get("task")
+            if t is not None and not t.done():
+                t.cancel()
+            triage_debounce_state["task"] = None
+
+        def schedule_triage_batch(
             *,
             target_session: InterviewSession,
             utterance_id: str,
-            diarize: bool,
+            job_epoch: int,
+        ) -> None:
+            if utterance_id not in pending_triage_ids:
+                pending_triage_ids.append(utterance_id)
+            old = triage_debounce_state.get("task")
+            if old is not None and not old.done():
+                old.cancel()
+
+            async def _debounced_flush() -> None:
+                try:
+                    await asyncio.sleep(1.8)
+                except asyncio.CancelledError:
+                    return
+                await flush_triage_batch(target_session=target_session, job_epoch=job_epoch)
+
+            triage_debounce_state["task"] = spawn_bg(_debounced_flush())
+
+        async def flush_triage_batch(
+            *,
+            target_session: InterviewSession,
             job_epoch: int,
         ) -> None:
             async with triage_lock:
-                if not runtime.is_live_session(target_session, job_epoch):
+                if (
+                    not runtime.is_live_session(target_session, job_epoch)
+                    or target_session.ended_epoch_ms is not None
+                ):
+                    pending_triage_ids.clear()
                     return
-                utt_obj = target_session.utterance_map().get(utterance_id)
-                if utt_obj is None or not utt_obj.final:
-                    return
-                plan = await runtime.llm.triage_turn(target_session, utt_obj, diarize=diarize)
-                if plan is None or not runtime.is_live_session(target_session, job_epoch):
-                    return
-                apply_res = runtime.grouper.apply_turn_triage(
-                    target_session,
-                    plan,
-                    allow_speaker_mutation=diarize,
-                    allow_card_split=True,
-                )
-                if not apply_res.mutated and not apply_res.queued_review_id:
+                batch_ids = list(pending_triage_ids)
+                pending_triage_ids.clear()
+                if not batch_ids:
                     return
                 umap = target_session.utterance_map()
-                if apply_res.split_utterance_ids:
-                    for uid in apply_res.split_utterance_ids:
-                        if uid in umap:
-                            runtime.store.append_utterance_event(target_session.id, umap[uid])
-                elif apply_res.mutated and utterance_id in umap:
-                    runtime.store.append_utterance_event(target_session.id, umap[utterance_id])
+                batch_utts = [
+                    umap[uid]
+                    for uid in batch_ids
+                    if uid in umap and umap[uid].final
+                ]
+                if not batch_utts:
+                    return
+                plans = await runtime.llm.triage_window(target_session, batch_utts, diarize=False)
+                if not plans or not runtime.is_live_session(target_session, job_epoch):
+                    return
+                any_changed = False
+                latest_opened_qa_id: str | None = None
+                for plan in plans:
+                    apply_res = runtime.grouper.apply_turn_triage(
+                        target_session,
+                        plan,
+                        allow_speaker_mutation=False,
+                        allow_card_split=True,
+                    )
+                    if not apply_res.mutated and not apply_res.queued_review_id:
+                        continue
+                    any_changed = True
+                    umap = target_session.utterance_map()
+                    if apply_res.split_utterance_ids:
+                        for uid in apply_res.split_utterance_ids:
+                            if uid in umap:
+                                runtime.store.append_utterance_event(target_session.id, umap[uid])
+                    elif apply_res.mutated and plan.utterance_id in umap:
+                        runtime.store.append_utterance_event(target_session.id, umap[plan.utterance_id])
+                    if apply_res.opened_new_qa_id:
+                        latest_opened_qa_id = apply_res.opened_new_qa_id
+                if not any_changed:
+                    return
                 runtime.store.save(target_session)
                 extra: dict[str, Any] = {}
-                if apply_res.opened_new_qa_id:
-                    extra["latest_qa_id"] = apply_res.opened_new_qa_id
+                if latest_opened_qa_id:
+                    extra["latest_qa_id"] = latest_opened_qa_id
                     extra["opened_new_qa"] = True
                 await broadcast_session(extra or None)
 
@@ -1197,6 +1255,7 @@ def create_app(
                             broadcast_session=broadcast_session,
                             upsert_utterance_and_route=upsert_utterance_and_route,
                             capture_gate=capture_gate,
+                            cancel_pending_triage=cancel_pending_triage,
                         )
                     except InvalidStateTransitionError as exc:
                         await send_json(exc.to_dict())
@@ -1206,9 +1265,14 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
+            cancel_pending_triage()
             runtime.ws_senders.discard(send_json)
             if runtime.capturing_sender is send_json or not runtime.ws_senders:
                 runtime.pause_or_end_capture(mark_ended=False)
+                try:
+                    await runtime.llm.release_warm_spare()
+                except Exception:
+                    pass
             await final_seg_queue.put(None)
             await seg_worker_task
 
@@ -1289,10 +1353,13 @@ async def _handle_ws_command(
     broadcast_session: Any,
     upsert_utterance_and_route: Any,
     capture_gate: dict[str, bool] | None = None,
+    cancel_pending_triage: Any = None,
 ) -> None:
     action = str(cmd.get("type", ""))
 
     if action == "new_session":
+        if cancel_pending_triage is not None:
+            cancel_pending_triage()
         cfg_data = dict(cmd.get("config") or {})
         base_cfg = runtime.active_session.config.model_dump()
         cfg = SessionConfig.model_validate({**base_cfg, **cfg_data})
@@ -1326,7 +1393,13 @@ async def _handle_ws_command(
     if action == "cancel_capture":
         if capture_gate is not None:
             capture_gate["closed"] = True
+        if cancel_pending_triage is not None:
+            cancel_pending_triage()
         runtime.pause_or_end_capture(mark_ended=False)
+        try:
+            await runtime.llm.release_warm_spare()
+        except Exception:
+            pass
         await broadcast_session()
         return
 
@@ -1571,13 +1644,21 @@ async def _handle_ws_command(
     if action == "flush_and_end":
         if capture_gate is not None:
             capture_gate["closed"] = True
+        if cancel_pending_triage is not None:
+            cancel_pending_triage()
         cur_session = runtime.active_session
         cur_router = runtime.audio_router
         trailing = cur_router.flush_all()
         for seg in trailing:
             await final_seg_queue.put((cur_session, cur_router, seg))
         await final_seg_queue.join()
+        if cancel_pending_triage is not None:
+            cancel_pending_triage()
         runtime.pause_or_end_capture(mark_ended=True)
+        try:
+            await runtime.llm.release_warm_spare()
+        except Exception:
+            pass
         runtime.store.save(cur_session)
         await broadcast_session({"session_ended": True})
         return

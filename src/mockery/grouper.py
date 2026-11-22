@@ -218,7 +218,7 @@ class QAGrouper:
                             and not (word_count <= 6 and BACKCHANNEL_RE.match(stored.text))
                             and not FOLLOWUP_CONTINUATION_RE.search(stored.text)
                             and cand_words_before >= 40
-                            and (word_count >= 10 or "?" in stored.text)
+                            and word_count >= 10
                         )
                         if needs_check:
                             return GroupingDecision(
@@ -359,7 +359,7 @@ class QAGrouper:
             kind == "question"
             and stored.final
             and cand_words >= 40
-            and (word_count >= 10 or "?" in stored.text)
+            and word_count >= 10
         )
         return GroupingDecision(
             qa_id=current_qa.id,
