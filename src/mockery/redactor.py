@@ -123,6 +123,18 @@ _MD_HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
 _NAME_TOKEN_PUNCT = frozenset("'.-’")
 
 
+def _unicode_equiv_word_pattern(word: str) -> str:
+    """Build a regex matching a word regardless of NFC vs NFD Unicode normalization."""
+    parts: list[str] = []
+    for ch in unicodedata.normalize("NFC", word):
+        nfd = unicodedata.normalize("NFD", ch)
+        if nfd != ch:
+            parts.append(f"(?:{re.escape(ch)}|{re.escape(nfd)})")
+        else:
+            parts.append(re.escape(ch))
+    return "".join(parts)
+
+
 def _is_name_token(word: str) -> bool:
     """Unicode-aware capitalized name token check (handles NFC & NFD accented letters like María Núñez)."""
     norm = unicodedata.normalize("NFC", word)
@@ -909,9 +921,9 @@ class RampartRedactor:
                     header_start = offset + pos
                     header_end = header_start + len(head)
                     spans = [DetectedSpan(header_start, header_end, "PERSON_NAME", "rules")]
-                    # Propagate exact full-name occurrences elsewhere in the resume
+                    # Propagate exact full-name occurrences elsewhere in the resume (NFC & NFD agnostic)
                     name_pat = re.compile(
-                        r"(?<!\w)" + r"\s+".join(re.escape(w) for w in words) + r"(?!\w)",
+                        r"(?<!\w)" + r"\s+".join(_unicode_equiv_word_pattern(w) for w in words) + r"(?!\w)",
                         re.IGNORECASE,
                     )
                     for m in name_pat.finditer(text):

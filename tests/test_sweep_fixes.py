@@ -620,12 +620,14 @@ def test_rules_redactor_detects_decomposed_nfd_unicode_header_name() -> None:
     import unicodedata
 
     redactor = RampartRedactor()
+    nfc_name = unicodedata.normalize("NFC", "María Núñez")
     nfd_name = unicodedata.normalize("NFD", "María Núñez")
     res = redactor.redact(
-        f"{nfd_name}\nStaff Infrastructure Engineer\nDesigned multi-region failover.",
+        f"{nfd_name}\nStaff Infrastructure Engineer\nSummary: {nfc_name} designed multi-region failover.",
         use_rampart=False,
     )
     assert nfd_name not in res.redacted_text
+    assert nfc_name not in res.redacted_text
     assert any(sp.get("label") == "PERSON_NAME" for sp in res.spans)
 
 
@@ -864,6 +866,52 @@ def test_tts_stream_releases_semaphore_even_when_aclose_raises_cancelled(tmp_pat
         assert rt._tts_sem._value == 2
 
     asyncio.run(_run())
+
+
+def test_completed_debrief_rejects_new_final_answer_with_409(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.practice import PracticeConfig, PracticeQuestionItem, PracticeSession
+    from mockery.server import create_app
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    rt = app.state.runtime
+    sess = PracticeSession(
+        role_title="Senior Engineer",
+        config=PracticeConfig(interview_type="behavioral"),
+        phase="completed",
+        questions=[PracticeQuestionItem(id="q_1", title="Q1", prompt="P1", status="completed")],
+        debrief={"overall_summary": "Done", "question_reviews": []},
+    )
+    rt.practice_store.save(sess)
+    client = TestClient(app)
+
+    # Cached read with no final_answer still returns 200
+    r_ok = client.post(f"/api/practice/{sess.id}/debrief", json={})
+    assert r_ok.status_code == 200
+
+    # Submitting a new final_answer to an already-completed debrief must 409
+    r_conflict = client.post(
+        f"/api/practice/{sess.id}/debrief",
+        json={"final_answer": "Unsaved answer from another tab", "expected_question_id": "q_1"},
+    )
+    assert r_conflict.status_code == 409
+
+
+def test_lan_token_with_semicolon_survives_cookie_roundtrip(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from mockery.server import create_app
+
+    token = "abc;def=ghi"
+    app = create_app(project_root=tmp_path, auth_token=token, preload_asr=False)
+    client = TestClient(app)
+
+    r1 = client.get("/api/machines", params={"token": token})
+    assert r1.status_code == 200
+    # Follow-up request relies solely on the Set-Cookie issued by middleware
+    r2 = client.get("/api/machines")
+    assert r2.status_code == 200
 
 
 
