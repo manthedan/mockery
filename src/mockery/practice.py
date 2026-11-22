@@ -372,7 +372,9 @@ class PracticeSessionStore:
         if isinstance(debrief, dict):
             for rev in debrief.get("question_reviews") or []:
                 if isinstance(rev, dict) and rev.get("question_id") and isinstance(rev.get("carl"), dict):
-                    review_carl_by_qid[str(rev["question_id"])] = rev["carl"]
+                    qid = str(rev["question_id"])
+                    if qid not in review_carl_by_qid:
+                        review_carl_by_qid[qid] = rev["carl"]
 
         rows: list[Any] = [
             review_carl_by_qid.get(str(item.get("id") or ""), item.get("carl_signals"))
@@ -380,17 +382,21 @@ class PracticeSessionStore:
         ]
 
         retry_after = None
+        retry_qid: str | None = None
         for attempt in reversed(retry_history or []):
             feedback = attempt.get("feedback") if isinstance(attempt, dict) else None
             after = feedback.get("carl_after") if isinstance(feedback, dict) else None
             if isinstance(after, dict):
                 retry_after = after
+                raw_rqid = attempt.get("question_id") if isinstance(attempt, dict) else None
+                retry_qid = str(raw_rqid).strip() if raw_rqid else None
                 break
         if retry_after is not None and rows:
             drill = debrief.get("retry_drill") if isinstance(debrief, dict) else None
             drill_qid = drill.get("question_id") if isinstance(drill, dict) else None
+            target_qid = retry_qid or (str(drill_qid).strip() if drill_qid else None)
             drill_idx = next(
-                (i for i, item in enumerate(items) if drill_qid and item.get("id") == drill_qid),
+                (i for i, item in enumerate(items) if target_qid and item.get("id") == target_qid),
                 # No explicit target: the drill reworks the weakest answer (first one on ties).
                 min(range(len(rows)), key=lambda i: points(rows[i])),
             )

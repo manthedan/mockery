@@ -20,6 +20,41 @@ if TYPE_CHECKING:
     from .practice import PracticeSession
 
 MAX_PRACTICE_CONVERSATION_CHARS = 120_000
+_SEED_HISTORY_TARGET_CHARS = MAX_PRACTICE_CONVERSATION_CHARS // 2
+
+
+def _build_intervening_notes_budgeted(
+    session: PracticeSession,
+    start_idx: int,
+    *,
+    max_chars: int,
+) -> list[str]:
+    """Capture turns from `start_idx`, keeping newest turns within `max_chars` so overflow resets stay bounded."""
+    raw_notes = _build_intervening_notes(session, start_idx)
+    if not raw_notes:
+        return []
+    if max_chars <= 0:
+        return ["- (... earlier interview turns omitted to stay within context budget ...)"]
+    total = sum(len(n) + 1 for n in raw_notes)
+    if total <= max_chars:
+        return raw_notes
+
+    kept: list[str] = []
+    used = 0
+    marker = "- (... earlier interview turns omitted to stay within context budget ...)"
+    budget = max(0, max_chars - len(marker) - 2)
+    for note in reversed(raw_notes):
+        clipped = note[: max(200, budget)] if len(note) > budget and not kept else note
+        cost = len(clipped) + 1
+        if kept and used + cost > budget:
+            break
+        if not kept and cost > budget:
+            kept.append(clipped[: max(80, budget)])
+            break
+        kept.append(clipped)
+        used += cost
+    kept.reverse()
+    return [marker, *kept]
 
 
 class PracticeConversationMessage(BaseModel):
@@ -181,45 +216,59 @@ def build_practice_turn_messages(
     )
     needs_seed = conv is None or not conv.system or total_chars > MAX_PRACTICE_CONVERSATION_CHARS
 
-    if needs_seed:
-        system_prompt = build_practice_session_system_prompt(session)
-        plan_block = _format_question_plan(session)
-        prior_notes = _build_intervening_notes(session, 0)
-        ws_delta = _format_workspace_delta({}, curr_ws)
-        directive = _format_turn_directive(
+    if not needs_seed:
+        assert conv is not None
+        system_prompt = conv.system
+        intervening = _build_intervening_notes(session, conv.last_synced_turn_count)
+        ws_delta = _format_workspace_delta(conv.last_workspace, curr_ws)
+        user_content = _format_turn_directive(
             current_question=current_question,
             next_question=next_question,
             follow_up_count=follow_up_count,
             max_followups=max_followups,
-            intervening_notes=prior_notes,
+            intervening_notes=intervening,
             ws_delta=ws_delta,
             candidate_answer=candidate_answer,
         )
-        user_content = f"{plan_block}\n\n{directive}"
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ]
-        return messages, user_content, curr_ws, system_prompt, True
+        if total_chars + len(user_content) <= MAX_PRACTICE_CONVERSATION_CHARS:
+            messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+            for msg in conv.messages:
+                messages.append({"role": msg.role, "content": msg.content})
+            messages.append({"role": "user", "content": user_content})
+            return messages, user_content, curr_ws, system_prompt, False
 
-    assert conv is not None
-    system_prompt = conv.system
-    intervening = _build_intervening_notes(session, conv.last_synced_turn_count)
-    ws_delta = _format_workspace_delta(conv.last_workspace, curr_ws)
-    user_content = _format_turn_directive(
+    # Seed Turn 1, migrate legacy session, or cleanly re-budget after overflow so the prompt
+    # ALWAYS stays well below MAX_PRACTICE_CONVERSATION_CHARS (preventing reset-every-turn loops).
+    system_prompt = build_practice_session_system_prompt(session)
+    plan_block = _format_question_plan(session)
+    ws_delta = _format_workspace_delta({}, curr_ws)
+    base_directive = _format_turn_directive(
         current_question=current_question,
         next_question=next_question,
         follow_up_count=follow_up_count,
         max_followups=max_followups,
-        intervening_notes=intervening,
+        intervening_notes=[],
         ws_delta=ws_delta,
         candidate_answer=candidate_answer,
     )
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    for msg in conv.messages:
-        messages.append({"role": msg.role, "content": msg.content})
-    messages.append({"role": "user", "content": user_content})
-    return messages, user_content, curr_ws, system_prompt, False
+    fixed_overhead = len(system_prompt) + len(plan_block) + len(base_directive) + 64
+    history_budget = max(0, _SEED_HISTORY_TARGET_CHARS - fixed_overhead)
+    prior_notes = _build_intervening_notes_budgeted(session, 0, max_chars=history_budget)
+    directive = _format_turn_directive(
+        current_question=current_question,
+        next_question=next_question,
+        follow_up_count=follow_up_count,
+        max_followups=max_followups,
+        intervening_notes=prior_notes,
+        ws_delta=ws_delta,
+        candidate_answer=candidate_answer,
+    )
+    user_content = f"{plan_block}\n\n{directive}"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    return messages, user_content, curr_ws, system_prompt, True
 
 
 def commit_practice_conversation_turn(
