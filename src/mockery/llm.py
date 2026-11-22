@@ -10,7 +10,7 @@ import secrets
 import shutil
 import tempfile
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,13 +123,20 @@ class LLMRuntimeConfig:
         return self.provider == "anthropic" or "api.anthropic.com" in self.base_url.lower()
 
     @property
+    def is_local_http(self) -> bool:
+        if self.cli_backend is not None or self.provider == "none":
+            return False
+        low_url = self.base_url.lower()
+        return self.provider in LOCAL_HTTP_PROVIDERS or "localhost" in low_url or "127.0.0.1" in low_url
+
+    @property
     def is_configured(self) -> bool:
         if self.provider == "none":
             return False
         cli = self.cli_backend
         if cli is not None:
             return shutil.which(cli) is not None
-        if self.provider in LOCAL_HTTP_PROVIDERS or "localhost" in self.base_url or "127.0.0.1" in self.base_url:
+        if self.is_local_http:
             return True
         return bool(self.api_key.strip())
 
@@ -225,6 +232,74 @@ def _is_reasoning_model(model_name: str) -> bool:
     return any(tok in m for tok in ("reasoner", "deepseek-r1", "/r1", "o1", "o3", "o4-mini", "thinking"))
 
 
+def _anthropic_supports_temperature(model_name: str) -> bool:
+    """Newer Claude models (Opus 4.7+, 5.x series) reject explicit `temperature` with HTTP 400."""
+    m = model_name.lower()
+    if _is_reasoning_model(m):
+        return False
+    return not any(
+        tok in m
+        for tok in (
+            "opus-4-7",
+            "opus-4.7",
+            "opus-5",
+            "sonnet-5",
+            "haiku-5",
+            "fable-5",
+        )
+    )
+
+
+def _head_tail_excerpt(text: str, max_chars: int) -> str:
+    """Keep both opening setup (35%) and closing outcome/learning (65%) when bounding long excerpts."""
+    if len(text) <= max_chars:
+        return text
+    marker = "\n[... middle omitted ...]\n"
+    usable = max(80, max_chars - len(marker))
+    head_len = max(40, int(usable * 0.35))
+    tail_len = max(40, usable - head_len)
+    return text[:head_len].rstrip() + marker + text[-tail_len:].lstrip()
+
+
+def _extract_usage_counts(usage: Any) -> dict[str, int | None]:
+    """Normalize provider-reported token counters across OpenAI, Anthropic, and CLI JSON envelopes."""
+    out: dict[str, int | None] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+    }
+    if usage is None:
+        return out
+    if isinstance(usage, dict):
+        get = usage.get
+    else:
+        def get(key: str, default: Any = None) -> Any:
+            return getattr(usage, key, default)
+
+    in_tok = get("input_tokens")
+    if in_tok is None:
+        in_tok = get("prompt_tokens")
+    out_tok = get("output_tokens")
+    if out_tok is None:
+        out_tok = get("completion_tokens")
+    cache_tok = get("cache_read_input_tokens")
+    if cache_tok is None:
+        cache_tok = get("cache_read_tokens")
+    if cache_tok is None:
+        cache_tok = get("cached_tokens")
+    if cache_tok is None:
+        details = get("prompt_tokens_details")
+        if isinstance(details, dict):
+            cache_tok = details.get("cached_tokens")
+        elif details is not None:
+            cache_tok = getattr(details, "cached_tokens", None)
+
+    for key, val in (("input_tokens", in_tok), ("output_tokens", out_tok), ("cache_read_tokens", cache_tok)):
+        if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+            out[key] = val
+    return out
+
+
 def _fast_extra_body(model_name: str) -> dict[str, Any] | None:
     """
     DeepSeek V4.1 Flash (`deepseek-flash`) enables Chain-of-Thought thinking by default.
@@ -311,10 +386,11 @@ _WARM_SPARE_SYSTEM_PROMPT = (
     "You are a stateless single-turn engine. Follow the instructions inside <INSTRUCTIONS> "
     "strictly and reply with ONLY the requested output format."
 )
-_WARM_SPARE_TTL_SEC = 180.0
+_WARM_SPARE_TTL_SEC = 600.0
 _CLI_SESSION_TTL_SEC = 900.0
 _MAX_CLI_SESSION_WORKERS = 3
 _STDERR_TAIL_LIMIT = 4096
+_HINT_HISTORY_MAX_CHARS = 4500
 
 
 class _WarmSpareFallbackError(RuntimeError):
@@ -539,22 +615,66 @@ class InterviewCopilotLLM:
     def __init__(self, config: LLMRuntimeConfig) -> None:
         self.config = config
         self._cached_client: AsyncOpenAI | None = None
-        self._cached_client_key: tuple[str, str] | None = None
+        self._cached_client_key: tuple[str, str, int] | None = None
+        self._anthropic_http: httpx.AsyncClient | None = None
         self._warm_spare: _CLISessionWorker | None = None
+        self._warm_spare_reaper: asyncio.Task[Any] | None = None
         self._session_workers: OrderedDict[str, _CLISessionWorker] = OrderedDict()
         self._warm_spare_lock = asyncio.Lock()
         self._warm_spare_tasks: set[asyncio.Task[Any]] = set()
         self._session_prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
         self._worker_generation: int = 0
+        self.recent_usage_events: deque[dict[str, Any]] = deque(maxlen=50)
 
     def _client(self) -> AsyncOpenAI:
         key = self.config.api_key.strip() or "ollama-local"
         base_url = self.config.base_url
-        cache_key = (key, base_url)
+        default_retries = 0 if self.config.is_local_http else 1
+        cache_key = (key, base_url, default_retries)
         if self._cached_client is None or self._cached_client_key != cache_key:
-            self._cached_client = AsyncOpenAI(api_key=key, base_url=base_url, timeout=60.0)
+            self._cached_client = AsyncOpenAI(
+                api_key=key,
+                base_url=base_url,
+                timeout=60.0,
+                max_retries=default_retries,
+            )
             self._cached_client_key = cache_key
         return self._cached_client
+
+    def _anthropic_client(self) -> httpx.AsyncClient:
+        if self._anthropic_http is None or getattr(self._anthropic_http, "is_closed", False):
+            self._anthropic_http = httpx.AsyncClient(timeout=60.0)
+        return self._anthropic_http
+
+    def _record_usage(
+        self,
+        *,
+        operation: str,
+        transport: str,
+        model: str,
+        mode: str,
+        elapsed_ms: int,
+        input_chars: int,
+        output_chars: int,
+        usage: dict[str, int | None] | None,
+        ok: bool,
+    ) -> None:
+        u = usage or {}
+        event: dict[str, Any] = {
+            "op": operation,
+            "transport": transport,
+            "model": model,
+            "mode": mode,
+            "elapsed_ms": elapsed_ms,
+            "input_chars": input_chars,
+            "output_chars": output_chars,
+            "input_tokens": u.get("input_tokens"),
+            "output_tokens": u.get("output_tokens"),
+            "cache_read_tokens": u.get("cache_read_tokens"),
+            "ok": ok,
+        }
+        self.recent_usage_events.append(event)
+        logger.info("llm_call %s", json.dumps(event, separators=(",", ":")))
 
     async def aclose(self) -> None:
         await self.close_all_workers()
@@ -565,6 +685,12 @@ class InterviewCopilotLLM:
                 pass
             self._cached_client = None
             self._cached_client_key = None
+        if self._anthropic_http is not None:
+            try:
+                await self._anthropic_http.aclose()
+            except Exception:
+                pass
+            self._anthropic_http = None
 
     @staticmethod
     def _cli_model_key(backend: str, model: str) -> tuple[str, str | None]:
@@ -751,11 +877,37 @@ class InterviewCopilotLLM:
                     discard = worker
                 else:
                     self._warm_spare = worker
+                    self._schedule_warm_spare_reaper_locked(worker)
         except BaseException:
             await _close_workers_shielded([worker])
             raise
         if discard is not None:
             await _close_workers_shielded([discard])
+
+    def _schedule_warm_spare_reaper_locked(self, worker: _CLISessionWorker) -> None:
+        old_reaper = self._warm_spare_reaper
+        if old_reaper is not None and not old_reaper.done():
+            old_reaper.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._warm_spare_reaper = None
+            return
+
+        async def _reap_after_ttl() -> None:
+            try:
+                await asyncio.sleep(_WARM_SPARE_TTL_SEC)
+            except asyncio.CancelledError:
+                return
+            expired: _CLISessionWorker | None = None
+            async with self._warm_spare_lock:
+                if self._warm_spare is worker:
+                    self._warm_spare = None
+                    expired = worker
+            if expired is not None:
+                await _close_workers_shielded([expired])
+
+        self._warm_spare_reaper = loop.create_task(_reap_after_ttl())
 
     async def _ensure_session_worker(
         self,
@@ -836,15 +988,33 @@ class InterviewCopilotLLM:
             if not alive:
                 stale = cur
                 self._warm_spare = None
+                if self._warm_spare_reaper is not None and not self._warm_spare_reaper.done():
+                    self._warm_spare_reaper.cancel()
+                self._warm_spare_reaper = None
                 cur = None
             elif cur.backend == backend and cur.model_key == model_key:
                 self._warm_spare = None
+                if self._warm_spare_reaper is not None and not self._warm_spare_reaper.done():
+                    self._warm_spare_reaper.cancel()
+                self._warm_spare_reaper = None
                 return cur
             else:
                 return None
         if stale is not None:
-            await _close_worker(stale)
+            await _close_workers_shielded([stale])
         return None
+
+    async def release_warm_spare(self) -> None:
+        """Close only the disposable warm spare (leaving active Practice session workers intact)."""
+        stale: _CLISessionWorker | None = None
+        async with self._warm_spare_lock:
+            stale = self._warm_spare
+            self._warm_spare = None
+            if self._warm_spare_reaper is not None and not self._warm_spare_reaper.done():
+                self._warm_spare_reaper.cancel()
+            self._warm_spare_reaper = None
+        if stale is not None:
+            await _close_workers_shielded([stale])
 
     async def close_session_worker(self, session_key: str) -> None:
         task = self._session_prewarm_tasks.pop(session_key, None)
@@ -861,6 +1031,9 @@ class InterviewCopilotLLM:
         async with self._warm_spare_lock:
             self._worker_generation += 1
             tasks = list(self._warm_spare_tasks)
+            if self._warm_spare_reaper is not None:
+                tasks.append(self._warm_spare_reaper)
+                self._warm_spare_reaper = None
             self._warm_spare_tasks.clear()
             self._session_prewarm_tasks.clear()
             to_close: list[_CLISessionWorker] = []
@@ -899,6 +1072,7 @@ class InterviewCopilotLLM:
         timeout: float,
         expect_json: bool,
         on_delta: Callable[[str], Awaitable[None]] | None,
+        usage_out: dict[str, int | None] | None = None,
     ) -> str:
         """
         Send one user message to a locked-down `agy` or `claude` `stream-json` worker and read
@@ -961,6 +1135,8 @@ class InterviewCopilotLLM:
                             usage = res_obj.get("usage") or res_obj.get("stats")
                             if isinstance(usage, dict):
                                 logger.debug("agy session turn usage: %s", usage)
+                                if usage_out is not None:
+                                    usage_out.update(_extract_usage_counts(usage))
                             final_text = str(res_obj.get("response", "")).strip()
                         break
                 else:
@@ -980,6 +1156,8 @@ class InterviewCopilotLLM:
                         usage = ev.get("usage")
                         if isinstance(usage, dict):
                             logger.debug("claude session turn usage: %s", usage)
+                            if usage_out is not None:
+                                usage_out.update(_extract_usage_counts(usage))
                         final_text = str(ev.get("result", "")).strip()
                         break
         except asyncio.TimeoutError:
@@ -1011,6 +1189,7 @@ class InterviewCopilotLLM:
         timeout: float,
         expect_json: bool,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        meta_out: dict[str, Any] | None = None,
     ) -> str:
         """
         Execute one turn on a session-scoped persistent `agy` or `claude` worker.
@@ -1108,13 +1287,18 @@ class InterviewCopilotLLM:
                 )
 
             try:
+                usage_counts: dict[str, int | None] = {}
                 result = await self._exchange_cli_worker_turn(
                     worker,
                     prompt_text=prompt_text,
                     timeout=timeout,
                     expect_json=expect_json,
                     on_delta=on_delta,
+                    usage_out=usage_counts,
                 )
+                if meta_out is not None:
+                    meta_out["mode"] = "delta" if send_delta_only else "bootstrap"
+                    meta_out["usage"] = usage_counts
             except _WarmSpareFallbackError as exc:
                 invalidated = False
                 async with self._warm_spare_lock:
@@ -1168,30 +1352,37 @@ class InterviewCopilotLLM:
         timeout: float,
         expect_json: bool,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        use_warm_spare: bool = False,
+        meta_out: dict[str, Any] | None = None,
     ) -> str:
         model_name, effort = _parse_agy_model_spec(model)
-        format_rule = (
-            "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY raw valid JSON (no markdown fences)."
-            if expect_json
-            else "Do NOT call any tools or read any files. Use ONLY the input below and reply with ONLY the requested Markdown response."
-        )
+        format_rule = self._cli_format_rule(expect_json)
         combined = f"<INSTRUCTIONS>\n{system}\n</INSTRUCTIONS>\n\n{format_rule}\n\n<INPUT>\n{user}\n</INPUT>"
+        is_fast_model = self._cli_model_key("agy", model) == self._cli_model_key("agy", self.config.fast_model)
 
-        spare = await self._pop_warm_spare("agy", model)
+        spare = await self._pop_warm_spare("agy", model) if use_warm_spare else None
         if spare is not None:
             try:
+                usage_counts: dict[str, int | None] = {}
                 result = await self._exchange_cli_worker_turn(
                     spare,
                     prompt_text=combined,
                     timeout=timeout,
                     expect_json=expect_json,
                     on_delta=on_delta,
+                    usage_out=usage_counts,
                 )
-                if self._cli_model_key("agy", model) == self._cli_model_key("agy", self.config.fast_model):
+                if meta_out is not None:
+                    meta_out["mode"] = "warm"
+                    meta_out["usage"] = usage_counts
+                if is_fast_model:
                     self.prewarm_fast_model()
                 return result
             except _WarmSpareFallbackError as exc:
                 logger.debug("agy warm spare fallback to one-shot: %s", exc)
+
+        if meta_out is not None:
+            meta_out["mode"] = "cold"
 
         use_stream = on_delta is not None and not expect_json
         args = [
@@ -1220,9 +1411,11 @@ class InterviewCopilotLLM:
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await _terminate_proc(proc)
                 raise TimeoutError(f"agy CLI timed out after {timeout:.0f}s")
+            except BaseException:
+                await _terminate_proc(proc)
+                raise
 
             stdout = stdout_b.decode("utf-8", errors="replace").strip()
             stderr = stderr_b.decode("utf-8", errors="replace").strip()
@@ -1233,6 +1426,12 @@ class InterviewCopilotLLM:
             status = envelope.get("status")
             if status and status != "SUCCESS":
                 raise RuntimeError(f"agy status={status}: {envelope.get('error', '')}")
+            if meta_out is not None:
+                raw_usage = envelope.get("usage") or envelope.get("stats")
+                if isinstance(raw_usage, dict):
+                    meta_out["usage"] = _extract_usage_counts(raw_usage)
+            if use_warm_spare and is_fast_model:
+                self.prewarm_fast_model()
             return str(envelope.get("response", stdout)).strip()
 
         # Stream NDJSON events from `agy --output-format stream-json`
@@ -1288,11 +1487,19 @@ class InterviewCopilotLLM:
             status = final_result.get("status")
             if status and status != "SUCCESS":
                 raise RuntimeError(f"agy status={status}: {final_result.get('error', '')}")
+            if meta_out is not None:
+                raw_usage = final_result.get("usage") or final_result.get("stats")
+                if isinstance(raw_usage, dict):
+                    meta_out["usage"] = _extract_usage_counts(raw_usage)
             resp_text = str(final_result.get("response", "")).strip()
             if resp_text:
+                if use_warm_spare and is_fast_model:
+                    self.prewarm_fast_model()
                 return resp_text
         if proc.returncode != 0:
             raise RuntimeError(f"agy CLI exited {proc.returncode}: {stderr[:300]}")
+        if use_warm_spare and is_fast_model:
+            self.prewarm_fast_model()
         return "".join(streamed_chunks).strip()
 
     async def _call_pi_cli(
@@ -1345,6 +1552,8 @@ class InterviewCopilotLLM:
         timeout: float,
         expect_json: bool,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        use_warm_spare: bool = False,
+        meta_out: dict[str, Any] | None = None,
     ) -> str:
         model_name, effort = _parse_agy_model_spec(re.sub(r"^claude/", "", model.strip()))
         format_rule = (
@@ -1353,23 +1562,32 @@ class InterviewCopilotLLM:
             else "Reply with ONLY the requested Markdown response."
         )
         sys_prompt = f"{system.strip()}\n\n{format_rule}".strip()
+        is_fast_model = self._cli_model_key("claude", model) == self._cli_model_key("claude", self.config.fast_model)
 
-        spare = await self._pop_warm_spare("claude", model)
+        spare = await self._pop_warm_spare("claude", model) if use_warm_spare else None
         if spare is not None:
             combined = f"<INSTRUCTIONS>\n{sys_prompt}\n</INSTRUCTIONS>\n\n<INPUT>\n{user}\n</INPUT>"
             try:
+                usage_counts: dict[str, int | None] = {}
                 result = await self._exchange_cli_worker_turn(
                     spare,
                     prompt_text=combined,
                     timeout=timeout,
                     expect_json=expect_json,
                     on_delta=on_delta,
+                    usage_out=usage_counts,
                 )
-                if self._cli_model_key("claude", model) == self._cli_model_key("claude", self.config.fast_model):
+                if meta_out is not None:
+                    meta_out["mode"] = "warm"
+                    meta_out["usage"] = usage_counts
+                if is_fast_model:
                     self.prewarm_fast_model()
                 return result
             except _WarmSpareFallbackError as exc:
                 logger.debug("claude warm spare fallback to one-shot: %s", exc)
+
+        if meta_out is not None:
+            meta_out["mode"] = "cold"
 
         args = [
             "claude",
@@ -1398,13 +1616,16 @@ class InterviewCopilotLLM:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        return await self._communicate_or_stream_cli(
+        result = await self._communicate_or_stream_cli(
             proc,
             name="claude CLI",
             stdin_text=user,
             timeout=timeout,
             on_delta=on_delta,
         )
+        if use_warm_spare and is_fast_model:
+            self.prewarm_fast_model()
+        return result
 
     async def _call_codex_cli(
         self,
@@ -1619,6 +1840,7 @@ class InterviewCopilotLLM:
         cache_prefix_len: int = 0,
         cache_key: str | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        meta_out: dict[str, Any] | None = None,
     ) -> str:
         base = self.config.base_url.rstrip("/")
         url = f"{base}/messages" if not base.endswith("/messages") else base
@@ -1661,48 +1883,75 @@ class InterviewCopilotLLM:
         payload: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "messages": api_messages,
         }
+        if _anthropic_supports_temperature(model):
+            payload["temperature"] = temperature
         if system.strip():
             payload["system"] = [
                 {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
             ]
 
-        async with httpx.AsyncClient(timeout=timeout) as http:
-            if on_delta is not None:
-                payload["stream"] = True
-                parts: list[str] = []
-                async with http.stream("POST", url, headers=headers, json=payload) as resp:
-                    if resp.status_code >= 400:
-                        body = (await resp.aread()).decode("utf-8", errors="replace")
-                        raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {body[:300]}")
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        raw = line[5:].strip()
-                        if not raw or raw == "[DONE]":
-                            continue
-                        try:
-                            ev = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        if ev.get("type") == "content_block_delta":
-                            delta_obj = ev.get("delta") or {}
-                            txt = delta_obj.get("text")
-                            if isinstance(txt, str) and txt:
-                                parts.append(txt)
-                                await on_delta(txt)
-                return "".join(parts).strip()
+        http = self._anthropic_client()
+        post_kwargs: dict[str, Any] = {"headers": headers, "json": payload}
+        if isinstance(http, httpx.AsyncClient):
+            post_kwargs["timeout"] = timeout
 
-            resp = await http.post(url, headers=headers, json=payload)
-            if resp.status_code >= 400:
-                raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {resp.text[:300]}")
-            data = resp.json()
-            blocks = data.get("content") or []
-            return "".join(
-                str(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") == "text"
-            ).strip()
+        if on_delta is not None:
+            payload["stream"] = True
+            parts: list[str] = []
+            stream_usage: dict[str, int | None] = {
+                "input_tokens": None,
+                "output_tokens": None,
+                "cache_read_tokens": None,
+            }
+            async with http.stream("POST", url, **post_kwargs) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {body[:300]}")
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    try:
+                        ev = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    ev_type = ev.get("type")
+                    if ev_type == "message_start":
+                        msg_usage = (ev.get("message") or {}).get("usage")
+                        if isinstance(msg_usage, dict):
+                            for k, v in _extract_usage_counts(msg_usage).items():
+                                if v is not None:
+                                    stream_usage[k] = v
+                    elif ev_type == "message_delta":
+                        delta_usage = ev.get("usage")
+                        if isinstance(delta_usage, dict):
+                            for k, v in _extract_usage_counts(delta_usage).items():
+                                if v is not None:
+                                    stream_usage[k] = v
+                    elif ev_type == "content_block_delta":
+                        delta_obj = ev.get("delta") or {}
+                        txt = delta_obj.get("text")
+                        if isinstance(txt, str) and txt:
+                            parts.append(txt)
+                            await on_delta(txt)
+            if meta_out is not None:
+                meta_out["usage"] = stream_usage
+            return "".join(parts).strip()
+
+        resp = await http.post(url, **post_kwargs)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if meta_out is not None and isinstance(data.get("usage"), dict):
+            meta_out["usage"] = _extract_usage_counts(data["usage"])
+        blocks = data.get("content") or []
+        return "".join(
+            str(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+        ).strip()
 
     async def test_connection(self, timeout: float = 20.0) -> dict[str, Any]:
         """Run a tiny end-to-end ping against the configured provider to verify credentials and model access."""
@@ -1765,156 +2014,231 @@ class InterviewCopilotLLM:
         cache_prefix_len: int = 0,
         cache_key: str | None = None,
         session_key: str | None = None,
+        use_warm_spare: bool = False,
+        operation: str = "completion",
+        max_retries: int | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         """
         Unified multi-turn completion entry point across all providers:
         - `agy` / `claude` with `session_key`: persistent locked-down `stream-json` worker (true prefix caching + 0s boot).
-        - `agy` / `claude` without `session_key`: single-use disposable warm spare / hardened one-shot.
+        - `agy` / `claude` without `session_key`: reserved disposable warm spare (`use_warm_spare=True`) or hardened one-shot.
         - `codex` / `gemini` / `pi`: flattened canonical history via `render_flat_messages`.
         - HTTP (Anthropic, OpenRouter, OpenAI, Gemini, DeepSeek, oMLX, Ollama): native multi-turn `messages`
           with sliding `cache_control` breakpoints or `prompt_cache_key`.
         """
+        t0 = time.perf_counter()
+        input_chars = sum(len(str(m.get("content", ""))) for m in messages)
         sys_str = "\n\n".join(
             str(m.get("content", "")).strip() for m in messages if m.get("role") == "system" and m.get("content")
         )
         non_sys = [m for m in messages if m.get("role") in ("user", "assistant")]
         cli = self.config.cli_backend
+        transport = f"cli:{cli}" if cli else ("anthropic" if self.config.is_anthropic_native else self.config.provider)
+        meta: dict[str, Any] = {"mode": "http" if not cli else "cold", "usage": None}
+        out = ""
+        ok = False
 
-        if cli in ("agy", "claude") and session_key:
-            return await self._call_persistent_cli_session(
-                backend=cli,
-                session_key=session_key,
-                model=model,
-                messages=messages,
-                timeout=timeout,
-                expect_json=expect_json,
-                on_delta=on_delta,
-            )
-
-        if cli is not None:
-            flat_user = (
-                str(non_sys[0].get("content", ""))
-                if len(non_sys) == 1 and non_sys[0].get("role") == "user"
-                else render_flat_messages(messages, include_system=False)
-            )
-            if cli == "pi":
-                return await self._call_pi_cli(
+        try:
+            if cli in ("agy", "claude") and session_key:
+                out = await self._call_persistent_cli_session(
+                    backend=cli,
+                    session_key=session_key,
                     model=model,
-                    system=sys_str,
-                    user=flat_user,
-                    timeout=timeout,
-                    on_delta=on_delta,
-                )
-            cli_dispatch = {
-                "agy": self._call_agy_cli,
-                "claude": self._call_claude_cli,
-                "codex": self._call_codex_cli,
-                "gemini": self._call_gemini_cli,
-            }
-            if cli in cli_dispatch:
-                return await cli_dispatch[cli](
-                    model=model,
-                    system=sys_str,
-                    user=flat_user,
+                    messages=messages,
                     timeout=timeout,
                     expect_json=expect_json,
                     on_delta=on_delta,
+                    meta_out=meta,
                 )
+                ok = True
+                return out
 
-        if self.config.is_anthropic_native:
-            return await self._call_anthropic_api(
-                model=model,
-                system=sys_str,
-                messages=non_sys,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=timeout,
-                cache_prefix_len=cache_prefix_len,
-                cache_key=cache_key,
-                on_delta=on_delta,
+            if cli is not None:
+                flat_user = (
+                    str(non_sys[0].get("content", ""))
+                    if len(non_sys) == 1 and non_sys[0].get("role") == "user"
+                    else render_flat_messages(messages, include_system=False)
+                )
+                if cli == "pi":
+                    out = await self._call_pi_cli(
+                        model=model,
+                        system=sys_str,
+                        user=flat_user,
+                        timeout=timeout,
+                        on_delta=on_delta,
+                    )
+                    ok = True
+                    return out
+                if cli == "agy":
+                    out = await self._call_agy_cli(
+                        model=model,
+                        system=sys_str,
+                        user=flat_user,
+                        timeout=timeout,
+                        expect_json=expect_json,
+                        on_delta=on_delta,
+                        use_warm_spare=use_warm_spare,
+                        meta_out=meta,
+                    )
+                    ok = True
+                    return out
+                if cli == "claude":
+                    out = await self._call_claude_cli(
+                        model=model,
+                        system=sys_str,
+                        user=flat_user,
+                        timeout=timeout,
+                        expect_json=expect_json,
+                        on_delta=on_delta,
+                        use_warm_spare=use_warm_spare,
+                        meta_out=meta,
+                    )
+                    ok = True
+                    return out
+                if cli == "codex":
+                    out = await self._call_codex_cli(
+                        model=model,
+                        system=sys_str,
+                        user=flat_user,
+                        timeout=timeout,
+                        expect_json=expect_json,
+                        on_delta=on_delta,
+                    )
+                    ok = True
+                    return out
+                if cli == "gemini":
+                    out = await self._call_gemini_cli(
+                        model=model,
+                        system=sys_str,
+                        user=flat_user,
+                        timeout=timeout,
+                        expect_json=expect_json,
+                        on_delta=on_delta,
+                    )
+                    ok = True
+                    return out
+
+            if self.config.is_anthropic_native:
+                out = await self._call_anthropic_api(
+                    model=model,
+                    system=sys_str,
+                    messages=non_sys,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                    cache_prefix_len=cache_prefix_len,
+                    cache_key=cache_key,
+                    on_delta=on_delta,
+                    meta_out=meta,
+                )
+                ok = True
+                return out
+
+            client = self._client()
+            if max_retries is not None and hasattr(client, "with_options"):
+                client = client.with_options(max_retries=max_retries)
+            is_reasoning = _is_reasoning_model(model)
+            is_openrouter_claude = self.config.provider == "openrouter" and (
+                "anthropic/" in model.lower() or "claude" in model.lower()
             )
-
-        client = self._client()
-        is_reasoning = _is_reasoning_model(model)
-        is_openrouter_claude = self.config.provider == "openrouter" and (
-            "anthropic/" in model.lower() or "claude" in model.lower()
-        )
-        wire_messages: list[dict[str, Any]] = []
-        if sys_str:
-            if is_openrouter_claude:
-                wire_messages.append(
-                    {
-                        "role": "system",
-                        "content": [
-                            {"type": "text", "text": sys_str, "cache_control": {"type": "ephemeral"}}
-                        ],
-                    }
-                )
-            else:
-                wire_messages.append({"role": "system", "content": sys_str})
-
-        if len(non_sys) == 1 and non_sys[0].get("role") == "user":
-            raw_u = str(non_sys[0].get("content", ""))
-            if is_openrouter_claude:
-                if cache_prefix_len > 0:
-                    user_content: str | list[dict[str, Any]] = _build_cached_user_blocks(raw_u, cache_prefix_len)
-                elif cache_key and raw_u.strip():
-                    user_content = [{"type": "text", "text": raw_u, "cache_control": {"type": "ephemeral"}}]
-                else:
-                    user_content = raw_u
-            else:
-                user_content = raw_u
-            wire_messages.append({"role": "user", "content": user_content})
-        else:
-            for idx, m in enumerate(non_sys):
-                txt = str(m.get("content", ""))
-                if is_openrouter_claude and idx == len(non_sys) - 1 and txt.strip():
+            wire_messages: list[dict[str, Any]] = []
+            if sys_str:
+                if is_openrouter_claude:
                     wire_messages.append(
                         {
-                            "role": m["role"],
+                            "role": "system",
                             "content": [
-                                {"type": "text", "text": txt, "cache_control": {"type": "ephemeral"}}
+                                {"type": "text", "text": sys_str, "cache_control": {"type": "ephemeral"}}
                             ],
                         }
                     )
                 else:
-                    wire_messages.append({"role": m["role"], "content": txt})
+                    wire_messages.append({"role": "system", "content": sys_str})
 
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": wire_messages,
-            "max_tokens": max_tokens,
-        }
-        if not is_reasoning:
-            kwargs["temperature"] = temperature
-        extra_body: dict[str, Any] = {}
-        if disable_fast_thinking:
-            extra = _fast_extra_body(model)
-            if extra:
-                extra_body.update(extra)
-        is_openai_direct = (
-            self.config.provider == "openai" or "api.openai.com" in self.config.base_url.lower()
-        )
-        if is_openai_direct and cache_key:
-            extra_body["prompt_cache_key"] = cache_key[:64]
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+            if len(non_sys) == 1 and non_sys[0].get("role") == "user":
+                raw_u = str(non_sys[0].get("content", ""))
+                if is_openrouter_claude:
+                    if cache_prefix_len > 0:
+                        user_content: str | list[dict[str, Any]] = _build_cached_user_blocks(raw_u, cache_prefix_len)
+                    elif cache_key and raw_u.strip():
+                        user_content = [{"type": "text", "text": raw_u, "cache_control": {"type": "ephemeral"}}]
+                    else:
+                        user_content = raw_u
+                else:
+                    user_content = raw_u
+                wire_messages.append({"role": "user", "content": user_content})
+            else:
+                for idx, m in enumerate(non_sys):
+                    txt = str(m.get("content", ""))
+                    if is_openrouter_claude and idx == len(non_sys) - 1 and txt.strip():
+                        wire_messages.append(
+                            {
+                                "role": m["role"],
+                                "content": [
+                                    {"type": "text", "text": txt, "cache_control": {"type": "ephemeral"}}
+                                ],
+                            }
+                        )
+                    else:
+                        wire_messages.append({"role": m["role"], "content": txt})
 
-        if on_delta is not None:
-            stream = await client.chat.completions.create(**kwargs, stream=True, timeout=timeout)
-            parts: list[str] = []
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    parts.append(delta)
-                    await on_delta(delta)
-            return "".join(parts).strip()
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": wire_messages,
+                "max_tokens": max_tokens,
+            }
+            if not is_reasoning and (not is_openrouter_claude or _anthropic_supports_temperature(model)):
+                kwargs["temperature"] = temperature
+            extra_body: dict[str, Any] = {}
+            if disable_fast_thinking:
+                extra = _fast_extra_body(model)
+                if extra:
+                    extra_body.update(extra)
+            is_openai_direct = (
+                self.config.provider == "openai" or "api.openai.com" in self.config.base_url.lower()
+            )
+            if is_openai_direct and cache_key:
+                extra_body["prompt_cache_key"] = cache_key[:64]
+            if extra_body:
+                kwargs["extra_body"] = extra_body
 
-        resp = await client.chat.completions.create(**kwargs, timeout=timeout)
-        return (resp.choices[0].message.content or "").strip()
+            if on_delta is not None:
+                stream = await client.chat.completions.create(**kwargs, stream=True, timeout=timeout)
+                parts: list[str] = []
+                async for chunk in stream:
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage is not None:
+                        meta["usage"] = _extract_usage_counts(chunk_usage)
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        parts.append(delta)
+                        await on_delta(delta)
+                out = "".join(parts).strip()
+                ok = True
+                return out
+
+            resp = await client.chat.completions.create(**kwargs, timeout=timeout)
+            resp_usage = getattr(resp, "usage", None)
+            if resp_usage is not None:
+                meta["usage"] = _extract_usage_counts(resp_usage)
+            out = (resp.choices[0].message.content or "").strip()
+            ok = True
+            return out
+        finally:
+            self._record_usage(
+                operation=operation,
+                transport=transport,
+                model=model,
+                mode=str(meta.get("mode") or "unknown"),
+                elapsed_ms=round((time.perf_counter() - t0) * 1000),
+                input_chars=input_chars,
+                output_chars=len(out),
+                usage=meta.get("usage"),
+                ok=ok,
+            )
 
     async def _complete_text(
         self,
@@ -1929,6 +2253,9 @@ class InterviewCopilotLLM:
         disable_fast_thinking: bool = True,
         cache_prefix_len: int = 0,
         cache_key: str | None = None,
+        use_warm_spare: bool = False,
+        operation: str = "completion",
+        max_retries: int | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         msgs: list[dict[str, str]] = []
@@ -1945,6 +2272,9 @@ class InterviewCopilotLLM:
             disable_fast_thinking=disable_fast_thinking,
             cache_prefix_len=cache_prefix_len,
             cache_key=cache_key,
+            use_warm_spare=use_warm_spare,
+            operation=operation,
+            max_retries=max_retries,
             on_delta=on_delta,
         )
 
@@ -2005,6 +2335,8 @@ class InterviewCopilotLLM:
                 expect_json=True,
                 cache_prefix_len=len(stable_prefix) if mutable_suffix else 0,
                 cache_key=f"mockery:copilot:{session.id}:{qa.id}",
+                use_warm_spare=True,
+                operation="suggest_probes",
             )
             parsed = _extract_json_object(raw)
             probes = [
@@ -2097,6 +2429,8 @@ class InterviewCopilotLLM:
                 max_tokens=max(450, 220 * len(utterances)),
                 timeout=max(25.0, 15.0 + 4.0 * len(utterances)),
                 expect_json=True,
+                operation="triage_window",
+                max_retries=0,
             )
             parsed = _extract_json_object(raw)
             raw_plans = parsed.get("plans")
@@ -2550,8 +2884,9 @@ class InterviewCopilotLLM:
         # Determine how many tailored questions to ask LLM to generate
         if interview_type in ("system_design", "coding") and selected_bank:
             # Keep the rich curated playbook/test-harness item, and ask LLM only for a tailored framing + greeting
+            # when a target JD is actually present (the framing prompt does not use resume text).
             base = pinned_item or selected_bank[0]
-            if not jd_text.strip() and not redacted_resume.strip():
+            if not jd_text.strip():
                 return [base], default_opening
             sys_p = render_prompt("practice_plan_framing")
             usr_p = (
@@ -2731,6 +3066,7 @@ class InterviewCopilotLLM:
                     expect_json=True,
                     cache_key=cache_key or f"mockery:practice:{session.id}",
                     session_key=session_key,
+                    operation="practice_turn",
                 )
                 conv_commit = {
                     "system_prompt": sys_prompt,
@@ -2878,11 +3214,23 @@ class InterviewCopilotLLM:
         if not self.config.is_configured:
             return fallback
 
-        history = "\n".join(
+        raw_hist_lines = [
             f"{t.get('role', '').upper()}: {t.get('text', '')}"
             for t in recent_turns[-5:]
             if t.get("role") in ("interviewer", "candidate")
-        )
+        ]
+        # Bound hint history newest-first so long candidate answers never produce 30k+ char hint prompts.
+        kept_hist: list[str] = []
+        used_chars = 0
+        for line in reversed(raw_hist_lines):
+            clipped = line[:_HINT_HISTORY_MAX_CHARS] if not kept_hist and len(line) > _HINT_HISTORY_MAX_CHARS else line
+            cost = len(clipped) + 1
+            if kept_hist and used_chars + cost > _HINT_HISTORY_MAX_CHARS:
+                break
+            kept_hist.append(clipped)
+            used_chars += cost
+        kept_hist.reverse()
+        history = "\n".join(kept_hist)
         ws_note = ""
         if workspace_context:
             if workspace_context.get("diagram_summary"):
@@ -2906,6 +3254,8 @@ class InterviewCopilotLLM:
                 max_tokens=160,
                 timeout=20.0,
                 expect_json=False,
+                use_warm_spare=True,
+                operation="practice_hint",
             )
             return txt.strip() or fallback
         except Exception:
@@ -2998,7 +3348,7 @@ class InterviewCopilotLLM:
                 for t in non_retry_turns
                 if str(t.get("question_id") or "") == qid and t.get("role") in ("interviewer", "candidate")
             ]
-            excerpt = "\n".join(q_lines)[:per_q_budget]
+            excerpt = _head_tail_excerpt("\n".join(q_lines), per_q_budget)
             transcript_sections.append(f"### [{qid}] {q.get('title', 'Question')}\n{excerpt}")
 
         ws_block = ""
@@ -3032,22 +3382,31 @@ class InterviewCopilotLLM:
 
         try:
             debrief_model = self.config.calibration_model or self.config.fast_model
+            is_high_effort = _is_reasoning_model(debrief_model) or debrief_model.lower().endswith(
+                (":high", ":xhigh", ":max")
+            )
+            debrief_max_tokens = 3200 if is_high_effort else 1800
+            debrief_timeout = 90.0 if is_high_effort else 60.0
             raw = await self._complete_text(
                 model=debrief_model,
                 system=system_prompt,
                 user=user_prompt,
                 temperature=0.35,
-                max_tokens=1600,
-                timeout=45.0,
+                max_tokens=debrief_max_tokens,
+                timeout=debrief_timeout,
                 expect_json=True,
                 disable_fast_thinking=False,
+                operation="practice_debrief",
             )
             try:
                 parsed = _extract_json_object(raw)
             except json.JSONDecodeError as parse_exc:
+                looks_truncated = raw.lstrip().startswith("{") and not raw.rstrip().endswith("}")
+                retry_max_tokens = min(4800, debrief_max_tokens + 1200) if looks_truncated else debrief_max_tokens
                 logger.warning(
-                    "LLM generate_practice_debrief returned malformed JSON (%s); retrying once at temperature=0.0",
+                    "LLM generate_practice_debrief returned malformed JSON (%s; truncated=%s); retrying once at temperature=0.0",
                     parse_exc,
+                    looks_truncated,
                 )
                 raw_retry = await self._complete_text(
                     model=debrief_model,
@@ -3059,10 +3418,11 @@ class InterviewCopilotLLM:
                         "Use single quotes inside string values instead of unescaped double quotes."
                     ),
                     temperature=0.0,
-                    max_tokens=1600,
-                    timeout=45.0,
+                    max_tokens=retry_max_tokens,
+                    timeout=debrief_timeout,
                     expect_json=True,
                     disable_fast_thinking=False,
+                    operation="practice_debrief_retry",
                 )
                 parsed = _extract_json_object(raw_retry)
             overall = str(parsed.get("overall_encouragement") or "").strip()

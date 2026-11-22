@@ -745,11 +745,23 @@ def test_disposable_warm_spare_lifecycle_streaming_and_fallback(
         async def on_delta(chunk: str) -> None:
             deltas.append(chunk)
 
+        # Background call (use_warm_spare=False) must NOT steal the spare meant for D / Hints
+        bg_out = await agy_llm._complete_text(
+            model="gemini-4-hydrogen:low",
+            system="Triage",
+            user="Background turn.",
+            expect_json=False,
+        )
+        assert bg_out == "FALLBACK_ONESHOT"
+        assert first_proc.terminated is False
+        assert agy_llm._warm_spare is not None
+
         out = await agy_llm._complete_text(
             model="gemini-4-hydrogen:low",
             system="You are an interviewer.",
             user="Candidate answer.",
             expect_json=False,
+            use_warm_spare=True,
             on_delta=on_delta,
         )
         assert out == "Hello"
@@ -762,14 +774,14 @@ def test_disposable_warm_spare_lifecycle_streaming_and_fallback(
 
         # Replenishment task spawned a fresh spare; aclose() terminates it cleanly
         await asyncio.gather(*list(agy_llm._warm_spare_tasks))
-        assert len(spawned_agy) == 2
-        second_proc = spawned_agy[1][1]
+        assert len(spawned_agy) == 3  # 1 initial spare + 1 background one-shot + 1 replenished spare
+        second_proc = spawned_agy[2][1]
         assert second_proc.terminated is False
         await agy_llm.aclose()
         assert second_proc.terminated is True
         assert agy_llm._warm_spare is None
 
-        # 2. Broken warm spare transparently falls back to hardened one-shot
+        # 2. Broken warm spare transparently falls back to hardened one-shot AND re-arms a fresh spare
         fallback_calls: list[tuple[str, ...]] = []
 
         async def fake_agy_fallback_exec(*args: Any, **_kwargs: Any):
@@ -787,11 +799,14 @@ def test_disposable_warm_spare_lifecycle_streaming_and_fallback(
             system="Sys",
             user="Prompt",
             expect_json=True,
+            use_warm_spare=True,
         )
         assert fb_out == "FALLBACK_ONESHOT"
-        assert len(fallback_calls) == 2
+        await asyncio.gather(*list(agy_llm._warm_spare_tasks))
+        assert len(fallback_calls) == 3  # broken spare + one-shot fallback + re-armed spare!
         assert "--input-format" in fallback_calls[0]
         assert "--input-format" not in fallback_calls[1]
+        assert "--input-format" in fallback_calls[2]
         await agy_llm.aclose()
 
         # 3. claude warm spare uses {"type":"user"}, streams content_block_delta, and locks down tools/MCP
@@ -840,6 +855,7 @@ def test_disposable_warm_spare_lifecycle_streaming_and_fallback(
             system="Coach",
             user="Turn 1",
             expect_json=False,
+            use_warm_spare=True,
             on_delta=on_cl_delta,
         )
         assert cl_out == "Hi there"
@@ -974,7 +990,7 @@ def test_prompt_caching_wire_formats_prefix_stability_and_cli_sandbox_cwd(
         async def __aexit__(self, *_a: Any) -> None:
             return None
 
-        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any]):
+        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any], **_kw: Any):
             sent_payloads.append(json)
             return _FakeResp()
 
@@ -1432,7 +1448,7 @@ def test_multiturn_http_sliding_cache_and_authoritative_debrief_carl(
         async def __aexit__(self, *_a: Any) -> None:
             return None
 
-        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any]):
+        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any], **_kw: Any):
             sent_anth.append(json)
             return _FakeResp()
 
@@ -1609,7 +1625,7 @@ def test_review_regressions_overflow_budget_cancellation_turn1_cache_and_debrief
         async def __aexit__(self, *_a: Any) -> None:
             return None
 
-        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any]):
+        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any], **_kw: Any):
             sent_anth.append(json)
             return _FakeResp()
 
@@ -1783,3 +1799,220 @@ def test_review_regressions_overflow_budget_cancellation_turn1_cache_and_debrief
         debrief={"retry_drill": {"question_id": "q1"}},
     )
     assert extras["score"] == 4.0
+
+
+def test_llm_audit_top5_improvements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify Top-5 audit wins: pooled Anthropic client + temp guard, local retries=0, side-call hygiene, telemetry, unified triage rule."""
+    import httpx
+
+    from mockery.grouper import QAGrouper
+    from mockery.llm import (
+        InterviewCopilotLLM,
+        LLMRuntimeConfig,
+        _anthropic_supports_temperature,
+        _head_tail_excerpt,
+    )
+    from mockery.models import InterviewSession, SessionConfig, Utterance
+
+    # 1. Pooled Anthropic httpx.AsyncClient reuse, newer Claude temperature omission, & content-free telemetry
+    created_clients: list[Any] = []
+    sent_payloads: list[dict[str, Any]] = []
+
+    class _FakeAnthResp:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "content": [{"type": "text", "text": "SECRET_REPLY_NEVER_LOGGED"}],
+                "usage": {"input_tokens": 1200, "output_tokens": 45, "cache_read_input_tokens": 950},
+            }
+
+    class _PooledFakeHttp:
+        def __init__(self, **_kw: Any) -> None:
+            self.is_closed = False
+            created_clients.append(self)
+
+        async def post(self, _url: str, *, headers: dict[str, Any], json: dict[str, Any], **_kw: Any):
+            sent_payloads.append(json)
+            return _FakeAnthResp()
+
+        async def aclose(self) -> None:
+            self.is_closed = True
+
+    monkeypatch.setattr(httpx, "AsyncClient", _PooledFakeHttp)
+    anth_cfg = LLMRuntimeConfig(tmp_path)
+    anth_cfg.provider = "anthropic"
+    anth_cfg.base_url = "https://api.anthropic.com/v1"
+    anth_cfg.api_key = "sk-ant-test"
+    anth_llm = InterviewCopilotLLM(anth_cfg)
+
+    async def _run_anth() -> None:
+        assert _anthropic_supports_temperature("claude-haiku-4-5-20251001") is True
+        assert _anthropic_supports_temperature("claude-sonnet-5-5") is False
+        assert _anthropic_supports_temperature("claude-opus-4-7") is False
+        await anth_llm._complete_text(
+            model="claude-sonnet-5-5",
+            system="Sys",
+            user="SECRET_PROMPT_TEXT",
+            operation="practice_turn",
+        )
+        await anth_llm._complete_text(
+            model="claude-haiku-4-5-20251001",
+            system="Sys",
+            user="Turn 2",
+            operation="suggest_probes",
+        )
+        assert len(created_clients) == 1  # Reused across both calls!
+        assert "temperature" not in sent_payloads[0]
+        assert "temperature" in sent_payloads[1]
+        assert len(anth_llm.recent_usage_events) == 2
+        ev0 = anth_llm.recent_usage_events[0]
+        assert ev0["op"] == "practice_turn"
+        assert ev0["input_tokens"] == 1200
+        assert ev0["output_tokens"] == 45
+        assert ev0["cache_read_tokens"] == 950
+        assert ev0["ok"] is True
+        ev_blob = json.dumps(ev0)
+        assert "SECRET_PROMPT_TEXT" not in ev_blob
+        assert "SECRET_REPLY_NEVER_LOGGED" not in ev_blob
+        await anth_llm.aclose()
+        assert created_clients[0].is_closed is True
+
+    asyncio.run(_run_anth())
+
+    # 2. Local HTTP providers configure max_retries=0
+    local_cfg = LLMRuntimeConfig(tmp_path)
+    local_cfg.provider = "omlx"
+    local_cfg.base_url = "http://localhost:8000/v1"
+    local_cfg.api_key = ""
+    assert local_cfg.is_local_http is True
+    local_llm = InterviewCopilotLLM(local_cfg)
+    assert local_llm._client().max_retries == 0
+
+    # 3. Practice side-call hygiene: Hint budget, Plan resume-only skip, Debrief head+tail & high-effort scaling
+    oai_cfg = LLMRuntimeConfig(tmp_path)
+    oai_cfg.provider = "openai"
+    oai_cfg.api_key = "sk-test"
+    oai_cfg.fast_model = "gpt-4.1-mini"
+    oai_cfg.calibration_model = "gemini-4-hydrogen:high"
+    p_llm = InterviewCopilotLLM(oai_cfg)
+    seen_calls: list[dict[str, Any]] = []
+
+    async def fake_complete(**kwargs: Any) -> str:
+        seen_calls.append(kwargs)
+        if kwargs.get("operation") == "practice_debrief":
+            return json.dumps(
+                {
+                    "overall_encouragement": "Great!",
+                    "top_strengths": ["Clear."],
+                    "carl_primer": "CARL.",
+                    "question_reviews": [
+                        {
+                            "question_id": "q1",
+                            "title": "Q1",
+                            "prompt": "Prompt",
+                            "carl": {"context": "strong", "action": "strong", "result": "strong", "learning": "strong"},
+                            "strength": "Strong.",
+                            "coaching_tip": "Nice.",
+                            "carl_reframe": "Example.",
+                        }
+                    ],
+                    "retry_drill": {"question_id": "q1", "focus": "Polish", "prompt": "Retry."},
+                }
+            )
+        return "Look at the hotspot."
+
+    monkeypatch.setattr(p_llm, "_complete_text", fake_complete)
+
+    # Plan: system_design with resume-only & NO JD must make 0 LLM calls
+    items, _opening = asyncio.run(
+        p_llm.generate_practice_plan(
+            role_title="Staff Engineer",
+            company="Acme",
+            interview_type="system_design",
+            target_level="L6",
+            question_source="mixed",
+            question_count=1,
+            bank_candidates=[{"id": "sd1", "title": "Rate Limiter", "prompt": "Design a rate limiter."}],
+            redacted_resume="Led distributed storage migrations.",
+            jd_text="",
+        )
+    )
+    assert len(items) == 1
+    assert len(seen_calls) == 0
+
+    # Hint: two huge 16k answers stay bounded (< 7000 chars) and use_warm_spare=True
+    hint = asyncio.run(
+        p_llm.generate_practice_hint(
+            interview_type="behavioral",
+            target_level="L5",
+            current_question={"prompt": "Tell me about a conflict."},
+            recent_turns=[
+                {"role": "candidate", "text": "OLD_" + ("a" * 16_000)},
+                {"role": "candidate", "text": "LATEST_ANSWER_" + ("b" * 16_000)},
+            ],
+        )
+    )
+    assert hint == "Look at the hotspot."
+    assert len(seen_calls[-1]["user"]) < 7000
+    assert "LATEST_ANSWER_" in seen_calls[-1]["user"]
+    assert seen_calls[-1]["use_warm_spare"] is True
+
+    # Debrief: preserves BOTH opening Context AND closing Learning, scales max_tokens=3200/timeout=90 for :high
+    excerpt = _head_tail_excerpt("OPENING_CONTEXT " + ("m" * 5000) + " CLOSING_LEARNING_40PCT", 600)
+    assert "OPENING_CONTEXT" in excerpt
+    assert "CLOSING_LEARNING_40PCT" in excerpt
+    assert len(excerpt) <= 610
+
+    asyncio.run(
+        p_llm.generate_practice_debrief(
+            role_title="Staff Engineer",
+            company="Acme",
+            interview_type="behavioral",
+            target_level="L6",
+            questions=[{"id": "q1", "title": "Q1", "prompt": "Prompt"}],
+            turns=[
+                {
+                    "role": "candidate",
+                    "question_id": "q1",
+                    "text": "START_SETUP " + ("mid " * 4000) + " FINAL_RESULT_AND_LEARNING",
+                }
+            ],
+        )
+    )
+    deb_call = seen_calls[-1]
+    assert deb_call["max_tokens"] == 3200
+    assert deb_call["timeout"] == 90.0
+    assert "START_SETUP" in deb_call["user"]
+    assert "FINAL_RESULT_AND_LEARNING" in deb_call["user"]
+
+    # 4. QAGrouper unified short-question rule: <10-word '?' fragments do NOT trigger async triage
+    grouper = QAGrouper()
+    sess = InterviewSession(config=SessionConfig(interview_type="behavioral"))
+    grouper.ingest_utterance(
+        sess,
+        speaker="interviewer",
+        text="Tell me about a time you resolved a hard cross-team disagreement on an engineering project.",
+        start_ms=0,
+        end_ms=4000,
+    )
+    grouper.ingest_utterance(
+        sess,
+        speaker="candidate",
+        text=" ".join(["detail"] * 50),
+        start_ms=5000,
+        end_ms=20000,
+    )
+    # Draft-then-final short '?' must NOT trigger triage
+    grouper.upsert_and_route(
+        sess,
+        Utterance(id="short_q", rev=1, final=False, speaker="interviewer", text="Why did that happen?", start_ms=21000, end_ms=22000),
+    )
+    dec_short = grouper.upsert_and_route(
+        sess,
+        Utterance(id="short_q", rev=2, final=True, speaker="interviewer", text="Why did that happen?", start_ms=21000, end_ms=22500),
+    )
+    assert dec_short.needs_async_topic_check is False
