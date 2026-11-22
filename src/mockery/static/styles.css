@@ -17,87 +17,114 @@
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;
-
   --bg: #141413;
   --bg-sunken: #0f0f0e;
   --raised: #1d1d1b;
-
   --hover: rgba(255, 253, 245, 0.055);
   --selected: rgba(255, 253, 245, 0.125);
   --selected-ring: rgba(255, 253, 245, 0.09);
   --line: rgba(255, 253, 245, 0.08);
   --line-strong: rgba(255, 253, 245, 0.16);
-
-  /* Graphite swallows quiet text faster than paper does, so the two muted
-     steps sit a notch brighter here than their light-mode counterparts. */
   --ink: #efeeea;
   --ink-2: #b4b2ab;
   --ink-3: #939189;
   --ink-4: #68665f;
   --on-ink: #161615;
-
   --rec: #ee5d50;
   --good: #62c08d;
   --mixed: #d8a544;
   --bad: #ea6c5e;
   --late: #d98478;
-
   --mark: rgba(244, 196, 64, 0.2);
   --mark-strong: rgba(244, 196, 64, 0.38);
-
   --shadow-pop: 0 0 0 1px var(--line-strong), 0 14px 36px rgba(0, 0, 0, 0.5);
   --scrim: rgba(0, 0, 0, 0.66);
-
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5' stroke='%23939189' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-
   --radius-sm: 5px;
   --radius: 7px;
   --radius-lg: 11px;
-
   --gutter: 54px;
   --pad-x: 24px;
-
-  /* System fonts only — no network requests. */
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
   --font-serif: "New York", ui-serif, "Iowan Old Style", "Palatino", Georgia, serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --accent: #e2ad7c;
+  --accent-soft: rgba(226, 173, 124, 0.13);
+  --sidebar: #0f0f0e;
+  --sidebar-line: rgba(255, 253, 245, 0.08);
+  --wash: rgba(255, 253, 245, 0.035);
+  --wash-strong: rgba(255, 253, 245, 0.06);
+  --track: rgba(255, 253, 245, 0.07);
+  --thumb: rgba(255, 253, 245, 0.16);
+  --thumb-shadow: inset 0 0 0 1px rgba(255, 253, 245, 0.1), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --pill-on: rgba(255, 253, 245, 0.14);
+  --pill-on-shadow: inset 0 0 0 1px rgba(255, 253, 245, 0.12);
+  --switch-off: rgba(255, 253, 245, 0.17);
+  --knob: #d8d6cf;
+  --callout: rgba(216, 165, 68, 0.1);
+  --callout-ink: #dcb869;
+  --shadow-soft: 0 12px 32px rgba(0, 0, 0, 0.38);
+  --shadow-dock: 0 0 0 1px var(--line-strong), 0 14px 34px rgba(0, 0, 0, 0.42);
+  --shadow-cta: 0 1px 0 rgba(255, 255, 255, 0.25) inset, 0 6px 18px rgba(0, 0, 0, 0.35);
+  --syn-kw: #e2ad7c;
+  --syn-str: #a5c99b;
+  --syn-num: #dfb866;
+  --syn-lit: #e0998a;
+  --syn-fn: #a9c6de;
+  --syn-def: #f4f2ea;
+  --syn-com: #7d7b73;
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
-
   --bg: #fbfaf7;
   --bg-sunken: #f4f3ee;
   --raised: #ffffff;
-
   --hover: rgba(26, 24, 16, 0.05);
   --selected: rgba(26, 24, 16, 0.08);
   --selected-ring: transparent;
   --line: rgba(26, 24, 16, 0.09);
   --line-strong: rgba(26, 24, 16, 0.18);
-
   --ink: #1c1b18;
   --ink-2: #55534c;
-  /* Helper text and captions: dark enough to clear 4.5:1 on paper, so
-     instructions read as quiet, never as disabled. */
   --ink-3: #716e67;
   --ink-4: #b2afa7;
   --on-ink: #fbfaf7;
-
   --rec: #d63c30;
   --good: #26804f;
   --mixed: #a8720c;
   --bad: #c6402f;
   --late: #b9503f;
-
   --mark: rgba(250, 206, 62, 0.36);
   --mark-strong: rgba(250, 206, 62, 0.62);
-
   --shadow-pop: 0 0 0 1px var(--line), 0 14px 36px rgba(26, 24, 16, 0.13);
-  /* A light neutral veil plus blur: dialogs float over paper instead of tinting it taupe. */
   --scrim: rgba(20, 20, 18, 0.22);
-
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5' stroke='%23716e67' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --accent: #99531f;
+  --accent-soft: rgba(153, 83, 31, 0.09);
+  --sidebar: #efede5;
+  --sidebar-line: rgba(26, 24, 16, 0.12);
+  --wash: rgba(26, 24, 16, 0.032);
+  --wash-strong: rgba(26, 24, 16, 0.055);
+  --track: rgba(26, 24, 16, 0.07);
+  --thumb: #ffffff;
+  --thumb-shadow: 0 0 0 1px rgba(26, 24, 16, 0.1), 0 1px 3px rgba(26, 24, 16, 0.14);
+  --pill-on: #ffffff;
+  --pill-on-shadow: 0 0 0 1px rgba(26, 24, 16, 0.16), 0 1px 2px rgba(26, 24, 16, 0.08);
+  --switch-off: rgba(26, 24, 16, 0.2);
+  --knob: #ffffff;
+  --callout: rgba(214, 158, 46, 0.14);
+  --callout-ink: #865a08;
+  --shadow-soft: 0 1px 2px rgba(26, 24, 16, 0.04), 0 6px 16px rgba(26, 24, 16, 0.05);
+  --shadow-dock: 0 0 0 1px rgba(26, 24, 16, 0.13), 0 1px 2px rgba(26, 24, 16, 0.04), 0 6px 16px rgba(26, 24, 16, 0.055);
+  --shadow-cta: 0 6px 16px rgba(26, 24, 16, 0.2);
+  --syn-kw: #9a4a1c;
+  --syn-str: #2d6c48;
+  --syn-num: #8a5a00;
+  --syn-lit: #a8412d;
+  --syn-fn: #2b5a84;
+  --syn-def: #1c1b18;
+  --syn-com: #838078;
 }
 
 /* ----------------------------------------------------------------------------
@@ -221,6 +248,7 @@ kbd {
 }
 
 /* Where two scrollbars meet, Chromium paints an opaque white square unless told otherwise. */
+
 ::-webkit-scrollbar-corner,
 ::-webkit-resizer {
   background: transparent;
@@ -389,23 +417,8 @@ kbd {
   color: var(--ink-2);
 }
 
-.studio-check {
-  width: 14px;
-  height: 14px;
-  margin: 0;
-  accent-color: var(--ink);
-  flex-shrink: 0;
-}
-
-.check-line {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--ink-2);
-  cursor: pointer;
-}
-
 /* Segmented choice: plain words, the chosen one sits on a quiet tint. */
+
 .seg {
   display: inline-flex;
   flex-wrap: wrap;
@@ -522,6 +535,7 @@ kbd {
 }
 
 /* The mark is the recording light. */
+
 .brand-dot {
   width: 9px;
   height: 9px;
@@ -680,6 +694,7 @@ kbd {
 
 /* Calm until it matters: amber for the last five minutes, a muted red for the
    last one and anything past the limit. */
+
 .clock.warn .clock-now {
   color: var(--mixed);
 }
@@ -689,6 +704,7 @@ kbd {
 }
 
 /* 45 minutes, drawn along the bottom edge of the title bar. */
+
 .pacing-line {
   position: absolute;
   left: 0;
@@ -796,6 +812,7 @@ kbd {
 }
 
 /* Settings-style rows: label on the left, value on the right. */
+
 .set-rows {
   display: flex;
   flex-direction: column;
@@ -851,15 +868,6 @@ kbd {
   min-height: 0;
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
-}
-
-.home-sidebar {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 14px 8px 0;
-  border-right: 1px solid var(--line);
-  background: var(--bg-sunken);
 }
 
 .home-sidebar-head {
@@ -940,12 +948,14 @@ kbd {
 
 /* The time of day is what tells two same-titled interviews apart, so it gets
    its own right-hand column. */
+
 .session-time {
   flex-shrink: 0;
   white-space: nowrap;
 }
 
 /* A calibrated interview carries the same quiet dot as the Calibration tab. */
+
 .session-dot {
   flex-shrink: 0;
   align-self: center;
@@ -970,13 +980,6 @@ kbd {
   min-height: 0;
   overflow-y: auto;
   padding: 44px 40px 0;
-}
-
-.home-form {
-  width: 100%;
-  max-width: 520px;
-  margin: auto;
-  padding: 24px 0 40px;
 }
 
 .home-kicker {
@@ -1005,8 +1008,6 @@ kbd {
   font-weight: 500;
   letter-spacing: -0.012em;
   line-height: 1.2;
-  /* A headline, not a text box: it wraps to as many lines as the role needs
-     and never shows a resize handle, a scrollbar or an ellipsis. */
   resize: none;
   overflow: hidden;
   field-sizing: content;
@@ -1018,6 +1019,7 @@ kbd {
 }
 
 /* Long titles step down a size so they still settle in two lines. */
+
 .home-role[data-fit="md"] {
   font-size: 27px;
 }
@@ -1040,6 +1042,7 @@ kbd {
 }
 
 /* A pencil at rest says "this is a field"; it steps aside once you're typing. */
+
 .home-role-cue {
   position: absolute;
   right: 2px;
@@ -1057,12 +1060,6 @@ kbd {
 
 .home-role-wrap:focus-within .home-role-cue {
   opacity: 0;
-}
-
-.props {
-  display: flex;
-  flex-direction: column;
-  padding: 14px 0 6px;
 }
 
 .prop {
@@ -1114,18 +1111,11 @@ kbd {
   box-shadow: inset 0 -1px 0 var(--ink-3);
 }
 
-.home-cta {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding-top: 20px;
-  border-top: 1px solid var(--line);
-}
-
 .home-cta-hint {
   color: var(--ink-3);
   font-size: 12.5px;
   line-height: 1.4;
+  max-width: 34ch;
 }
 
 .home-foot {
@@ -1144,6 +1134,7 @@ kbd {
 }
 
 /* "Try it without audio" belongs to Interviewer Copilot only. */
+
 .home[data-home-mode="practice"] #setupSimulateBtn {
   display: none;
 }
@@ -1215,6 +1206,7 @@ kbd {
 }
 
 /* Phase navigation: words, not pills. */
+
 .phase-nav {
   display: flex;
   align-items: center;
@@ -1292,6 +1284,7 @@ kbd {
 }
 
 /* Tabs: text with a rule under the active one, sitting on the bar's hairline. */
+
 .tabs {
   display: flex;
   align-self: stretch;
@@ -1477,6 +1470,7 @@ kbd {
 }
 
 /* Speakers are told apart by weight, not hue: the candidate is the signal. */
+
 .role-flip-btn {
   padding: 0;
   border: 0;
@@ -1534,6 +1528,7 @@ kbd {
 
 /* Fillers ("um", "uh", a lone "yeah") all step back the same way: one shade
    quieter, never italic, wherever they fall in a turn. */
+
 .utt-filler {
   color: var(--ink-3);
 }
@@ -1543,6 +1538,7 @@ kbd {
 }
 
 /* Cited evidence: one treatment — a highlighter stroke over the words. */
+
 .utt-seg.cite-selected,
 .utt-para mark,
 .cite-link.active {
@@ -1668,6 +1664,7 @@ kbd {
 }
 
 /* A quiet, centred sentence for "nothing here yet". */
+
 .quiet-state {
   margin: auto;
   max-width: 340px;
@@ -1788,6 +1785,7 @@ kbd {
 
 /* The number shares a baseline with the angle, so the eye reads
    "2 · Trade-offs" and then drops straight into the question. */
+
 .probe-num {
   color: var(--ink-3);
   font-size: 12.5px;
@@ -1831,6 +1829,7 @@ kbd {
 
 /* Asked questions sink to the bottom as one quiet, checked line each, so the
    next thing to ask always owns the top of the pane. */
+
 .probe.asked {
   padding: 9px 0;
 }
@@ -1894,16 +1893,6 @@ kbd {
   font-size: 12px;
 }
 
-.probe-thinking {
-  margin: auto;
-  padding: 40px 0;
-  color: var(--ink-3);
-  font-family: var(--font-serif);
-  font-size: 19px;
-  font-style: italic;
-  animation: think 1.8s ease-in-out infinite;
-}
-
 @keyframes think {
   0%,
   100% {
@@ -1955,6 +1944,7 @@ kbd {
 }
 
 /* Balanced lines, so a sentence that almost fits never strands one word. */
+
 .verdict-sub-text {
   flex: 1;
   min-width: 0;
@@ -1994,6 +1984,7 @@ kbd {
 
 /* The tint bleeds a little past the text column, like the phase tabs do, so
    the columns themselves never shift. */
+
 .phase-row::before {
   content: "";
   position: absolute;
@@ -2009,6 +2000,7 @@ kbd {
 }
 
 /* The phase that is open in the transcript. */
+
 .phase-row.active::before {
   background: var(--selected);
 }
@@ -2316,6 +2308,7 @@ kbd {
 }
 
 /* Quoted speech is set in serif italic, like a pull quote in running text. */
+
 .evidence-quote {
   font-family: var(--font-serif);
   font-size: 1.04em;
@@ -2323,6 +2316,7 @@ kbd {
 }
 
 /* A citation is a quiet timestamp, not a chip. */
+
 .cite-link {
   padding: 0;
   border: 0;
@@ -2404,10 +2398,6 @@ kbd {
   overflow: hidden;
 }
 
-.modal-card-wide {
-  max-width: 580px;
-}
-
 .modal-header {
   display: flex;
   align-items: center;
@@ -2426,7 +2416,6 @@ kbd {
 .modal-body {
   flex: 1;
   min-height: 0;
-  /* Dialogs only ever scroll vertically; a full-bleed child must not summon a second scrollbar. */
   overflow-x: hidden;
   overflow-y: auto;
   padding: 6px 24px 16px;
@@ -2434,6 +2423,7 @@ kbd {
 
 /* Model presets and "Custom" are one choice and stay on one line; the raw
    model ID only appears once Custom is picked. */
+
 .quick-chips {
   flex-wrap: nowrap;
 }
@@ -2550,13 +2540,6 @@ kbd {
   max-width: 600px;
 }
 
-.onboarding-intro {
-  margin: 2px 0 16px;
-  color: var(--ink-2);
-  font-size: 13.5px;
-  line-height: 1.55;
-}
-
 .onboard-group {
   margin-top: 14px;
   padding-top: 14px;
@@ -2656,18 +2639,6 @@ kbd {
   margin-top: 6px;
 }
 
-.onboard-head-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.onboard-steps {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .onboard-step-pill {
   display: inline-flex;
   align-items: center;
@@ -2693,46 +2664,10 @@ kbd {
   color: var(--ink);
 }
 
-.onboard-step-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--line);
-  color: var(--ink-2);
-  font-size: 10.5px;
-  font-weight: 650;
-}
-
-.onboard-step-pill.active .onboard-step-num {
-  background: var(--accent);
-  color: #fff;
-}
-
-.onboard-voice-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
 @media (max-width: 580px) {
   .onboard-voice-grid {
     grid-template-columns: 1fr;
   }
-}
-
-.onboard-hero-pack {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 13px 14px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--bg);
-  transition: border-color 0.14s ease, background-color 0.14s ease;
 }
 
 .onboard-hero-pack.is-recommended {
@@ -2750,46 +2685,11 @@ kbd {
   min-width: 0;
 }
 
-.onboard-hero-pack-title {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.onboard-hero-pack-desc {
-  margin: 5px 0 0;
-  color: var(--ink-2);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
 .onboard-hero-pack-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.onboard-packs-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.onboard-pack-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
 }
 
 .onboard-pack-main {
@@ -2837,15 +2737,6 @@ kbd {
   gap: 6px;
 }
 
-.practice-voice-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
-  padding-left: 22px;
-}
-
 .practice-voice-note {
   color: var(--ink-3);
   font-size: 12px;
@@ -2859,15 +2750,6 @@ kbd {
   height: 30px;
 }
 
-.modal-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px 14px 24px;
-  border-top: 1px solid var(--line);
-}
-
 .modal-kbd-hints {
   color: var(--ink-3);
   font-size: 12px;
@@ -2876,7 +2758,6 @@ kbd {
 .modal-footer-btns {
   display: flex;
   gap: 6px;
-  /* Stays bottom-right even when the hint beside it is hidden. */
   margin-left: auto;
 }
 
@@ -3006,54 +2887,10 @@ kbd {
   max-height: min(86vh, 780px);
 }
 
-.profile-modal-head-left {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  min-width: 0;
-}
-
-.profile-tabs {
-  gap: 14px;
-}
-
 .profile-modal-body {
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-
-.profile-tab-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.rampart-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-}
-
-.rampart-banner-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.rampart-badge {
-  font-size: 12.5px;
-  font-weight: 550;
-  color: var(--ink-2);
-}
-
-.rampart-badge.is-ok {
-  color: var(--good);
 }
 
 .resume-dropzone-inner {
@@ -3106,21 +2943,6 @@ kbd {
   justify-content: flex-end;
 }
 
-.resume-header-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--line);
-}
-
-.resume-file-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--ink);
-}
-
 .resume-header-actions {
   display: flex;
   align-items: center;
@@ -3129,14 +2951,6 @@ kbd {
 
 .is-danger-text {
   color: var(--bad);
-}
-
-.redaction-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-  padding: 10px 0 4px;
 }
 
 .redaction-custom-wrap {
@@ -3150,15 +2964,6 @@ kbd {
 .field-input-sm {
   height: 29px;
   font-size: 12.5px;
-}
-
-.redaction-section-label {
-  font-size: 11.5px;
-  font-weight: 550;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-top: 4px;
 }
 
 .pii-chips-wrap {
@@ -3187,59 +2992,13 @@ kbd {
   border-color: var(--ink-3);
 }
 
-.pii-chip.is-redacted .pii-chip-tag {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink);
-  background: var(--mark);
-  padding: 1px 5px;
-  border-radius: 3px;
-}
-
 .pii-chip.is-redacted .pii-chip-orig {
   text-decoration: line-through;
   color: var(--ink-3);
 }
 
-.pii-chip.is-kept {
-  border-style: dashed;
-}
-
-.pii-chip.is-kept .pii-chip-tag {
-  font-size: 11px;
-  color: var(--good);
-}
-
-.pii-chip.is-kept .pii-chip-orig {
-  color: var(--ink);
-}
-
-.redacted-preview {
-  margin: 0;
-  padding: 14px 16px;
-  max-height: 290px;
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-  color: var(--ink-2);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.58;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.pii-inline-tag {
-  display: inline-block;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--mark);
-  color: var(--ink);
-  font-weight: 550;
-}
-
 /* Target Job Listings */
+
 .jd-import-box {
   display: flex;
   flex-direction: column;
@@ -3358,65 +3117,14 @@ kbd {
 }
 
 /* Curated Question Banks */
-.banks-filter-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--line);
-}
-
-.banks-count-label {
-  margin-left: auto;
-}
-
-.banks-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 440px;
-  overflow-y: auto;
-}
-
-.bank-item {
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
-}
-
-.bank-item-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.bank-item-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 
 .bank-cat-pill,
 .bank-level-pill,
 .bank-jd-match {
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
   font-size: 11px;
   font-weight: 500;
-}
-
-.bank-cat-pill {
-  background: var(--hover);
-  color: var(--ink-2);
-}
-
-.bank-level-pill {
-  border: 1px solid var(--line);
-  color: var(--ink-3);
+  padding: 2px 7px;
+  border-radius: 999px;
 }
 
 .bank-jd-match {
@@ -3425,62 +3133,10 @@ kbd {
   font-weight: 550;
 }
 
-.bank-item-title {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.bank-item-prompt {
-  margin: 6px 0 0;
-  color: var(--ink);
-  font-family: var(--font-serif);
-  font-size: 14.5px;
-  line-height: 1.48;
-}
-
-.bank-item-foot {
-  margin-top: 6px;
-  color: var(--ink-3);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
 /* Settings Add-Ons & Modules (Xcode-style) */
-.addons-subhead {
-  margin: 12px 0 6px;
-  font-size: 11.5px;
-  font-weight: 550;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-.addons-list {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-
-.addon-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  background: var(--bg);
-}
 
 .addon-row + .addon-row {
   border-top: 1px solid var(--line);
-}
-
-.addon-row-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
 }
 
 .addon-row-title {
@@ -3500,23 +3156,10 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-.addon-row-desc {
-  font-size: 12px;
-  color: var(--ink-3);
-  line-height: 1.4;
-}
-
 .addon-row-err {
   font-size: 11.5px;
   color: var(--bad);
   margin-top: 2px;
-}
-
-.addon-row-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
 }
 
 .addon-state-badge {
@@ -3528,6 +3171,9 @@ kbd {
 .addon-state-badge.is-ok {
   color: var(--good);
   font-weight: 550;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* ----------------------------------------------------------------------------
@@ -3542,44 +3188,16 @@ kbd {
   display: inline-flex;
 }
 
-.home-mode-switch-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px 14px;
-  margin-bottom: 18px;
-}
-
-.home-mode-caption {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
 .launch-group {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.practice-checks {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 .home-practice-history {
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
-}
-
-.home-sidebar-subhead {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  padding: 0 10px 8px;
 }
 
 .practice-workspace {
@@ -3590,40 +3208,12 @@ kbd {
   background: var(--bg);
 }
 
-.practice-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg);
-  flex-shrink: 0;
-}
-
 .practice-bar-left,
 .practice-bar-right {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-}
-
-.practice-title-block {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-}
-
-.practice-role-title {
-  font-family: var(--font-serif);
-  font-size: 15px;
-  font-weight: 500;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .practice-meta-pill,
@@ -3636,36 +3226,9 @@ kbd {
   white-space: nowrap;
 }
 
-.practice-progress-badge {
-  color: var(--ink-2);
-  background: var(--bg-sunken);
-}
-
-.practice-speaking-btn {
-  border-color: var(--good);
-  color: var(--good);
-}
-
-.speaking-wave {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--good);
-  display: inline-block;
-  margin-right: 5px;
-  animation: pulse-dot 1.2s ease-in-out infinite;
-}
-
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.82); }
-}
-
-.practice-grid {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 310px;
 }
 
 .practice-main {
@@ -3689,41 +3252,14 @@ kbd {
   flex-direction: column;
 }
 
-.practice-feed {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 20px 26px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.pturn {
-  padding: 13px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
-}
-
 .pturn-interviewer {
   background: var(--bg-sunken);
   border-color: var(--line);
 }
 
-.pturn-candidate {
-  background: var(--raised);
-  border-color: var(--line-strong);
-}
-
 .pturn-coach {
   border-left: 3px solid var(--good);
   background: var(--bg-sunken);
-}
-
-.pturn.is-thinking .pturn-body {
-  color: var(--ink-3);
-  font-style: italic;
 }
 
 .pturn-head {
@@ -3733,10 +3269,11 @@ kbd {
   gap: 10px;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--ink-3);
-  margin-bottom: 6px;
+  min-height: 18px;
+  margin-bottom: 7px;
+  letter-spacing: 0.06em;
 }
 
 .pturn-body {
@@ -3744,46 +3281,6 @@ kbd {
   line-height: 1.6;
   color: var(--ink);
   word-break: break-word;
-}
-
-.pturn-serif {
-  font-family: var(--font-serif);
-  font-size: 15px;
-  line-height: 1.62;
-}
-
-.pturn-coach-note {
-  margin-top: 9px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--line);
-  font-size: 12px;
-  color: var(--good);
-}
-
-.pturn-retry-tag {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--selected);
-  color: var(--ink-2);
-  margin-left: 6px;
-}
-
-.practice-composer {
-  flex-shrink: 0;
-  padding: 12px 22px 16px;
-  border-top: 1px solid var(--line);
-  background: var(--bg);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.practice-composer-tools {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 .practice-mic-btn .mic-dot {
@@ -3816,59 +3313,7 @@ kbd {
   align-items: flex-end;
 }
 
-.practice-textarea {
-  flex: 1 1 auto;
-  min-height: 68px;
-  max-height: 200px;
-  resize: vertical;
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: var(--radius);
-  border: 1px solid var(--line-strong);
-  background: var(--bg-sunken);
-  color: var(--ink);
-  font-family: var(--font-ui);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.practice-textarea:focus {
-  outline: none;
-  border-color: var(--ink-2);
-}
-
-.practice-send-btn {
-  flex-shrink: 0;
-  height: 38px;
-  padding: 0 18px;
-}
-
 /* Practice Right Coaching Rail */
-
-.practice-side {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  background: var(--bg);
-}
-
-.practice-side-card {
-  padding: 13px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-}
-
-.practice-side-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-}
 
 .practice-kicker {
   font-size: 10.5px;
@@ -3885,45 +3330,29 @@ kbd {
   color: var(--ink-2);
 }
 
-.carl-meter-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 7px;
-}
-
-.carl-pill {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--bg);
-  font-size: 11.5px;
-}
-
 .carl-letter {
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-weight: 700;
-  font-size: 11px;
   background: var(--selected);
   color: var(--ink-2);
   flex-shrink: 0;
-}
-
-.carl-name {
-  color: var(--ink-2);
-  flex: 1 1 auto;
+  grid-area: letter;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 12px;
 }
 
 .carl-state {
-  font-size: 10px;
   color: var(--ink-3);
+  grid-area: state;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .carl-pill.is-strong {
@@ -3952,24 +3381,6 @@ kbd {
 .carl-pill.is-partial .carl-state {
   color: var(--mixed);
   font-weight: 600;
-}
-
-.practice-carl-legend {
-  margin: 10px 0 0;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--ink-3);
-}
-
-.practice-coach-card {
-  border-left: 3px solid var(--good);
-}
-
-.practice-coach-msg {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--ink);
 }
 
 .carl-inline-strip {
@@ -4001,19 +3412,6 @@ kbd {
   background: var(--mixed);
   border-color: var(--mixed);
   color: var(--on-ink);
-}
-
-.practice-roadmap {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.roadmap-item {
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--bg);
 }
 
 .roadmap-item.is-active {
@@ -4048,121 +3446,12 @@ kbd {
   white-space: nowrap;
 }
 
-.roadmap-src {
-  font-size: 10px;
-  color: var(--ink-3);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0 6px;
-}
-
 /* Supportive CARL Debrief & 45-Second Retry Drill */
-
-.practice-debrief-view {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 24px 30px 36px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.debrief-hero {
-  padding: 18px 20px;
-  border: 1px solid var(--line-strong);
-  border-left: 3px solid var(--good);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-}
-
-.debrief-encouragement {
-  margin: 8px 0 0;
-  font-family: var(--font-serif);
-  font-size: 19px;
-  font-weight: 450;
-  line-height: 1.48;
-  color: var(--ink);
-}
-
-.debrief-primer {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.debrief-section-title {
-  margin: 0 0 10px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-.debrief-strengths {
-  margin: 0;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  color: var(--ink);
-  font-size: 13.5px;
-}
-
-.debrief-q-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.debrief-q-card {
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-sunken);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.debrief-q-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.debrief-q-num {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--ink-3);
-  margin-right: 6px;
-}
-
-.debrief-q-title {
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.debrief-q-prompt {
-  margin: 0;
-  font-family: var(--font-serif);
-  font-size: 14px;
-  color: var(--ink-2);
-}
 
 .debrief-q-row {
   font-size: 13px;
   line-height: 1.55;
   color: var(--ink);
-}
-
-.debrief-q-reframe {
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px dashed var(--line-strong);
-  background: var(--bg);
 }
 
 .debrief-q-reframe p {
@@ -4173,121 +3462,15 @@ kbd {
   color: var(--ink);
 }
 
-.practice-retry-card {
-  padding: 16px 18px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--raised);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.practice-retry-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.practice-retry-focus {
-  margin: 4px 0 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.practice-retry-timer-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.practice-retry-clock {
-  font-family: var(--font-mono);
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--ink);
-  min-width: 44px;
-  text-align: right;
-}
-
 .practice-retry-clock.is-warn {
   color: var(--mixed);
-}
-
-.practice-retry-prompt {
-  margin: 0;
-  font-family: var(--font-serif);
-  font-size: 14.5px;
-  line-height: 1.55;
-  color: var(--ink-2);
-}
-
-.practice-retry-actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.practice-retry-history {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.retry-result-card {
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--good);
-  border-radius: var(--radius-sm);
-  background: var(--bg-sunken);
-}
-
-.retry-result-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin-bottom: 6px;
-}
-
-.retry-quote {
-  margin: 0 0 8px;
-  padding-left: 10px;
-  border-left: 2px solid var(--line-strong);
-  font-size: 12.5px;
-  color: var(--ink-2);
-}
-
-.retry-encourage {
-  margin: 0 0 4px;
-  font-weight: 550;
-  color: var(--good);
-  font-size: 13px;
 }
 
 .retry-detail {
   margin: 3px 0 0;
   font-size: 12.5px;
   color: var(--ink);
-}
-
-.practice-debrief-footer {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.practice-debrief-transcript {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
+  margin-top: 6px;
 }
 
 /* ----------------------------------------------------------------------------
@@ -4301,6 +3484,7 @@ kbd {
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-sunken);
+  container-type: inline-size;
 }
 
 .sd-header {
@@ -4334,13 +3518,6 @@ kbd {
   flex-wrap: wrap;
 }
 
-.sd-playbook {
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-
 .sd-playbook-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -4357,16 +3534,6 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 5px;
-}
-
-.sd-req-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--ink);
-  cursor: pointer;
 }
 
 .sd-req-item input {
@@ -4390,86 +3557,25 @@ kbd {
   color: var(--ink-3);
 }
 
-.sd-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.sd-mode-group {
-  display: inline-flex;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
 .sd-tool-btn {
-  padding: 4px 10px;
   border: 0;
   background: transparent;
   color: var(--ink-2);
-  font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
-}
-
-.sd-tool-btn.active {
-  background: var(--ink);
-  color: var(--on-ink);
-}
-
-.sd-palette {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  flex-wrap: wrap;
-  flex: 1 1 auto;
-}
-
-.sd-palette-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 3px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--raised);
-  color: var(--ink);
-  font-size: 11.5px;
-  cursor: pointer;
-  transition: border-color 0.12s ease, background-color 0.12s ease;
+  height: 22px;
+  padding: 0 9px 0 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  transition: background-color 0.12s ease, color 0.12s ease;
 }
 
 .sd-palette-btn:hover {
   border-color: var(--line-strong);
   background: var(--hover);
-}
-
-.sd-palette-tag {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  font-weight: 700;
-  color: var(--ink-3);
-}
-
-.sd-canvas-wrap {
-  position: relative;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--bg);
-  overflow: hidden;
-}
-
-.sd-svg {
-  display: block;
-  width: 100%;
-  height: auto;
-  max-height: 360px;
-  user-select: none;
-  touch-action: none;
 }
 
 .sd-svg:focus {
@@ -4594,30 +3700,6 @@ kbd {
   pointer-events: none;
 }
 
-.sd-empty-hint {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  text-align: center;
-  font-size: 13px;
-  color: var(--ink-3);
-  pointer-events: none;
-}
-
-.sd-inspector {
-  min-height: 34px;
-  display: flex;
-  align-items: center;
-}
-
-.sd-inspector-hint {
-  font-size: 11.5px;
-  color: var(--ink-3);
-}
-
 .sd-inspector-status {
   width: 100%;
   display: flex;
@@ -4665,12 +3747,6 @@ kbd {
 
 .sd-danger-btn {
   color: var(--bad, #b42318);
-}
-
-@media (max-width: 960px) {
-  .sd-playbook-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* ----------------------------------------------------------------------------
@@ -4758,37 +3834,9 @@ kbd {
   color: var(--ink-2);
 }
 
-.cs-hints-list {
-  margin: 0;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12.5px;
-  color: var(--ink-2);
-  line-height: 1.45;
-}
-
 .cs-hints-empty {
   font-size: 12.5px;
   color: var(--ink-2);
-}
-
-.cs-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.cs-lang-group,
-.cs-tab-group {
-  display: inline-flex;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  overflow: hidden;
-  background: var(--bg);
 }
 
 .cs-lang-btn,
@@ -4798,19 +3846,12 @@ kbd {
   color: var(--ink-2);
   font-size: 12px;
   font-weight: 500;
-  padding: 5px 10px;
   cursor: pointer;
-}
-
-.cs-lang-btn + .cs-lang-btn,
-.cs-tab-btn + .cs-tab-btn {
-  border-left: 1px solid var(--line);
-}
-
-.cs-lang-btn.active,
-.cs-tab-btn.active {
-  background: var(--ink);
-  color: var(--bg);
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
 }
 
 .cs-py-banner {
@@ -4839,26 +3880,9 @@ kbd {
   flex-wrap: wrap;
 }
 
-.cs-editor-wrap {
-  display: grid;
-  grid-template-columns: 42px 1fr;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--bg);
-  overflow: hidden;
-  min-height: 240px;
-  max-height: 360px;
-}
-
 .cs-editor-wrap:focus-within {
   border-color: var(--ink);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 18%, transparent);
-}
-
-.cs-editor-hint {
-  font-size: 11px;
-  color: var(--ink-2);
-  line-height: 1.35;
 }
 
 .cs-editor-hint.is-escaped {
@@ -4866,23 +3890,19 @@ kbd {
   font-weight: 500;
 }
 
-.cs-cancel-btn {
-  color: var(--bad, #b42318);
-  border-color: color-mix(in srgb, var(--bad, #b42318) 38%, var(--line));
-}
-
 .cs-gutter {
   margin: 0;
-  padding: 10px 8px 10px 4px;
   text-align: right;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12.5px;
   line-height: 1.55;
-  color: var(--ink-2);
-  background: color-mix(in srgb, var(--line) 28%, var(--bg));
-  border-right: 1px solid var(--line);
   user-select: none;
   overflow: hidden;
+  padding: 12px 9px 12px 4px;
+  border-right: 0;
+  background: transparent;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
 }
 
 .cs-textarea {
@@ -4892,36 +3912,16 @@ kbd {
   padding: 10px 12px;
   border: 0;
   outline: none;
-  resize: none;
-  background: transparent;
-  color: var(--ink);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12.5px;
   line-height: 1.55;
   tab-size: 2;
   white-space: pre;
   overflow: auto;
-}
-
-.cs-console {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
-  overflow: hidden;
-}
-
-.cs-console-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--line);
-}
-
-.cs-console-meta {
-  font-size: 11.5px;
-  color: var(--ink-2);
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  resize: none;
 }
 
 .cs-console-body {
@@ -5079,6 +4079,13 @@ kbd {
 }
 
 .probe-thinking {
+  margin: auto;
+  padding: 40px 0;
+  color: var(--ink-3);
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-style: italic;
+  animation: think 1.8s ease-in-out infinite;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5086,6 +4093,7 @@ kbd {
 }
 
 /* Pending AI Interviewer / Supportive Coach / Retry bubble */
+
 .pturn.is-thinking {
   position: relative;
   overflow: hidden;
@@ -5148,11 +4156,11 @@ kbd {
 
 /* Live Supportive Coach right-rail thinking state: the status pill carries it —
    a soft accent tint and a breathing dot, nothing painted across the card. */
+
 .practice-coach-card.is-thinking .practice-coach-tone {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  /* The pill's padding must not change the row height when it appears. */
   margin: -3px 0;
   padding: 3px 9px 3px 8px;
   border-radius: 999px;
@@ -5171,6 +4179,7 @@ kbd {
 }
 
 /* Staged CARL Debrief generation card */
+
 .debrief-pending-card {
   position: relative;
   overflow: hidden;
@@ -5238,6 +4247,7 @@ kbd {
 }
 
 /* One fixed 12px slot per step, so the marker can change without nudging the text. */
+
 .debrief-step-dot {
   position: relative;
   flex-shrink: 0;
@@ -5263,6 +4273,7 @@ kbd {
 }
 
 /* Done: the dot becomes a drawn checkmark. */
+
 .debrief-pending-steps li.is-done .debrief-step-dot::before {
   top: 2px;
   left: 1px;
@@ -5298,7 +4309,10 @@ kbd {
 }
 
 /* Voice playback equalizer & preparing state */
+
 .practice-speaking-btn {
+  border-color: var(--good);
+  color: var(--good);
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -5348,6 +4362,7 @@ kbd {
 }
 
 /* Mic transcribing spinner (Parakeet local ASR) */
+
 .practice-mic-btn.is-transcribing {
   border-color: var(--mixed);
   color: var(--mixed);
@@ -5363,6 +4378,7 @@ kbd {
 }
 
 /* Setup start hint live status */
+
 .home-cta-hint.is-loading {
   color: var(--ink-2);
 }
@@ -5377,29 +4393,6 @@ kbd {
   }
 }
 
-@media (max-width: 960px) {
-  .workspace,
-  .workspace.wide-copilot {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr 1fr;
-  }
-  .practice-grid {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
-  }
-  .practice-main {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-  .transcript-pane {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-  .telemetry-group {
-    display: none;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -5407,85 +4400,6 @@ kbd {
     animation: none !important;
     transition: none !important;
   }
-}
-
-/* ============================================================================
-   Flagship pass — warm, calm, unboxed, voice-first
-
-   Everything below refines the system above without renaming a single hook.
-   Three ideas carry the whole pass:
-   · One filled action per surface. Everything else is a hairline, a chip or
-     plain words.
-   · Words a person reads or says are set in serif at a reading measure;
-     chrome stays quiet sans.
-   · Boxes only for things that float (dialogs, the composer dock, popovers).
-     Lists, transcripts and the coaching rail are separated by air and hairlines.
-   ============================================================================ */
-
-:root,
-:root[data-theme="dark"] {
-  /* Warm clay: the single non-semantic accent, used for "recommended" and
-     the AI-review spark. Never for primary actions (those stay solid ink). */
-  --accent: #e2ad7c;
-  --accent-soft: rgba(226, 173, 124, 0.13);
-
-  --sidebar: #0f0f0e;
-  --sidebar-line: rgba(255, 253, 245, 0.08);
-  --wash: rgba(255, 253, 245, 0.035);
-  --wash-strong: rgba(255, 253, 245, 0.06);
-  --track: rgba(255, 253, 245, 0.07);
-  --thumb: rgba(255, 253, 245, 0.16);
-  --thumb-shadow: inset 0 0 0 1px rgba(255, 253, 245, 0.1), 0 1px 2px rgba(0, 0, 0, 0.35);
-  --pill-on: rgba(255, 253, 245, 0.14);
-  --pill-on-shadow: inset 0 0 0 1px rgba(255, 253, 245, 0.12);
-  --switch-off: rgba(255, 253, 245, 0.17);
-  --knob: #d8d6cf;
-  --callout: rgba(216, 165, 68, 0.1);
-  --callout-ink: #dcb869;
-  --shadow-soft: 0 12px 32px rgba(0, 0, 0, 0.38);
-  --shadow-dock: 0 0 0 1px var(--line-strong), 0 14px 34px rgba(0, 0, 0, 0.42);
-  --shadow-cta: 0 1px 0 rgba(255, 255, 255, 0.25) inset, 0 6px 18px rgba(0, 0, 0, 0.35);
-
-  --syn-kw: #e2ad7c;
-  --syn-str: #a5c99b;
-  --syn-num: #dfb866;
-  --syn-lit: #e0998a;
-  --syn-fn: #a9c6de;
-  --syn-def: #f4f2ea;
-  --syn-com: #7d7b73;
-}
-
-:root[data-theme="light"] {
-  --accent: #99531f;
-  --accent-soft: rgba(153, 83, 31, 0.09);
-
-  /* The rail is a clear half-step deeper than the paper canvas. */
-  --sidebar: #efede5;
-  --sidebar-line: rgba(26, 24, 16, 0.12);
-  --wash: rgba(26, 24, 16, 0.032);
-  --wash-strong: rgba(26, 24, 16, 0.055);
-  --track: rgba(26, 24, 16, 0.07);
-  --thumb: #ffffff;
-  --thumb-shadow: 0 0 0 1px rgba(26, 24, 16, 0.1), 0 1px 3px rgba(26, 24, 16, 0.14);
-  --pill-on: #ffffff;
-  --pill-on-shadow: 0 0 0 1px rgba(26, 24, 16, 0.16), 0 1px 2px rgba(26, 24, 16, 0.08);
-  --switch-off: rgba(26, 24, 16, 0.2);
-  --knob: #ffffff;
-  --callout: rgba(214, 158, 46, 0.14);
-  --callout-ink: #865a08;
-  /* Floating cards and docks rest on a hairline with a short, tight lift —
-     the same crisp elevation as the rest of the light UI, no broad haze. */
-  --shadow-soft: 0 1px 2px rgba(26, 24, 16, 0.04), 0 6px 16px rgba(26, 24, 16, 0.05);
-  --shadow-dock: 0 0 0 1px rgba(26, 24, 16, 0.13), 0 1px 2px rgba(26, 24, 16, 0.04), 0 6px 16px rgba(26, 24, 16, 0.055);
-  --shadow-cta: 0 6px 16px rgba(26, 24, 16, 0.2);
-
-  --syn-kw: #9a4a1c;
-  --syn-str: #2d6c48;
-  --syn-num: #8a5a00;
-  --syn-lit: #a8412d;
-  --syn-fn: #2b5a84;
-  --syn-def: #1c1b18;
-  --syn-com: #838078;
 }
 
 /* ---- Small controls ------------------------------------------------------- */
@@ -5523,6 +4437,7 @@ kbd {
 }
 
 /* A chip is a one-tap suggestion: quieter than a button, louder than a link. */
+
 .chip-action {
   display: inline-flex;
   align-items: center;
@@ -5556,6 +4471,7 @@ kbd {
 }
 
 /* macOS-style switch. Solid ink when on, in both lightings. */
+
 .switch {
   -webkit-appearance: none;
   appearance: none;
@@ -5598,6 +4514,9 @@ kbd {
 }
 
 .studio-check {
+  margin: 0;
+  accent-color: var(--ink);
+  flex-shrink: 0;
   -webkit-appearance: none;
   appearance: none;
   display: inline-grid;
@@ -5631,17 +4550,23 @@ kbd {
 }
 
 .check-line {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-2);
+  cursor: pointer;
   gap: 9px;
   min-height: 26px;
 }
 
 /* Selected pills must read at a glance, on paper as well as graphite. */
+
 .seg-opt.active {
   background: var(--pill-on);
   box-shadow: var(--pill-on-shadow);
 }
 
 /* One unified track for a two-way mode switch. */
+
 .seg.seg-track {
   flex-wrap: nowrap;
   gap: 2px;
@@ -5676,18 +4601,23 @@ kbd {
   color: var(--ink);
   font-family: var(--font-mono);
   font-size: 0.84em;
-  /* Tokens like `->` or `O(n log n)` must never break mid-symbol. */
   white-space: nowrap;
 }
 
 /* ---- Home ----------------------------------------------------------------- */
 
 .home-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 14px 8px 0;
+  border-right: 1px solid var(--line);
   border-right-color: var(--sidebar-line);
   background: var(--sidebar);
 }
 
 /* One top-aligned rail that scrolls as a whole — no stranded half-height lists. */
+
 .home-rail {
   flex: 1;
   min-height: 0;
@@ -5711,6 +4641,11 @@ kbd {
 }
 
 .home-sidebar-subhead {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
   padding: 0 8px 6px;
 }
 
@@ -5796,20 +4731,21 @@ kbd {
   font-size: 11.5px;
 }
 
-.home-form {
-  max-width: 560px;
-}
-
 .home-mode-switch-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 10px 14px;
   margin-bottom: 30px;
 }
 
 .home-mode-caption {
+  color: var(--ink-3);
   font-size: 12.5px;
 }
 
 /* The target job sits directly under the role headline it informs. */
+
 .home-jd-line {
   display: flex;
   align-items: center;
@@ -5843,15 +4779,25 @@ kbd {
 }
 
 .props {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 0 6px;
   padding-top: 18px;
 }
 
 .practice-checks {
+  display: flex;
+  flex-direction: column;
   gap: 4px;
 }
 
 /* Voice status: one quiet line, never a stack of buttons. */
+
 .practice-voice-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-top: 2px;
   padding-left: 37px;
 }
@@ -5898,11 +4844,15 @@ kbd {
 }
 
 .home-cta {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid var(--line);
   gap: 18px;
   padding-top: 24px;
 }
 
 /* The launch button is the only filled control on the page. */
+
 .home-cta .btn-primary {
   height: 40px;
   padding: 0 22px;
@@ -5917,10 +4867,6 @@ kbd {
   transform: translateY(0.5px);
 }
 
-.home-cta-hint {
-  max-width: 34ch;
-}
-
 /* ---- Dialogs: breathing headers, soft scroll fades ------------------------ */
 
 #settingsModal .modal-body,
@@ -5931,22 +4877,13 @@ kbd {
 
 /* The fade doubles as the bottom padding, so it rides over content while there
    is more to scroll and never covers the last row once you reach the end. */
-#settingsModal .modal-body::after,
-#profileModal .modal-body::after,
-#onboardingModal .modal-body::after {
-  content: "";
-  position: sticky;
-  bottom: 0;
-  z-index: 3;
-  display: block;
-  flex-shrink: 0;
-  height: 26px;
-  margin: 0 -26px;
-  background: linear-gradient(to bottom, transparent, var(--raised) 82%);
-  pointer-events: none;
-}
 
 .modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
   padding: 12px 18px 14px 26px;
 }
 
@@ -5961,6 +4898,7 @@ kbd {
 }
 
 .onboard-head-wrap {
+  display: flex;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
@@ -5972,6 +4910,7 @@ kbd {
 }
 
 .onboarding-intro {
+  color: var(--ink-2);
   margin: 0 0 18px;
   max-width: 58ch;
   font-size: 14px;
@@ -5979,7 +4918,9 @@ kbd {
 }
 
 /* Progress, not tabs: numbered beads joined by a rail. */
+
 .onboard-steps {
+  align-items: center;
   display: flex;
   gap: 10px;
 }
@@ -6010,6 +4951,11 @@ kbd {
 }
 
 .onboard-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: 650;
   position: relative;
   width: 20px;
   height: 20px;
@@ -6052,10 +4998,15 @@ kbd {
 }
 
 .onboard-voice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
 .onboard-hero-pack {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   gap: 16px;
   padding: 16px 16px 14px;
   border: 0;
@@ -6076,6 +5027,10 @@ kbd {
 }
 
 .onboard-hero-pack-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--ink);
   gap: 8px;
   font-family: var(--font-serif);
   font-size: 18px;
@@ -6084,6 +5039,8 @@ kbd {
 }
 
 .onboard-hero-pack-desc {
+  margin: 5px 0 0;
+  color: var(--ink-2);
   margin-top: 6px;
   font-size: 12.5px;
   line-height: 1.5;
@@ -6119,6 +5076,8 @@ kbd {
 }
 
 .onboard-packs-list {
+  display: flex;
+  flex-direction: column;
   gap: 0;
   margin-top: 8px;
   border-radius: 10px;
@@ -6127,6 +5086,10 @@ kbd {
 }
 
 .onboard-pack-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 11px 14px;
   border: 0;
   border-radius: 0;
@@ -6135,10 +5098,6 @@ kbd {
 
 .onboard-pack-row + .onboard-pack-row {
   border-top: 1px solid var(--line);
-}
-
-.onboard-footer {
-  padding: 14px 18px 16px 26px;
 }
 
 .onboard-footer .btn {
@@ -6161,6 +5120,9 @@ kbd {
 }
 
 .profile-modal-head-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
   justify-content: space-between;
   gap: 12px;
 }
@@ -6179,26 +5141,9 @@ kbd {
   gap: 18px;
 }
 
-.profile-tab-panel {
-  gap: 16px;
-}
-
-.rampart-banner {
-  gap: 13px;
-  padding: 13px 15px;
-  border: 0;
-  border-radius: 11px;
-  background: var(--wash-strong);
-}
-
-.rampart-banner-glyph {
-  flex-shrink: 0;
-  width: 21px;
-  height: 21px;
-  color: var(--good);
-}
-
 .rampart-banner-info {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
   gap: 3px;
@@ -6232,30 +5177,11 @@ kbd {
   color: var(--good);
 }
 
-.resume-header-bar {
-  padding-bottom: 14px;
-}
-
 .resume-file-title {
+  color: var(--ink);
   font-family: var(--font-serif);
   font-size: 17px;
   font-weight: 500;
-}
-
-.redaction-controls {
-  gap: 10px 22px;
-  padding: 2px 0 0;
-}
-
-.redaction-section-label {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  margin-top: 10px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
 }
 
 .redaction-section-hint {
@@ -6267,6 +5193,7 @@ kbd {
 }
 
 /* Each detail is a pill with one honest state: Hidden or Visible. */
+
 .pii-chip {
   gap: 8px;
   padding: 3px 3px 3px 11px;
@@ -6316,6 +5243,7 @@ kbd {
 
 /* Status, not action: Hidden is a soft tint, Visible a bare outline. Neither
    competes with the dialog's one solid button. */
+
 .pii-chip.is-redacted .pii-chip-state {
   background: var(--selected);
   box-shadow: inset 0 0 0 1px var(--line);
@@ -6329,7 +5257,11 @@ kbd {
 }
 
 /* What the AI reads, set as prose — not a terminal dump. */
+
 .redacted-preview {
+  margin: 0;
+  overflow-y: auto;
+  word-break: break-word;
   max-height: none;
   overflow: visible;
   padding: 20px 24px;
@@ -6345,6 +5277,7 @@ kbd {
 }
 
 .pii-inline-tag {
+  display: inline-block;
   margin: 0 1px;
   padding: 1px 8px;
   border-radius: 999px;
@@ -6361,6 +5294,10 @@ kbd {
 /* Question banks */
 
 .banks-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
   z-index: 2;
@@ -6377,6 +5314,9 @@ kbd {
 }
 
 .banks-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
   gap: 0;
   max-height: none;
   overflow: visible;
@@ -6396,51 +5336,37 @@ kbd {
 }
 
 .bank-item-head {
+  display: flex;
+  justify-content: space-between;
   flex-wrap: nowrap;
   align-items: baseline;
   gap: 14px;
 }
 
-.bank-item-title {
-  flex: 1;
-  min-width: 0;
-  color: var(--ink);
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.003em;
-}
-
 .bank-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-wrap: wrap;
   margin-top: 7px;
 }
 
-.bank-cat-pill,
-.bank-level-pill,
-.bank-jd-match {
-  padding: 2px 7px;
-  border-radius: 999px;
-}
-
 .bank-cat-pill {
+  color: var(--ink-2);
   background: var(--track);
 }
 
 .bank-level-pill {
+  color: var(--ink-3);
   border: 0;
   box-shadow: inset 0 0 0 1px var(--line);
   text-transform: capitalize;
 }
 
-.bank-item-prompt {
-  max-width: 70ch;
-  margin-top: 10px;
-  color: var(--ink);
-  font-size: 15px;
-  line-height: 1.6;
-}
-
 .bank-item-foot {
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.4;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 0;
@@ -6475,12 +5401,18 @@ kbd {
 }
 
 .addons-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border: 0;
   border-radius: 10px;
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .addon-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 18px;
   padding: 12px 14px;
   background: transparent;
@@ -6491,25 +5423,27 @@ label.addon-row {
 }
 
 .addon-row-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   flex: 1;
   gap: 3px;
 }
 
 .addon-row-desc {
+  font-size: 12px;
+  color: var(--ink-3);
   max-width: 62ch;
   line-height: 1.45;
 }
 
 .addon-row-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: 4px;
   min-width: 132px;
-}
-
-.addon-state-badge.is-ok {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .addon-state-badge.is-ok::before {
@@ -6520,18 +5454,21 @@ label.addon-row {
   background: var(--good);
 }
 
-.addon-remove-btn {
-  color: var(--ink-3);
-}
-
 /* ---- Practice Studio: one bar, an editorial transcript, a voice-first dock -- */
 
 /* The Studio Bar is the only chrome while practising. */
+
 .app-shell.practice-mode .topbar {
   display: none;
 }
 
 .practice-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  flex-shrink: 0;
   height: 48px;
   padding: 0 10px 0 8px;
   gap: 12px;
@@ -6562,10 +5499,19 @@ label.addon-row {
 }
 
 .practice-title-block {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
   gap: 10px;
 }
 
 .practice-role-title {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 15.5px;
   letter-spacing: -0.006em;
 }
@@ -6604,6 +5550,7 @@ label.addon-row {
 }
 
 /* Voice is a real toggle you can see and hit. */
+
 .studio-pill {
   display: inline-flex;
   align-items: center;
@@ -6655,6 +5602,7 @@ label.addon-row {
 }
 
 /* Ending a live interview is deliberate, never the loudest thing on screen. */
+
 .practice-end-btn {
   margin-left: 4px;
   background: transparent;
@@ -6671,6 +5619,7 @@ label.addon-row {
 }
 
 /* Only once the questions are done does the debrief become the next step. */
+
 .practice-end-btn.is-ready:not(:disabled) {
   background: var(--ink);
   box-shadow: none;
@@ -6695,13 +5644,22 @@ label.addon-row {
 }
 
 .practice-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
   grid-template-columns: minmax(0, 1fr) 304px;
 }
 
 /* Transcript: no boxes. Questions in serif, your answers on a quiet wash.
    Scrolled-away lines dissolve under the bar instead of being cut mid-line; the
    fade is shorter than the top padding, so nothing is dimmed at rest. */
+
 .practice-feed {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   gap: 22px;
   padding: 34px 32px 28px;
   scroll-padding-bottom: 28px;
@@ -6732,22 +5690,6 @@ label.addon-row {
   background: var(--wash);
 }
 
-.pturn-coach {
-  padding: 12px 16px 13px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--good) 7%, transparent);
-}
-
-.pturn-coach .pturn-head {
-  color: var(--good);
-}
-
-.pturn-head {
-  min-height: 18px;
-  margin-bottom: 7px;
-  letter-spacing: 0.06em;
-}
-
 .pturn-body {
   max-width: 70ch;
   font-size: 14.5px;
@@ -6757,6 +5699,7 @@ label.addon-row {
 }
 
 .pturn-serif {
+  font-family: var(--font-serif);
   font-size: 17.5px;
   line-height: 1.58;
   letter-spacing: -0.004em;
@@ -6786,6 +5729,9 @@ label.addon-row {
 }
 
 .pturn-retry-tag {
+  border-radius: 999px;
+  color: var(--ink-2);
+  margin-left: 6px;
   padding: 1px 7px;
   background: var(--track);
   font-size: 10px;
@@ -6803,6 +5749,7 @@ label.addon-row {
 
 /* Thinking: staged copy, a glide bar and an elapsed timer — on a soft wash,
    with the dots sitting on the text's optical centre line. */
+
 .pturn.is-thinking {
   padding: 13px 18px 14px;
   border-left: 0;
@@ -6824,7 +5771,11 @@ label.addon-row {
 }
 
 /* Composer: a floating dock where the microphone is the hero. */
+
 .practice-composer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
   gap: 7px;
   padding: 4px 32px 14px;
   border-top: 0;
@@ -6855,6 +5806,11 @@ label.addon-row {
 }
 
 .practice-textarea {
+  flex: 1 1 auto;
+  width: 100%;
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-family: var(--font-ui);
   align-self: center;
   min-height: 42px;
   max-height: 168px;
@@ -6868,6 +5824,7 @@ label.addon-row {
 }
 
 .practice-textarea:focus {
+  outline: none;
   border: 0;
 }
 
@@ -6898,6 +5855,7 @@ label.addon-row {
 }
 
 /* A waiting mic steps back to a quiet chip; it must never read as a second primary. */
+
 .mic-hero:disabled {
   background: var(--track);
   color: var(--ink-3);
@@ -6977,7 +5935,9 @@ label.addon-row {
 
 /* Send never changes width, and only turns solid once there is text to send.
    While you type, the mic steps back so there is still one primary. */
+
 .practice-send-btn {
+  flex-shrink: 0;
   min-width: 92px;
   height: 44px;
   padding: 0 18px;
@@ -6992,14 +5952,14 @@ label.addon-row {
 }
 
 .composer-dock:has(.practice-textarea:not(:placeholder-shown))
-  .mic-hero:not(.is-recording):not(.is-transcribing) {
+ .mic-hero:not(.is-recording):not(.is-transcribing) {
   background: var(--track);
   color: var(--ink);
 }
 
 .composer-dock:has(.practice-textarea:not(:placeholder-shown))
-  .mic-hero:not(.is-recording):not(.is-transcribing)
-  .mic-orb {
+ .mic-hero:not(.is-recording):not(.is-transcribing)
+ .mic-orb {
   background: var(--hover);
 }
 
@@ -7008,6 +5968,7 @@ label.addon-row {
 }
 
 /* Interview over: the whole dock goes quiet and its status line says what happens next. */
+
 .practice-composer.is-locked .composer-dock {
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--line);
@@ -7022,6 +5983,9 @@ label.addon-row {
 }
 
 .practice-composer-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   padding: 0 18px;
@@ -7035,7 +5999,13 @@ label.addon-row {
 }
 
 /* Coaching rail: three quiet sections on hairlines, not three boxes. */
+
 .practice-side {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
   gap: 0;
   padding: 6px 18px 20px;
 }
@@ -7052,6 +6022,10 @@ label.addon-row {
 }
 
 .practice-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 12px;
 }
 
@@ -7082,23 +6056,19 @@ label.addon-row {
   color: var(--ink);
 }
 
-.practice-carl-score {
-  color: var(--ink);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-}
-
 /* Tiles can never be wider than their column, whatever the label. */
+
 .carl-meter-grid {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
 .carl-pill {
+  font-size: 11.5px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  grid-template-areas:
-    "letter name"
+  grid-template-areas: "letter name"
     "letter state";
   align-items: center;
   gap: 1px 9px;
@@ -7111,30 +6081,14 @@ label.addon-row {
   transition: background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.carl-letter {
-  grid-area: letter;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  font-size: 12px;
-}
-
 .carl-name {
+  flex: 1 1 auto;
   grid-area: name;
   min-width: 0;
   overflow: hidden;
   color: var(--ink);
   font-size: 12px;
   font-weight: 550;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.carl-state {
-  grid-area: state;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -7154,12 +6108,16 @@ label.addon-row {
 }
 
 .practice-coach-msg {
+  margin: 0;
+  color: var(--ink);
   font-family: var(--font-serif);
   font-size: 14.5px;
   line-height: 1.58;
 }
 
 .practice-roadmap {
+  display: flex;
+  flex-direction: column;
   gap: 0;
 }
 
@@ -7192,6 +6150,9 @@ label.addon-row {
 }
 
 .roadmap-src {
+  font-size: 10px;
+  color: var(--ink-3);
+  border-radius: 999px;
   padding: 1px 7px;
   border: 0;
   background: var(--track);
@@ -7255,10 +6216,6 @@ label.addon-row {
 
 /* ---- Studio split: conversation left, a spacious canvas or editor right ---- */
 
-.practice-workspace[data-studio] .practice-grid {
-  grid-template-columns: minmax(0, 1fr) 276px;
-}
-
 .practice-workspace[data-studio] .practice-main {
   display: grid;
   grid-template-columns: minmax(310px, 36%) minmax(0, 1fr);
@@ -7289,16 +6246,8 @@ label.addon-row {
   grid-row: 1;
 }
 
-.practice-workspace[data-studio] .practice-feed {
-  padding: 26px 22px 22px;
-}
-
 .practice-workspace[data-studio] .practice-composer {
   padding: 4px 16px 12px;
-}
-
-.practice-workspace[data-studio] .pturn-serif {
-  font-size: 16px;
 }
 
 .practice-workspace[data-studio] .practice-side {
@@ -7306,6 +6255,7 @@ label.addon-row {
 }
 
 /* In the narrow conversation column the dock stacks: words on top, actions below. */
+
 .practice-workspace[data-studio] .composer-dock {
   flex-wrap: wrap;
   border-radius: 20px;
@@ -7481,11 +6431,10 @@ label.addon-row {
 /* System design whiteboard: one floating toolbar in four clusters —
    tool · components · history · everything else. */
 
-.sd-studio {
-  container-type: inline-size;
-}
-
 .sd-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 7px;
   padding: 4px 5px;
   border-radius: 11px;
@@ -7494,23 +6443,14 @@ label.addon-row {
 }
 
 .sd-mode-group {
+  display: inline-flex;
+  flex-shrink: 0;
   gap: 2px;
   padding: 2px;
   overflow: visible;
   border: 0;
   border-radius: 8px;
   background: var(--track);
-}
-
-.sd-tool-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 22px;
-  padding: 0 9px 0 7px;
-  border-radius: 6px;
-  font-size: 12px;
-  transition: background-color 0.12s ease, color 0.12s ease;
 }
 
 .sd-tool-btn.active {
@@ -7521,11 +6461,19 @@ label.addon-row {
 }
 
 .sd-palette {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   flex: 0 1 auto;
   gap: 2px;
 }
 
 .sd-palette-btn {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink);
+  font-size: 11.5px;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
   gap: 5px;
   height: 26px;
   padding: 0 3px;
@@ -7540,6 +6488,8 @@ label.addon-row {
 }
 
 .sd-palette-tag {
+  font-family: var(--font-mono);
+  font-weight: 700;
   padding: 3px 5px;
   border-radius: 5px;
   box-shadow: inset 0 0 0 1px var(--line-strong);
@@ -7556,6 +6506,7 @@ label.addon-row {
 }
 
 /* Names join the badges only when the whiteboard is wide enough to hold them. */
+
 .sd-palette-name {
   display: none;
   color: var(--ink-2);
@@ -7618,6 +6569,7 @@ label.addon-row {
 }
 
 .sd-playbook {
+  background: var(--bg);
   padding: 13px 15px;
   border: 0;
   border-radius: 11px;
@@ -7625,6 +6577,11 @@ label.addon-row {
 }
 
 .sd-req-item {
+  display: flex;
+  align-items: flex-start;
+  line-height: 1.45;
+  color: var(--ink);
+  cursor: pointer;
   gap: 9px;
   font-size: 12.5px;
 }
@@ -7633,26 +6590,16 @@ label.addon-row {
   margin-top: 1.5px;
 }
 
-.sd-canvas-wrap {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 300px;
-  border: 0;
-  border-radius: 13px;
-  background: var(--bg);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.sd-svg {
-  flex: 1 1 auto;
-  width: 100%;
-  height: auto;
-  min-height: 0;
-  max-height: none;
-  border-radius: 13px;
-}
-
 .sd-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--ink-3);
   flex-direction: column;
   gap: 7px;
   pointer-events: none;
@@ -7674,6 +6621,8 @@ label.addon-row {
 }
 
 .sd-inspector {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
   min-height: 30px;
 }
@@ -7694,11 +6643,16 @@ label.addon-row {
 /* Coding studio: a tall editor, one obvious Run, results a person can read. */
 
 .cs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   flex-wrap: nowrap;
 }
 
 .cs-lang-group,
 .cs-tab-group {
+  display: inline-flex;
   flex-shrink: 0;
   gap: 2px;
   padding: 2px;
@@ -7706,15 +6660,6 @@ label.addon-row {
   border: 0;
   border-radius: 8px;
   background: var(--track);
-}
-
-.cs-lang-btn,
-.cs-tab-btn {
-  height: 22px;
-  padding: 0 10px;
-  border-radius: 6px;
-  white-space: nowrap;
-  transition: background-color 0.12s ease, color 0.12s ease;
 }
 
 .cs-lang-btn + .cs-lang-btn,
@@ -7745,6 +6690,7 @@ label.addon-row {
 }
 
 .cs-cancel-btn {
+  border-color: color-mix(in srgb, var(--bad, #b42318) 38%, var(--line));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 40%, var(--line));
   color: var(--bad);
 }
@@ -7759,13 +6705,21 @@ label.addon-row {
 }
 
 .cs-hints-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   color: var(--ink);
   font-size: 13px;
   line-height: 1.5;
 }
 
 /* 24+ visible lines on a laptop, and it grows with the window. */
+
 .cs-editor-wrap {
+  display: grid;
+  overflow: hidden;
   flex: 1 1 auto;
   grid-template-columns: 44px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -7792,14 +6746,6 @@ label.addon-row {
   tab-size: 2;
 }
 
-.cs-gutter {
-  padding: 12px 9px 12px 4px;
-  border-right: 0;
-  background: transparent;
-  color: var(--ink-4);
-  font-variant-numeric: tabular-nums;
-}
-
 .cs-code-layer {
   position: relative;
   min-width: 0;
@@ -7808,6 +6754,7 @@ label.addon-row {
 
 /* The highlighted copy sits exactly under a transparent textarea: same font,
    same padding, same scroll offsets — so the caret and selection stay native. */
+
 .cs-highlight,
 .cs-textarea {
   position: absolute;
@@ -7825,14 +6772,6 @@ label.addon-row {
   overflow: hidden;
   color: var(--ink);
   pointer-events: none;
-}
-
-.cs-textarea {
-  overflow: auto;
-  background: transparent;
-  color: transparent;
-  caret-color: var(--ink);
-  resize: none;
 }
 
 .cs-textarea::placeholder {
@@ -7873,12 +6812,14 @@ label.addon-row {
 }
 
 .cs-editor-hint {
+  line-height: 1.35;
   flex-shrink: 0;
   color: var(--ink-3);
   font-size: 11.5px;
 }
 
 .cs-console {
+  overflow: hidden;
   flex-shrink: 0;
   border: 0;
   border-radius: 12px;
@@ -7887,10 +6828,16 @@ label.addon-row {
 }
 
 .cs-console-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
   padding: 9px 13px 8px;
 }
 
 .cs-console-meta {
+  font-size: 11.5px;
   color: var(--ink-3);
 }
 
@@ -8035,7 +6982,13 @@ label.addon-row {
 /* Generous air under the closing actions: at the end of the page (and when the
    retry card is scrolled into view) Export / Start another practice sit well clear
    of the window edge instead of being cut by it. */
+
 .practice-debrief-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   gap: 32px;
   padding: 40px 32px 88px;
   scroll-padding-bottom: 40px;
@@ -8045,44 +6998,6 @@ label.addon-row {
   flex-shrink: 0;
   align-self: center;
   width: min(100%, 760px);
-}
-
-.practice-debrief-content {
-  display: flex;
-  flex-direction: column;
-  gap: 34px;
-}
-
-.debrief-hero {
-  padding: 0 0 30px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-}
-
-.debrief-encouragement {
-  max-width: 34em;
-  margin-top: 12px;
-  font-size: 23px;
-  line-height: 1.36;
-  letter-spacing: -0.012em;
-  text-wrap: pretty;
-}
-
-.debrief-primer {
-  max-width: 62ch;
-  margin-top: 12px;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.debrief-hero-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px 18px;
-  margin-top: 22px;
 }
 
 .debrief-hero-actions .btn {
@@ -8119,6 +7034,10 @@ label.addon-row {
 }
 
 .debrief-strengths {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--ink);
   gap: 11px;
   padding-left: 0;
   font-size: 14px;
@@ -8145,10 +7064,14 @@ label.addon-row {
 }
 
 .debrief-q-list {
+  display: flex;
+  flex-direction: column;
   gap: 0;
 }
 
 .debrief-q-card {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   padding: 24px 0;
   border: 0;
@@ -8167,6 +7090,8 @@ label.addon-row {
 }
 
 .debrief-q-head {
+  display: flex;
+  justify-content: space-between;
   align-items: baseline;
   gap: 14px;
 }
@@ -8176,12 +7101,16 @@ label.addon-row {
 }
 
 .debrief-q-num {
+  font-weight: 700;
+  color: var(--ink-3);
   margin-right: 8px;
   font-size: 11.5px;
   letter-spacing: 0.04em;
 }
 
 .debrief-q-title {
+  font-weight: 600;
+  color: var(--ink);
   font-size: 15px;
   letter-spacing: -0.003em;
 }
@@ -8201,6 +7130,9 @@ label.addon-row {
 }
 
 .debrief-q-prompt {
+  margin: 0;
+  font-family: var(--font-serif);
+  color: var(--ink-2);
   max-width: 68ch;
   font-size: 15px;
   line-height: 1.55;
@@ -8216,17 +7148,8 @@ label.addon-row {
   line-height: 1.6;
 }
 
-.debrief-q-label {
-  padding-top: 3px;
-  color: var(--ink-3);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  line-height: 1.5;
-  text-transform: uppercase;
-}
-
 /* The reframe is a tinted editorial callout — no dashes, no box-in-a-box. */
+
 .debrief-q-reframe {
   margin-top: 4px;
   padding: 15px 20px 16px;
@@ -8256,7 +7179,10 @@ label.addon-row {
 }
 
 /* Retry drill: the one floating card on the page. */
+
 .practice-retry-card {
+  display: flex;
+  flex-direction: column;
   gap: 16px;
   padding: 26px 28px 24px;
   border: 0;
@@ -8272,6 +7198,8 @@ label.addon-row {
 }
 
 .practice-retry-head {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
   gap: 18px;
 }
@@ -8281,6 +7209,8 @@ label.addon-row {
 }
 
 .practice-retry-focus {
+  margin: 4px 0 0;
+  color: var(--ink);
   margin-top: 5px;
   font-family: var(--font-serif);
   font-size: 21px;
@@ -8290,11 +7220,14 @@ label.addon-row {
 }
 
 .practice-retry-timer-wrap {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
   gap: 10px;
 }
 
 /* A countdown you can read in peripheral vision while speaking. */
+
 .retry-ring {
   --p: 100;
   flex-shrink: 0;
@@ -8331,6 +7264,8 @@ label.addon-row {
 }
 
 .practice-retry-prompt {
+  margin: 0;
+  font-family: var(--font-serif);
   max-width: 66ch;
   color: var(--ink);
   font-size: 16px;
@@ -8351,6 +7286,7 @@ label.addon-row {
 }
 
 /* Nothing to evaluate yet: the button is genuinely disabled and reads that way. */
+
 .retry-dock .retry-submit-btn:disabled:not(.is-loading) {
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--line);
@@ -8359,6 +7295,7 @@ label.addon-row {
 }
 
 /* The rep: composer, its one-line hint and (after a first score) the timer. */
+
 .retry-rep {
   display: flex;
   flex-direction: column;
@@ -8377,6 +7314,8 @@ label.addon-row {
 }
 
 .practice-retry-history {
+  display: flex;
+  flex-direction: column;
   gap: 22px;
 }
 
@@ -8393,11 +7332,19 @@ label.addon-row {
 }
 
 .retry-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--ink-3);
   margin-bottom: 10px;
   letter-spacing: 0.06em;
 }
 
 /* What changed comes first, in words: Result: Partial → Strong. */
+
 .retry-outcome {
   display: flex;
   align-items: center;
@@ -8462,28 +7409,19 @@ label.addon-row {
 }
 
 /* One quote treatment, no nested rules down the left edge. */
-.retry-quote {
-  margin: 0 0 12px;
-  padding: 13px 18px 14px;
-  border-left: 0;
-  border-radius: 12px;
-  background: var(--wash);
-  color: var(--ink);
-  font-family: var(--font-serif);
-  font-size: 14.5px;
-  line-height: 1.62;
-}
 
 .retry-encourage {
+  margin: 0 0 4px;
+  font-weight: 550;
+  color: var(--good);
   margin-bottom: 8px;
   font-size: 13.5px;
 }
 
-.retry-detail {
-  margin-top: 6px;
-}
-
 .practice-debrief-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding-top: 22px;
   border-top: 1px solid var(--line);
@@ -8520,6 +7458,8 @@ label.addon-row {
 }
 
 .practice-debrief-transcript {
+  display: flex;
+  flex-direction: column;
   gap: 20px;
   padding-top: 4px;
   border-top: 0;
@@ -8530,10 +7470,12 @@ label.addon-row {
   width: 100%;
 }
 
-/* ---- Refinements from the rendered review --------------------------------- */
-
 /* Home: the form hangs from one line, so switching modes never moves the switch. */
+
 .home-form {
+  width: 100%;
+  padding: 24px 0 40px;
+  max-width: 560px;
   margin: 0 auto auto;
   padding-top: clamp(20px, 7vh, 72px);
 }
@@ -8547,7 +7489,10 @@ label.addon-row {
 }
 
 /* A requested hint is a quiet aside in the coach's warm tone, never an alert. */
+
 .pturn-coach {
+  padding: 12px 16px 13px;
+  border-radius: 12px;
   background: var(--callout);
 }
 
@@ -8556,12 +7501,9 @@ label.addon-row {
 }
 
 /* Studio rail: the four signals read as one calm list with full names. */
+
 .practice-workspace[data-studio] .practice-grid {
   grid-template-columns: minmax(0, 1fr) 264px;
-}
-
-.practice-workspace[data-studio] .practice-main {
-  grid-template-columns: minmax(292px, 28%) minmax(0, 1fr);
 }
 
 .practice-workspace[data-studio] .carl-meter-grid {
@@ -8605,13 +7547,27 @@ label.addon-row {
    edge to edge and the 920×420 artboard stays centred inside (the SVG's viewBox does
    the centring), so the diagram never floats in dead air. On a short window the
    floor eases down rather than forcing the studio to scroll. */
+
 .sd-canvas-wrap {
+  position: relative;
+  overflow: hidden;
+  border: 0;
+  border-radius: 13px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
   display: block;
   flex: 1 1 0;
   min-height: clamp(240px, calc(100vh - 236px), 420px);
 }
 
 .sd-svg {
+  display: block;
+  user-select: none;
+  touch-action: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  border-radius: 13px;
   position: absolute;
   inset: 0;
   width: 100%;
@@ -8619,6 +7575,7 @@ label.addon-row {
 }
 
 /* The drawable frame: invisible at rest, a hairline guide while a component moves. */
+
 .sd-artboard {
   fill: none;
   stroke: var(--line-strong);
@@ -8635,6 +7592,7 @@ label.addon-row {
 }
 
 /* The debrief-in-progress card sits in the same reading column as the turns. */
+
 .practice-feed > .debrief-pending-card {
   flex-shrink: 0;
   align-self: center;
@@ -8642,24 +7600,41 @@ label.addon-row {
 }
 
 /* Retry feedback labels stay on one line. */
+
 .retry-detail {
   grid-template-columns: 126px minmax(0, 1fr);
 }
 
 .debrief-q-label {
+  padding-top: 3px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
-/* ---- Round 3 micro-polish: alignment, hierarchy, and two-voice type --------- */
-
 /* Privacy banner: the shield hangs from the title line, the title never wraps,
    and the action keeps its own width instead of squeezing the copy. */
+
 .rampart-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 13px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--wash-strong);
   align-items: flex-start;
   padding: 12px 14px 12px 15px;
 }
 
 .rampart-banner-glyph {
+  flex-shrink: 0;
+  width: 21px;
+  height: 21px;
+  color: var(--good);
   margin-top: 1px;
 }
 
@@ -8674,31 +7649,56 @@ label.addon-row {
 }
 
 /* Resume controls sit a little closer, so more of the preview clears the fold. */
+
 .profile-tab-panel {
+  display: flex;
+  flex-direction: column;
   gap: 13px;
 }
 
 .resume-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
   padding-bottom: 10px;
 }
 
 .redaction-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px 22px;
   padding: 0;
 }
 
 /* Each section opens with clear air above its label, and a little under it. */
+
 .redaction-section-label {
+  text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   margin-top: 18px;
   margin-bottom: 3px;
 }
 
 /* Question banks: title leads, pills support, the prompt reads as detail. */
+
 .bank-item {
   padding: 16px 0;
 }
 
 .bank-item-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
   font-size: 15.5px;
   font-weight: 600;
   line-height: 1.35;
@@ -8706,6 +7706,9 @@ label.addon-row {
 }
 
 .bank-item-prompt {
+  margin: 6px 0 0;
+  font-family: var(--font-serif);
+  max-width: 70ch;
   margin-top: 8px;
   color: var(--ink-2);
   font-size: 14px;
@@ -8713,15 +7716,26 @@ label.addon-row {
 }
 
 /* Settings: "Installed · Remove" ends on the same edge as the Install buttons. */
+
 .addon-remove-btn {
+  color: var(--ink-3);
   margin-right: -8px;
 }
 
 /* Dialogs: a longer, eased fade, so a half-scrolled row dissolves into the footer
    rule. The overlap keeps the resting bottom padding exactly where it was. */
+
 #settingsModal .modal-body::after,
 #profileModal .modal-body::after,
 #onboardingModal .modal-body::after {
+  content: "";
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: block;
+  flex-shrink: 0;
+  margin: 0 -26px;
+  pointer-events: none;
   height: 42px;
   margin-top: -16px;
   background: linear-gradient(
@@ -8735,7 +7749,9 @@ label.addon-row {
 
 /* Onboarding footer: both actions end on the body column's edges. A ghost button
    has no visible box, so its label — not its padding — meets the left edge. */
+
 .onboard-footer {
+  padding: 14px 18px 16px 26px;
   padding-right: 26px;
 }
 
@@ -8744,7 +7760,11 @@ label.addon-row {
 }
 
 /* Score in flight: the last reading steps back until the new one lands. */
+
 .practice-carl-score {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
   transition: color 0.2s ease;
 }
 
@@ -8762,6 +7782,7 @@ label.addon-row {
 
 /* Split studio: the conversation column gets a readable measure. Coding can
    spare more width than the whiteboard, whose canvas scales with its pane. */
+
 .practice-workspace[data-studio] .practice-main {
   grid-template-columns: clamp(260px, var(--split-pct, max(300px, 30%)), 560px) minmax(0, 1fr);
 }
@@ -8773,6 +7794,7 @@ label.addon-row {
 /* Split divider: an 8px grab strip centred on the column hairline. At rest it is
    invisible (the conversation's own border is the rule); hover, focus and drag
    strengthen that one line instead of adding chrome. --split-pct is set by a drag. */
+
 .practice-split-handle {
   display: none;
 }
@@ -8823,6 +7845,7 @@ label.addon-row {
 }
 
 /* Conversation toggle: lives beside Home, only while a studio shares the stage. */
+
 .conv-toggle {
   display: none;
   position: relative;
@@ -8869,6 +7892,7 @@ label.addon-row {
 
 /* Collapsed: the whiteboard or editor takes the full stage. Wide layouts only —
    the stacked narrow layout below always shows both panes. */
+
 @media (min-width: 961px) {
   .practice-workspace[data-studio][data-conv-collapsed] .practice-main {
     grid-template-columns: minmax(0, 1fr);
@@ -8886,11 +7910,13 @@ label.addon-row {
 
 /* Debrief in flight: the answer dock steps aside completely. The staged progress
    card in the feed is the one status on screen — no footer line repeating it. */
+
 .practice-composer.is-debriefing {
   display: none;
 }
 
 /* The coach rail agrees quietly: plain text, no tinted pill, no second pulse. */
+
 .practice-coach-card.is-thinking.is-quiet .practice-coach-tone {
   display: inline;
   margin: 0;
@@ -8905,6 +7931,7 @@ label.addon-row {
 
 /* The fades match the top and bottom padding, so scrolled turns dissolve
    cleanly under the bar and above the composer without hard-clipping text. */
+
 .practice-workspace[data-studio] .practice-feed {
   gap: 18px;
   padding: 26px 18px 28px;
@@ -8948,6 +7975,7 @@ label.addon-row {
 
 /* Whiteboard: header, then tools, pinned to the top exactly like the coding studio's
    tabs; the canvas flexes to fill the pane and the hint line rests on the bottom edge. */
+
 .practice-studio-slot > .sd-studio > .sd-toolbar,
 .practice-studio-slot > .sd-studio > .sd-inspector {
   flex-shrink: 0;
@@ -8959,11 +7987,23 @@ label.addon-row {
 
 /* Debrief: a compact opening, sentence-case headings, and one voice per speaker —
    the candidate's own words are always sans, the coach's are serif. */
+
 .debrief-hero {
+  padding: 0 0 30px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
   padding-bottom: 26px;
 }
 
 .debrief-encouragement {
+  margin: 8px 0 0;
+  font-family: var(--font-serif);
+  font-weight: 450;
+  color: var(--ink);
+  letter-spacing: -0.012em;
+  text-wrap: pretty;
   max-width: 36em;
   margin-top: 10px;
   font-size: 21px;
@@ -8971,18 +8011,35 @@ label.addon-row {
 }
 
 .debrief-primer {
+  margin: 10px 0 0;
+  color: var(--ink-3);
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.55;
   margin-top: 10px;
 }
 
 .debrief-hero-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 18px;
   margin-top: 18px;
 }
 
 .practice-debrief-content {
+  display: flex;
+  flex-direction: column;
   gap: 30px;
 }
 
 .retry-quote {
+  margin: 0 0 12px;
+  padding: 13px 18px 14px;
+  border-left: 0;
+  border-radius: 12px;
+  background: var(--wash);
+  color: var(--ink);
   font-family: var(--font-ui);
   font-size: 14.5px;
   line-height: 1.62;
@@ -8992,6 +8049,7 @@ label.addon-row {
 /* Result first. Once a retry is scored, the before → after is the card's focal
    point: it sits right under the prompt, and another rep is a compact, secondary
    invitation beneath it — smaller dock, smaller clock, one hairline of separation. */
+
 .practice-retry-card.has-retries .practice-retry-history {
   gap: 26px;
 }
@@ -9009,6 +8067,7 @@ label.addon-row {
 }
 
 /* The mic steps back to a quiet chip: the scored result is the loudest thing here. */
+
 .practice-retry-card.has-retries .retry-dock .mic-hero:not(:disabled):not(.is-recording):not(.is-transcribing) {
   background: var(--track);
   color: var(--ink);
@@ -9068,8 +8127,6 @@ label.addon-row {
   display: none;
 }
 
-/* ---- Narrow windows (re-stated: the rules above changed the base grid) ------ */
-
 @media (max-width: 1180px) {
   .practice-workspace[data-studio] .practice-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -9086,9 +8143,33 @@ label.addon-row {
 }
 
 @media (max-width: 960px) {
+  .sd-playbook-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace,
+ .workspace.wide-copilot {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+
   .practice-grid {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .practice-main {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .transcript-pane {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .telemetry-group {
+    display: none;
   }
 
   .practice-side {
@@ -9114,7 +8195,7 @@ label.addon-row {
   }
 
   .practice-workspace[data-studio] .practice-split-handle,
-  .practice-workspace[data-studio] .conv-toggle {
+ .practice-workspace[data-studio] .conv-toggle {
     display: none;
   }
 
@@ -9127,7 +8208,7 @@ label.addon-row {
   }
 
   .practice-feed,
-  .practice-debrief-view {
+ .practice-debrief-view {
     padding-left: 18px;
     padding-right: 18px;
   }
@@ -9138,13 +8219,13 @@ label.addon-row {
   }
 
   .debrief-q-row,
-  .retry-detail {
+ .retry-detail {
     grid-template-columns: minmax(0, 1fr);
     gap: 2px;
   }
 
   .studio-action,
-  .composer-kbd {
+ .composer-kbd {
     font-size: 12px;
   }
 }
