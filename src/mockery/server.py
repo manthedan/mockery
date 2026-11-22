@@ -1035,11 +1035,13 @@ def create_app(
 
             # One-shot single-mic speaker role-orientation guard: catches sessions where the
             # candidate spoke first at t=00:00 and inverted both acoustic voice clusters globally.
+            # Skip during local HTTP GPU capture so it never competes with Parakeet MLX.
             if (
                 utt.final
                 and target_session.config.mode == "in_person"
                 and target_session.config.auto_diarize
                 and runtime.llm_config.is_configured
+                and not runtime.llm_config.is_local_http
                 and target_session.id not in runtime.role_orientation_checked
                 and target_session.id not in runtime.role_orientation_inflight
                 and not runtime.diarizer.has_manual_override
@@ -1090,14 +1092,24 @@ def create_app(
 
         triage_lock = asyncio.Lock()
         pending_triage_ids: list[str] = []
-        triage_debounce_state: dict[str, Any] = {"task": None}
+        triage_debounce_state: dict[str, Any] = {
+            "timer_task": None,
+            "closed": False,
+            "capture_gen": 0,
+        }
 
-        def cancel_pending_triage() -> None:
+        def reset_triage_window(*, close_scheduling: bool = False) -> None:
+            triage_debounce_state["capture_gen"] = int(triage_debounce_state["capture_gen"]) + 1
+            if close_scheduling:
+                triage_debounce_state["closed"] = True
             pending_triage_ids.clear()
-            t = triage_debounce_state.get("task")
+            t = triage_debounce_state.get("timer_task")
             if t is not None and not t.done():
                 t.cancel()
-            triage_debounce_state["task"] = None
+            triage_debounce_state["timer_task"] = None
+
+        def open_triage_window() -> None:
+            triage_debounce_state["closed"] = False
 
         def schedule_triage_batch(
             *,
@@ -1105,32 +1117,72 @@ def create_app(
             utterance_id: str,
             job_epoch: int,
         ) -> None:
+            if triage_debounce_state["closed"]:
+                return
             if utterance_id not in pending_triage_ids:
                 pending_triage_ids.append(utterance_id)
-            old = triage_debounce_state.get("task")
-            if old is not None and not old.done():
-                old.cancel()
+            old_timer = triage_debounce_state.get("timer_task")
+            if old_timer is not None and not old_timer.done():
+                old_timer.cancel()
+            cap_gen = int(triage_debounce_state["capture_gen"])
 
-            async def _debounced_flush() -> None:
+            async def _debounce_timer() -> None:
                 try:
                     await asyncio.sleep(1.8)
                 except asyncio.CancelledError:
                     return
-                await flush_triage_batch(target_session=target_session, job_epoch=job_epoch)
+                if (
+                    triage_debounce_state["closed"]
+                    or int(triage_debounce_state["capture_gen"]) != cap_gen
+                ):
+                    return
+                # Launch flush as its own task so subsequent utterances only reset the sleep timer
+                # and NEVER cancel an in-flight triage batch.
+                spawn_bg(
+                    flush_triage_batch(
+                        target_session=target_session,
+                        job_epoch=job_epoch,
+                        capture_gen=cap_gen,
+                    )
+                )
 
-            triage_debounce_state["task"] = spawn_bg(_debounced_flush())
+            triage_debounce_state["timer_task"] = spawn_bg(_debounce_timer())
+
+        def flush_triage_now(*, target_session: InterviewSession, job_epoch: int) -> None:
+            """Trigger an immediate flush of any pending eligible triage batch (e.g. on normal Stop)."""
+            old_timer = triage_debounce_state.get("timer_task")
+            if old_timer is not None and not old_timer.done():
+                old_timer.cancel()
+            triage_debounce_state["timer_task"] = None
+            if not pending_triage_ids or triage_debounce_state["closed"]:
+                return
+            cap_gen = int(triage_debounce_state["capture_gen"])
+            spawn_bg(
+                flush_triage_batch(
+                    target_session=target_session,
+                    job_epoch=job_epoch,
+                    capture_gen=cap_gen,
+                    allow_ended=True,
+                )
+            )
 
         async def flush_triage_batch(
             *,
             target_session: InterviewSession,
             job_epoch: int,
+            capture_gen: int,
+            allow_ended: bool = False,
         ) -> None:
             async with triage_lock:
                 if (
                     not runtime.is_live_session(target_session, job_epoch)
-                    or target_session.ended_epoch_ms is not None
+                    or int(triage_debounce_state["capture_gen"]) != capture_gen
+                    or (not allow_ended and target_session.ended_epoch_ms is not None)
+                    or not runtime.llm_config.is_configured
+                    or runtime.llm_config.is_local_http
                 ):
-                    pending_triage_ids.clear()
+                    if int(triage_debounce_state["capture_gen"]) == capture_gen:
+                        pending_triage_ids.clear()
                     return
                 batch_ids = list(pending_triage_ids)
                 pending_triage_ids.clear()
@@ -1145,7 +1197,11 @@ def create_app(
                 if not batch_utts:
                     return
                 plans = await runtime.llm.triage_window(target_session, batch_utts, diarize=False)
-                if not plans or not runtime.is_live_session(target_session, job_epoch):
+                if (
+                    not plans
+                    or not runtime.is_live_session(target_session, job_epoch)
+                    or int(triage_debounce_state["capture_gen"]) != capture_gen
+                ):
                     return
                 any_changed = False
                 latest_opened_qa_id: str | None = None
@@ -1255,7 +1311,9 @@ def create_app(
                             broadcast_session=broadcast_session,
                             upsert_utterance_and_route=upsert_utterance_and_route,
                             capture_gate=capture_gate,
-                            cancel_pending_triage=cancel_pending_triage,
+                            reset_triage_window=reset_triage_window,
+                            open_triage_window=open_triage_window,
+                            flush_triage_now=flush_triage_now,
                         )
                     except InvalidStateTransitionError as exc:
                         await send_json(exc.to_dict())
@@ -1265,7 +1323,7 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
-            cancel_pending_triage()
+            reset_triage_window(close_scheduling=True)
             runtime.ws_senders.discard(send_json)
             if runtime.capturing_sender is send_json or not runtime.ws_senders:
                 runtime.pause_or_end_capture(mark_ended=False)
@@ -1275,6 +1333,7 @@ def create_app(
                     pass
             await final_seg_queue.put(None)
             await seg_worker_task
+            reset_triage_window(close_scheduling=True)
 
     @app.get("/static/js_sandbox_worker.js")
     async def serve_js_sandbox_worker() -> FileResponse:
@@ -1353,13 +1412,17 @@ async def _handle_ws_command(
     broadcast_session: Any,
     upsert_utterance_and_route: Any,
     capture_gate: dict[str, bool] | None = None,
-    cancel_pending_triage: Any = None,
+    reset_triage_window: Any = None,
+    open_triage_window: Any = None,
+    flush_triage_now: Any = None,
 ) -> None:
     action = str(cmd.get("type", ""))
 
     if action == "new_session":
-        if cancel_pending_triage is not None:
-            cancel_pending_triage()
+        if reset_triage_window is not None:
+            reset_triage_window(close_scheduling=False)
+        if open_triage_window is not None:
+            open_triage_window()
         cfg_data = dict(cmd.get("config") or {})
         base_cfg = runtime.active_session.config.model_dump()
         cfg = SessionConfig.model_validate({**base_cfg, **cfg_data})
@@ -1384,6 +1447,8 @@ async def _handle_ws_command(
 
     if action == "start_capture":
         runtime.begin_capture(enforce_transition=True, owner=send_json)
+        if open_triage_window is not None:
+            open_triage_window()
         runtime.llm.prewarm_fast_model()
         if capture_gate is not None:
             capture_gate["closed"] = False
@@ -1393,8 +1458,8 @@ async def _handle_ws_command(
     if action == "cancel_capture":
         if capture_gate is not None:
             capture_gate["closed"] = True
-        if cancel_pending_triage is not None:
-            cancel_pending_triage()
+        if reset_triage_window is not None:
+            reset_triage_window(close_scheduling=True)
         runtime.pause_or_end_capture(mark_ended=False)
         try:
             await runtime.llm.release_warm_spare()
@@ -1644,16 +1709,14 @@ async def _handle_ws_command(
     if action == "flush_and_end":
         if capture_gate is not None:
             capture_gate["closed"] = True
-        if cancel_pending_triage is not None:
-            cancel_pending_triage()
         cur_session = runtime.active_session
         cur_router = runtime.audio_router
         trailing = cur_router.flush_all()
         for seg in trailing:
             await final_seg_queue.put((cur_session, cur_router, seg))
         await final_seg_queue.join()
-        if cancel_pending_triage is not None:
-            cancel_pending_triage()
+        if flush_triage_now is not None:
+            flush_triage_now(target_session=cur_session, job_epoch=runtime.session_epoch)
         runtime.pause_or_end_capture(mark_ended=True)
         try:
             await runtime.llm.release_warm_spare()

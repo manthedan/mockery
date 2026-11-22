@@ -1813,6 +1813,7 @@ def test_llm_audit_top5_improvements(
         LLMRuntimeConfig,
         _anthropic_supports_temperature,
         _head_tail_excerpt,
+        _looks_like_truncated_json,
     )
     from mockery.models import InterviewSession, SessionConfig, Utterance
 
@@ -1827,7 +1828,12 @@ def test_llm_audit_top5_improvements(
         def json(self) -> dict[str, Any]:
             return {
                 "content": [{"type": "text", "text": "SECRET_REPLY_NEVER_LOGGED"}],
-                "usage": {"input_tokens": 1200, "output_tokens": 45, "cache_read_input_tokens": 950},
+                "usage": {
+                    "input_tokens": 200,
+                    "output_tokens": 45,
+                    "cache_read_input_tokens": 950,
+                    "cache_creation_input_tokens": 50,
+                },
             }
 
     class _PooledFakeHttp:
@@ -1851,29 +1857,40 @@ def test_llm_audit_top5_improvements(
 
     async def _run_anth() -> None:
         assert _anthropic_supports_temperature("claude-haiku-4-5-20251001") is True
-        assert _anthropic_supports_temperature("claude-sonnet-5-5") is False
+        assert _anthropic_supports_temperature("claude-opus-4-6") is True
         assert _anthropic_supports_temperature("claude-opus-4-7") is False
+        assert _anthropic_supports_temperature("claude-opus-4-8") is False
+        assert _anthropic_supports_temperature("claude-mythos-preview") is False
+        assert _anthropic_supports_temperature("claude-sonnet-5-5") is False
         await anth_llm._complete_text(
-            model="claude-sonnet-5-5",
+            model="claude-opus-4-8",
             system="Sys",
             user="SECRET_PROMPT_TEXT",
             operation="practice_turn",
         )
         await anth_llm._complete_text(
-            model="claude-haiku-4-5-20251001",
+            model="claude-mythos-preview",
             system="Sys",
             user="Turn 2",
+            operation="practice_turn",
+        )
+        await anth_llm._complete_text(
+            model="claude-haiku-4-5-20251001",
+            system="Sys",
+            user="Turn 3",
             operation="suggest_probes",
         )
-        assert len(created_clients) == 1  # Reused across both calls!
+        assert len(created_clients) == 1  # Reused across all 3 calls in same loop!
         assert "temperature" not in sent_payloads[0]
-        assert "temperature" in sent_payloads[1]
-        assert len(anth_llm.recent_usage_events) == 2
+        assert "temperature" not in sent_payloads[1]
+        assert "temperature" in sent_payloads[2]
+        assert len(anth_llm.recent_usage_events) == 3
         ev0 = anth_llm.recent_usage_events[0]
         assert ev0["op"] == "practice_turn"
-        assert ev0["input_tokens"] == 1200
+        assert ev0["input_tokens"] == 1200  # 200 uncached + 950 cache_read + 50 cache_write
         assert ev0["output_tokens"] == 45
         assert ev0["cache_read_tokens"] == 950
+        assert ev0["cache_write_tokens"] == 50
         assert ev0["ok"] is True
         ev_blob = json.dumps(ev0)
         assert "SECRET_PROMPT_TEXT" not in ev_blob
@@ -1882,15 +1899,34 @@ def test_llm_audit_top5_improvements(
         assert created_clients[0].is_closed is True
 
     asyncio.run(_run_anth())
+    # Sequential asyncio.run() binds a fresh client cleanly across event-loop boundaries
+    asyncio.run(
+        anth_llm._complete_text(model="claude-haiku-4-5-20251001", system="Sys", user="Loop 2")
+    )
+    assert len(created_clients) == 2
 
-    # 2. Local HTTP providers configure max_retries=0
+    # 2. Local HTTP hostname parsing ([::1], 127.0.0.2 -> local; query string localhost -> remote) & max_retries=0
     local_cfg = LLMRuntimeConfig(tmp_path)
+    local_cfg.provider = "custom"
+    local_cfg.base_url = "http://[::1]:8000/v1"
+    assert local_cfg.is_local_http is True
+    local_cfg.base_url = "http://127.0.0.2:11434/v1"
+    assert local_cfg.is_local_http is True
+    local_cfg.base_url = "https://api.example.com/v1?ref=localhost"
+    assert local_cfg.is_local_http is False
     local_cfg.provider = "omlx"
     local_cfg.base_url = "http://localhost:8000/v1"
     local_cfg.api_key = ""
     assert local_cfg.is_local_http is True
     local_llm = InterviewCopilotLLM(local_cfg)
     assert local_llm._client().max_retries == 0
+
+    # Truncation detection & exact _head_tail_excerpt budget on small caps
+    assert _looks_like_truncated_json('```json\n{"a": {"b": 1}\n```', None) is True
+    assert _looks_like_truncated_json('{"ok": true}', "max_tokens") is True
+    assert _looks_like_truncated_json('{"ok": true}', "stop") is False
+    assert len(_head_tail_excerpt("x" * 300, 100)) <= 100
+    assert len(_head_tail_excerpt("x" * 300, 20)) <= 20
 
     # 3. Practice side-call hygiene: Hint budget, Plan resume-only skip, Debrief head+tail & high-effort scaling
     oai_cfg = LLMRuntimeConfig(tmp_path)
