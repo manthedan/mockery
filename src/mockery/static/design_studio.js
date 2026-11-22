@@ -7,6 +7,9 @@ import { createMachine } from "./state_machines.js";
 
 const CANVAS_W = 920;
 const CANVAS_H = 420;
+// The canvas fills its pane; the 920×420 artboard stays centred inside it. The dot
+// grid bleeds this far past the artboard so no pane shape ever shows a bare margin.
+const CANVAS_BLEED = 2400;
 const NODE_W = 148;
 const NODE_H = 58;
 const GRID_STEP = 12;
@@ -875,7 +878,8 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
                   <path d="M 0 1.2 L 10 5 L 0 8.8 z" class="sd-arrow-fill-sel"></path>
                 </marker>
               </defs>
-              <rect x="0" y="0" width="${CANVAS_W}" height="${CANVAS_H}" fill="url(#${gridId})" class="sd-bg-rect" data-sd-bg></rect>
+              <rect x="${-CANVAS_BLEED}" y="${-CANVAS_BLEED}" width="${CANVAS_W + CANVAS_BLEED * 2}" height="${CANVAS_H + CANVAS_BLEED * 2}" fill="url(#${gridId})" class="sd-bg-rect" data-sd-bg></rect>
+              <rect x="0.5" y="0.5" width="${CANVAS_W - 1}" height="${CANVAS_H - 1}" rx="10" class="sd-artboard" aria-hidden="true"></rect>
               <g data-sd-edges></g>
               <g data-sd-nodes></g>
             </svg>
@@ -974,6 +978,8 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       containerEl.querySelectorAll("[data-sd-tool]").forEach((btn) => {
         btn.classList.toggle("active", btn.getAttribute("data-sd-tool") === activeTool);
       });
+      // While a component is being moved, the drawable frame shows as a quiet guide.
+      q("[data-sd-svg]")?.classList.toggle("is-dragging", isDragging);
       const undoBtn = q("[data-sd-undo]");
       const redoBtn = q("[data-sd-redo]");
       if (undoBtn) undoBtn.disabled = isDragging || state.history.length === 0;
@@ -1259,6 +1265,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
       styleEl.textContent = `
         .sd-bg-rect { fill: ${bg}; }
+        .sd-artboard { fill: none; stroke: none; }
         .sd-grid-dot { fill: ${lineStrong}; opacity: 0.45; }
         .sd-node-box { fill: ${raised}; stroke: ${lineStrong}; stroke-width: 1.4; }
         .sd-node-badge-bg { fill: ${bg}; stroke: ${lineStrong}; stroke-width: 1; }

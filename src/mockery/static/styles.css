@@ -78,7 +78,9 @@
 
   --ink: #1c1b18;
   --ink-2: #55534c;
-  --ink-3: #807d75;
+  /* Helper text and captions: dark enough to clear 4.5:1 on paper, so
+     instructions read as quiet, never as disabled. */
+  --ink-3: #716e67;
   --ink-4: #b2afa7;
   --on-ink: #fbfaf7;
 
@@ -92,9 +94,10 @@
   --mark-strong: rgba(250, 206, 62, 0.62);
 
   --shadow-pop: 0 0 0 1px var(--line), 0 14px 36px rgba(26, 24, 16, 0.13);
-  --scrim: rgba(26, 24, 16, 0.34);
+  /* A light neutral veil plus blur: dialogs float over paper instead of tinting it taupe. */
+  --scrim: rgba(20, 20, 18, 0.22);
 
-  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5' stroke='%23807d75' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4.5 6.25L8 9.75l3.5-3.5' stroke='%23716e67' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 /* ----------------------------------------------------------------------------
@@ -996,13 +999,32 @@ kbd {
   border-bottom: 1px solid var(--line);
   background: transparent;
   color: var(--ink);
+  border-radius: 0;
   font-family: var(--font-serif);
   font-size: 32px;
   font-weight: 500;
   letter-spacing: -0.012em;
   line-height: 1.2;
-  text-overflow: ellipsis;
+  /* A headline, not a text box: it wraps to as many lines as the role needs
+     and never shows a resize handle, a scrollbar or an ellipsis. */
+  resize: none;
+  overflow: hidden;
+  field-sizing: content;
   transition: border-color 0.15s ease;
+}
+
+.home-role:focus-visible {
+  outline: none;
+}
+
+/* Long titles step down a size so they still settle in two lines. */
+.home-role[data-fit="md"] {
+  font-size: 27px;
+}
+
+.home-role[data-fit="sm"] {
+  font-size: 23px;
+  line-height: 1.25;
 }
 
 .home-role::placeholder {
@@ -1119,6 +1141,11 @@ kbd {
 
 .home-foot .link-quiet {
   margin-left: auto;
+}
+
+/* "Try it without audio" belongs to Interviewer Copilot only. */
+.home[data-home-mode="practice"] #setupSimulateBtn {
+  display: none;
 }
 
 .asr-status.error {
@@ -2358,6 +2385,11 @@ kbd {
   background: var(--scrim);
   -webkit-backdrop-filter: blur(3px);
   backdrop-filter: blur(3px);
+}
+
+:root[data-theme="light"] .modal-backdrop {
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 
 .modal-card {
@@ -5418,8 +5450,10 @@ kbd {
   --knob: #ffffff;
   --callout: rgba(214, 158, 46, 0.14);
   --callout-ink: #865a08;
-  --shadow-soft: 0 12px 30px rgba(26, 24, 16, 0.09);
-  --shadow-dock: 0 0 0 1px rgba(26, 24, 16, 0.13), 0 12px 30px rgba(26, 24, 16, 0.1);
+  /* Floating cards and docks rest on a hairline with a short, tight lift —
+     the same crisp elevation as the rest of the light UI, no broad haze. */
+  --shadow-soft: 0 1px 2px rgba(26, 24, 16, 0.04), 0 6px 16px rgba(26, 24, 16, 0.05);
+  --shadow-dock: 0 0 0 1px rgba(26, 24, 16, 0.13), 0 1px 2px rgba(26, 24, 16, 0.04), 0 6px 16px rgba(26, 24, 16, 0.055);
   --shadow-cta: 0 6px 16px rgba(26, 24, 16, 0.2);
 
   --syn-kw: #9a4a1c;
@@ -5428,7 +5462,7 @@ kbd {
   --syn-lit: #a8412d;
   --syn-fn: #2b5a84;
   --syn-def: #1c1b18;
-  --syn-com: #99968d;
+  --syn-com: #838078;
 }
 
 /* ---- Small controls ------------------------------------------------------- */
@@ -6257,14 +6291,18 @@ kbd {
   line-height: 1.2;
 }
 
+/* Status, not action: Hidden is a soft tint, Visible a bare outline. Neither
+   competes with the dialog's one solid button. */
 .pii-chip.is-redacted .pii-chip-state {
-  background: var(--ink);
-  color: var(--on-ink);
+  background: var(--selected);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
 }
 
 .pii-chip.is-kept .pii-chip-state {
   box-shadow: inset 0 0 0 1px var(--line-strong);
-  color: var(--ink-2);
+  color: var(--ink-3);
+  font-weight: 550;
 }
 
 /* What the AI reads, set as prose — not a terminal dump. */
@@ -6595,8 +6633,6 @@ label.addon-row {
 
 /* Ending a live interview is deliberate, never the loudest thing on screen. */
 .practice-end-btn {
-  /* Wide enough for "Writing debrief…" plus its spinner, so the bar never shifts. */
-  min-width: 140px;
   margin-left: 4px;
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--line-strong);
@@ -6789,6 +6825,10 @@ label.addon-row {
 
 .composer-dock:focus-within {
   box-shadow: 0 0 0 1px var(--ink-3), 0 14px 34px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-theme="light"] .composer-dock:not(.retry-dock):focus-within {
+  box-shadow: 0 0 0 1px var(--ink-3), 0 1px 2px rgba(26, 24, 16, 0.04), 0 6px 16px rgba(26, 24, 16, 0.07);
 }
 
 .practice-textarea {
@@ -7873,6 +7913,10 @@ label.addon-row {
   text-align: center;
 }
 
+.cs-out-rows.is-plain .cs-out-mark {
+  display: none;
+}
+
 .cs-out-label {
   flex-shrink: 0;
   width: 36px;
@@ -7965,9 +8009,13 @@ label.addon-row {
 
 /* ---- Debrief & 45-second retry: an editorial page, not a stack of cards ----- */
 
+/* Generous air under the closing actions: at the end of the page (and when the
+   retry card is scrolled into view) Export / Start another practice sit well clear
+   of the window edge instead of being cut by it. */
 .practice-debrief-view {
   gap: 32px;
-  padding: 40px 32px 56px;
+  padding: 40px 32px 88px;
+  scroll-padding-bottom: 40px;
 }
 
 .practice-debrief-view > * {
@@ -8279,8 +8327,30 @@ label.addon-row {
   min-width: 136px;
 }
 
-.practice-retry-card > .practice-composer-tools {
-  margin-top: -8px;
+/* Nothing to evaluate yet: the button is genuinely disabled and reads that way. */
+.retry-dock .retry-submit-btn:disabled:not(.is-loading) {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-3);
+  opacity: 0.7;
+}
+
+/* The rep: composer, its one-line hint and (after a first score) the timer. */
+.retry-rep {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.retry-rep-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.retry-rep-head:not(:has(> :not(.hidden))) {
+  display: none;
 }
 
 .practice-retry-history {
@@ -8508,18 +8578,37 @@ label.addon-row {
   font-size: 11.5px;
 }
 
-/* Whiteboard: the artboard is exactly the drawable area, never a letterbox. */
+/* Whiteboard: the canvas takes every pixel the pane can give it. The dot grid runs
+   edge to edge and the 920×420 artboard stays centred inside (the SVG's viewBox does
+   the centring), so the diagram never floats in dead air. On a short window the
+   floor eases down rather than forcing the studio to scroll. */
 .sd-canvas-wrap {
   display: block;
-  flex: 0 0 auto;
-  min-height: 0;
-  max-width: calc((100vh - 236px) * 2.19);
-  aspect-ratio: 920 / 420;
+  flex: 1 1 0;
+  min-height: clamp(240px, calc(100vh - 236px), 420px);
 }
 
 .sd-svg {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
+}
+
+/* The drawable frame: invisible at rest, a hairline guide while a component moves. */
+.sd-artboard {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
+  vector-effect: non-scaling-stroke;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.sd-svg.is-dragging .sd-artboard {
+  opacity: 0.9;
 }
 
 /* The debrief-in-progress card sits in the same reading column as the turns. */
@@ -8575,8 +8664,10 @@ label.addon-row {
   padding: 0;
 }
 
+/* Each section opens with clear air above its label, and a little under it. */
 .redaction-section-label {
-  margin-top: 6px;
+  margin-top: 18px;
+  margin-bottom: 3px;
 }
 
 /* Question banks: title leads, pills support, the prompt reads as detail. */
@@ -8770,23 +8861,23 @@ label.addon-row {
   }
 }
 
-/* Debrief in flight: the answer dock steps aside and one calm status line remains
-   under the progress card. Nothing dimmed, nothing that looks tappable. */
-.practice-composer.is-debriefing .composer-dock,
-.practice-composer.is-debriefing .composer-kbd {
+/* Debrief in flight: the answer dock steps aside completely. The staged progress
+   card in the feed is the one status on screen — no footer line repeating it. */
+.practice-composer.is-debriefing {
   display: none;
 }
 
-.practice-composer.is-debriefing .practice-composer-tools {
-  justify-content: center;
-  padding: 12px 18px 4px;
-  border-top: 1px solid var(--line);
+/* The coach rail agrees quietly: plain text, no tinted pill, no second pulse. */
+.practice-coach-card.is-thinking.is-quiet .practice-coach-tone {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  background: none;
+  color: var(--ink-3);
 }
 
-.practice-composer.is-debriefing .practice-mic-status {
-  font-size: 12.5px;
-  letter-spacing: 0.005em;
-  text-align: center;
+.practice-coach-card.is-thinking.is-quiet .practice-coach-tone::before {
+  content: none;
 }
 
 /* The fade matches the top padding exactly, so a scrolled prompt dissolves under
@@ -8816,19 +8907,14 @@ label.addon-row {
   line-height: 1.6;
 }
 
-/* Whiteboard: the artboard keeps its exact drawable shape; when the pane is
-   taller than it needs, tools + board + hint sit framed in the middle instead of
-   leaving one void underneath. Auto margins collapse to nothing when space is tight. */
-.practice-studio-slot > .sd-studio > .sd-toolbar {
-  margin-top: auto;
-}
-
+/* Whiteboard: header, then tools, pinned to the top exactly like the coding studio's
+   tabs; the canvas flexes to fill the pane and the hint line rests on the bottom edge. */
+.practice-studio-slot > .sd-studio > .sd-toolbar,
 .practice-studio-slot > .sd-studio > .sd-inspector {
-  margin-bottom: auto;
+  flex-shrink: 0;
 }
 
 .practice-studio-slot > .sd-studio > .sd-canvas-wrap {
-  margin-inline: auto;
   width: 100%;
 }
 
@@ -8864,12 +8950,83 @@ label.addon-row {
   letter-spacing: 0;
 }
 
-/* After a scored retry, another rep is an invitation, not an open task. */
+/* Result first. Once a retry is scored, the before → after is the card's focal
+   point: it sits right under the prompt, and another rep is a compact, secondary
+   invitation beneath it — smaller dock, smaller clock, one hairline of separation. */
+.practice-retry-card.has-retries .practice-retry-history {
+  gap: 26px;
+}
+
+.practice-retry-card.has-retries .practice-retry-prompt {
+  color: var(--ink-2);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+
+.practice-retry-card.has-retries .retry-rep {
+  gap: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+/* The mic steps back to a quiet chip: the scored result is the loudest thing here. */
+.practice-retry-card.has-retries .retry-dock .mic-hero:not(:disabled):not(.is-recording):not(.is-transcribing) {
+  background: var(--track);
+  color: var(--ink);
+}
+
+.practice-retry-card.has-retries .retry-dock .mic-hero:not(.is-recording):not(.is-transcribing) .mic-orb {
+  background: var(--hover);
+}
+
 .retry-again-hint {
-  margin: 2px 0 -6px;
-  color: var(--ink-3);
-  font-size: 12.5px;
-  font-weight: 500;
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.practice-retry-card.has-retries .practice-retry-timer-wrap {
+  gap: 8px;
+}
+
+.practice-retry-card.has-retries .retry-ring {
+  width: 22px;
+  height: 22px;
+}
+
+.practice-retry-card.has-retries .practice-retry-clock {
+  min-width: 30px;
+  font-size: 13px;
+}
+
+.practice-retry-card.has-retries .retry-dock {
+  padding: 5px;
+  border-radius: 22px;
+}
+
+.practice-retry-card.has-retries .retry-dock .practice-textarea {
+  min-height: 34px;
+  padding: 7px 6px;
+  font-size: 13.5px;
+}
+
+.practice-retry-card.has-retries .retry-dock .mic-hero,
+.practice-retry-card.has-retries .retry-dock .practice-send-btn {
+  height: 34px;
+}
+
+.practice-retry-card.has-retries .retry-dock .mic-orb {
+  width: 26px;
+  height: 26px;
+}
+
+.practice-retry-card.has-retries .retry-submit-btn {
+  min-width: 0;
+}
+
+.practice-retry-card.has-retries .practice-composer-tools {
+  display: none;
 }
 
 /* ---- Narrow windows (re-stated: the rules above changed the base grid) ------ */
@@ -8924,6 +9081,10 @@ label.addon-row {
 
   .cs-editor-wrap {
     min-height: 300px;
+  }
+
+  .sd-canvas-wrap {
+    min-height: 240px;
   }
 
   .practice-feed,

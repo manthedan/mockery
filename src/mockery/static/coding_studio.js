@@ -1063,7 +1063,9 @@ export function createCodingStudioPlugin({
           renderConsolePlain(body, currentRes?.summary || derived.consoleBodyDefault);
           return;
         }
-        const marks = { pass: "✓", fail: "✕", info: "·", detail: "" };
+        // Plain output lines carry no glyph; with no pass/fail rows the mark column collapses.
+        const marks = { pass: "✓", fail: "✕", info: "", detail: "" };
+        const plain = !digest.rows.some((r) => r.tone === "pass" || r.tone === "fail");
         const labels = { pass: "Pass", fail: "Fail", info: "", detail: "" };
         const rowsHtml = digest.rows
           .map(
@@ -1078,7 +1080,7 @@ export function createCodingStudioPlugin({
         const traceHtml = digest.rawTrace
           ? `<details class="cs-raw-trace"><summary>Show raw trace</summary><pre>${escapeHtml(digest.rawTrace)}</pre></details>`
           : "";
-        body.innerHTML = `${rowsHtml ? `<ul class="cs-out-rows">${rowsHtml}</ul>` : ""}${traceHtml}`;
+        body.innerHTML = `${rowsHtml ? `<ul class="cs-out-rows${plain ? " is-plain" : ""}">${rowsHtml}</ul>` : ""}${traceHtml}`;
         return;
       }
 
