@@ -330,7 +330,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 question_id=cur_q.id,
                 text=answer_text,
             )
-            recent_with_cand = [t.model_dump() for t in session.turns[-9:]] + [cand_turn.model_dump()]
+            prior_turns = [t.model_dump() for t in session.turns[-24:]]
 
             try:
                 reply = await runtime.llm.generate_practice_interviewer_reply(
@@ -341,11 +341,12 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     coach_style=session.config.coach_style,
                     current_question=cur_q.model_dump(),
                     next_question=next_q.model_dump() if next_q else None,
-                    recent_turns=recent_with_cand,
+                    recent_turns=prior_turns,
                     candidate_answer=answer_text,
                     follow_up_count=cur_q.follow_up_count,
                     existing_carl=dict(cur_q.carl_signals),
                     workspace_context=session.workspace_context or None,
+                    cache_key=f"mockery:practice:{session.id}",
                 )
             except Exception as exc:
                 raise HTTPException(

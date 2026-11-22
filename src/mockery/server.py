@@ -30,6 +30,7 @@ from .diarizer import OnlineTwoSpeakerDiarizer, WeSpeakerEmbedder
 from .grouper import QAGrouper
 from .llm import (
     InterviewCopilotLLM,
+    LOCAL_HTTP_PROVIDERS,
     LLMRuntimeConfig,
     PROVIDER_ENV_KEYS,
     discover_available_providers,
@@ -73,6 +74,11 @@ STATIC_DIR = PACKAGE_DIR / "static"
 ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver"}
 MAX_RESUME_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_ASR_AUDIO_BYTES = 4 * 1024 * 1024
+SPECULATIVE_PROBE_COOLDOWN_SEC = 30.0
+SPECULATIVE_PROBE_CLI_COOLDOWN_SEC = 45.0
+SPECULATIVE_PROBE_MIN_NEW_WORDS = 45
+SPECULATIVE_PROBE_MAX_PER_CARD = 3
+SPECULATIVE_PROBE_CLI_MAX_PER_CARD = 2
 MAX_ASR_DURATION_SECONDS = 120
 MAX_TTS_REQUEST_BYTES = 32 * 1024
 MAX_PRACTICE_REQUEST_BYTES = 256 * 1024
@@ -307,6 +313,7 @@ class AppRuntime:
         self.warming_card_ids: set[str] = set()
         self.loading_card_ids: set[str] = set()
         self.card_probe_gen: dict[str, int] = {}
+        self.speculative_probe_budget: dict[str, dict[str, float | int]] = {}
         self.role_orientation_checked: set[str] = set()
         self.role_orientation_inflight: set[str] = set()
         self.regrouped_signature: dict[str, tuple[Any, ...]] = {}
@@ -336,6 +343,63 @@ class AppRuntime:
 
     def is_live_session(self, target_session: InterviewSession, epoch: int) -> bool:
         return self.session_epoch == epoch and self.active_session is target_session
+
+    def _is_constrained_llm_backend(self) -> bool:
+        return bool(self.llm_config.cli_backend) or self.llm_config.provider in LOCAL_HTTP_PROVIDERS
+
+    @staticmethod
+    def _card_final_candidate_words(session: InterviewSession, qa: Any) -> int:
+        return sum(
+            len(u.text.split())
+            for u in session.utterances_for_card(qa, include_drafts=False)
+            if u.speaker == "candidate"
+        )
+
+    def should_run_speculative_probe(
+        self,
+        session: InterviewSession,
+        qa: Any,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Throttle automatic background probe warming to protect user API credits and local GPUs."""
+        if (
+            not self.llm_config.is_configured
+            or qa.id in self.warming_card_ids
+            or qa.id in self.loading_card_ids
+            or not qa.utterance_ids
+        ):
+            return False
+        constrained = self._is_constrained_llm_backend()
+        max_per_card = SPECULATIVE_PROBE_CLI_MAX_PER_CARD if constrained else SPECULATIVE_PROBE_MAX_PER_CARD
+        cooldown = SPECULATIVE_PROBE_CLI_COOLDOWN_SEC if constrained else SPECULATIVE_PROBE_COOLDOWN_SEC
+        entry = self.speculative_probe_budget.get(qa.id)
+        if entry is None:
+            return True
+        count = int(entry.get("count", 0))
+        if count >= max_per_card:
+            return False
+        ts_now = time.monotonic() if now is None else now
+        if (ts_now - float(entry.get("last_ts", 0.0))) < cooldown:
+            return False
+        cand_words = self._card_final_candidate_words(session, qa)
+        if (cand_words - int(entry.get("last_words", 0))) < SPECULATIVE_PROBE_MIN_NEW_WORDS:
+            return False
+        return True
+
+    def record_speculative_probe(
+        self,
+        session: InterviewSession,
+        qa: Any,
+        *,
+        now: float | None = None,
+    ) -> None:
+        entry = self.speculative_probe_budget.get(qa.id) or {"count": 0, "last_ts": 0.0, "last_words": 0}
+        self.speculative_probe_budget[qa.id] = {
+            "count": int(entry.get("count", 0)) + 1,
+            "last_ts": time.monotonic() if now is None else now,
+            "last_words": self._card_final_candidate_words(session, qa),
+        }
 
     @staticmethod
     def transcript_regroup_sig(session: InterviewSession) -> tuple[Any, ...]:
@@ -429,6 +493,7 @@ class AppRuntime:
         self.warming_card_ids.clear()
         self.loading_card_ids.clear()
         self.card_probe_gen.clear()
+        self.speculative_probe_budget.clear()
         self.role_orientation_checked.discard(new_session.id)
         self.role_orientation_inflight.discard(new_session.id)
         self.active_session = new_session
@@ -1078,23 +1143,17 @@ def create_app(
         async def precompute_speculative_probes(
             target_session: InterviewSession, qa_id: str, job_epoch: int
         ) -> None:
-            if (
-                not runtime.is_live_session(target_session, job_epoch)
-                or qa_id in runtime.warming_card_ids
-                or qa_id in runtime.loading_card_ids
-                or not runtime.llm_config.is_configured
-            ):
+            if not runtime.is_live_session(target_session, job_epoch):
                 return
             qa = next((q for q in target_session.qa_groups if q.id == qa_id), None)
-            if qa is None or not qa.utterance_ids:
+            if qa is None or not runtime.should_run_speculative_probe(target_session, qa):
                 return
             start_gen = runtime.card_probe_gen.get(qa_id, 0)
             start_hist_len = len(qa.dive_deeper_history)
-            start_rev_sum = target_session.card_revision_sum(qa)
+            runtime.record_speculative_probe(target_session, qa)
             runtime.warming_card_ids.add(qa_id)
             if runtime.is_live_session(target_session, job_epoch):
                 await broadcast_session()
-            should_rewarm = False
             try:
                 cached = await runtime.llm.suggest_probes(target_session, qa)
                 if (
@@ -1104,16 +1163,12 @@ def create_app(
                     and len(qa.dive_deeper_history) == start_hist_len
                 ):
                     qa.speculative_cache = cached
-                    if target_session.card_revision_sum(qa) > start_rev_sum:
-                        should_rewarm = True
             except Exception as exc:
                 logger.warning("Speculative probe warming failed: %s", exc)
             finally:
                 runtime.warming_card_ids.discard(qa_id)
                 if runtime.is_live_session(target_session, job_epoch):
                     await broadcast_session()
-            if should_rewarm and runtime.is_live_session(target_session, job_epoch):
-                spawn_bg(precompute_speculative_probes(target_session, qa_id, job_epoch))
 
         triage_lock = asyncio.Lock()
 
