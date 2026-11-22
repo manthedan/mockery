@@ -54,6 +54,7 @@ DEFAULT_DATASETS: dict[str, Path] = {
     "suggest_probes": REPO_ROOT / "evals" / "datasets" / "suggest_probes.jsonl",
     "practice_retry_eval": REPO_ROOT / "evals" / "datasets" / "practice_retry_eval.jsonl",
     "practice_hint": REPO_ROOT / "evals" / "datasets" / "practice_hint.jsonl",
+    "practice_debrief": REPO_ROOT / "evals" / "datasets" / "practice_debrief.jsonl",
 }
 
 TARGET_OBJECTIVES: dict[str, str] = {
@@ -90,6 +91,13 @@ TARGET_OBJECTIVES: dict[str, str] = {
         "strictly 1-2 crisp sentences (12-55 words), strong grounding in the candidate's current attempt/workspace, "
         "warm confidence-building tone, and ZERO leaks of the target algorithm, data structure, library, or code fix."
     ),
+    "practice_debrief": (
+        "Optimize the system prompt for the end-of-practice supportive CARL coaching debrief. "
+        "Maximize strict raw-JSON output, verbatim `question_id` preservation for every answered question, "
+        "honest evidence-based CARL grading (zero sycophantic inflation of missing Results or Learnings), "
+        "accurate selection of the weakest question for `retry_drill.question_id`, concrete transcript/workspace grounding, "
+        "UI-scannable conciseness (2-3 sentence hero, 1-2 sentence strength/tip, 2-3 sentence CARL reframe), and warm tone."
+    ),
 }
 
 # Match exact runtime parameters in src/mockery/llm.py
@@ -99,6 +107,7 @@ TARGET_TEMPERATURES: dict[str, float] = {
     "suggest_probes": 0.35,
     "practice_retry_eval": 0.35,
     "practice_hint": 0.4,
+    "practice_debrief": 0.35,
 }
 
 SECRET_TOKEN_RE = re.compile(
@@ -120,6 +129,8 @@ def compute_max_tokens(target: str, example: dict[str, Any]) -> int:
         return 380
     if target == "practice_hint":
         return 160
+    if target == "practice_debrief":
+        return 1600
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 

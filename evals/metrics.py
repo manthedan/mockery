@@ -22,6 +22,7 @@ TARGET_TO_PROMPT_NAME: dict[str, str] = {
     "suggest_probes": "suggest_probes",
     "practice_retry_eval": "practice_retry_eval",
     "practice_hint": "practice_hint",
+    "practice_debrief": "practice_debrief",
 }
 
 CARL_DIMS: tuple[str, ...] = ("context", "action", "result", "learning")
@@ -163,6 +164,19 @@ def validate_dataset(target: str, rows: list[dict[str, Any]]) -> None:
             cur_q = row.get("current_question")
             if not isinstance(cur_q, dict) or not isinstance(cur_q.get("prompt"), str) or not cur_q["prompt"].strip():
                 raise ValueError(f"Row {row_id!r} requires `current_question.prompt`.")
+        elif target == "practice_debrief":
+            for req_str in ("role_title", "interview_type", "target_level"):
+                if not isinstance(row.get(req_str), str) or not row[req_str].strip():
+                    raise ValueError(f"Row {row_id!r} requires non-empty string `{req_str}`.")
+            qs = row.get("questions")
+            turns = row.get("turns")
+            if not isinstance(qs, list) or not qs:
+                raise ValueError(f"Row {row_id!r} requires non-empty `questions` list.")
+            if not isinstance(turns, list) or not turns:
+                raise ValueError(f"Row {row_id!r} requires non-empty `turns` list.")
+            exp_qids = expected.get("question_ids")
+            if not isinstance(exp_qids, list) or not exp_qids:
+                raise ValueError(f"Row {row_id!r} requires non-empty `expected.question_ids`.")
 
 
 def split_dataset(
@@ -231,6 +245,8 @@ def render_system_prompt_for_example(
         return render_prompt("practice_retry_eval", override_text=override_text)
     if target == "practice_hint":
         return render_prompt("practice_hint", override_text=override_text)
+    if target == "practice_debrief":
+        return render_prompt("practice_debrief", override_text=override_text)
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 
@@ -350,6 +366,47 @@ def build_practice_hint_user_prompt(example: dict[str, Any]) -> str:
     )
 
 
+def build_practice_debrief_user_prompt(example: dict[str, Any]) -> str:
+    """Matches the exact user prompt built by InterviewCopilotLLM.generate_practice_debrief."""
+    role_title = str(example.get("role_title") or "Software Engineer")
+    company = str(example.get("company") or "").strip()
+    target_level = str(example.get("target_level") or "Senior (L5)")
+    interview_type = str(example.get("interview_type") or "behavioral")
+    questions = list(example.get("questions") or [])
+    turns = list(example.get("turns") or [])
+    workspace_context = example.get("workspace_context") or {}
+
+    per_q_budget = max(1200, 10_000 // max(1, len(questions)))
+    transcript_sections: list[str] = []
+    for q in questions:
+        qid = str(q.get("id") or "")
+        q_lines = [
+            f"{str(t.get('role') or '').upper()}: {t.get('text', '')}"
+            for t in turns
+            if str(t.get("question_id") or "") == qid and t.get("role") in ("interviewer", "candidate")
+        ]
+        excerpt = "\n".join(q_lines)[:per_q_budget]
+        transcript_sections.append(f"### [{qid}] {q.get('title', 'Question')}\n{excerpt}")
+
+    ws_block = ""
+    if isinstance(workspace_context, dict):
+        if workspace_context.get("diagram_summary"):
+            ws_block += f"\nFINAL DIAGRAM:\n{str(workspace_context['diagram_summary'])[:2000]}\n"
+        if workspace_context.get("code"):
+            ws_block += f"\nFINAL CODE:\n{str(workspace_context['code'])[:2500]}\n"
+        if workspace_context.get("test_output"):
+            ws_block += f"\nTEST RESULTS:\n{str(workspace_context['test_output'])[:1000]}\n"
+
+    return (
+        f"Role: {role_title}" + (f" at {company}" if company else "") + f" | Target Level: {target_level} | Format: {interview_type}\n"
+        f"Answered Questions:\n"
+        + "\n".join(f"- {q.get('id')}: {q.get('title')} — {q.get('prompt')}" for q in questions)
+        + "\n\nPer-Question Transcript Excerpts:\n"
+        + "\n\n".join(transcript_sections)
+        + ws_block
+    )
+
+
 def build_user_prompt_for_example(target: str, example: dict[str, Any]) -> str:
     if target == "triage_window":
         return build_triage_user_prompt(example)
@@ -361,6 +418,8 @@ def build_user_prompt_for_example(target: str, example: dict[str, Any]) -> str:
         return build_practice_retry_eval_user_prompt(example)
     if target == "practice_hint":
         return build_practice_hint_user_prompt(example)
+    if target == "practice_debrief":
+        return build_practice_debrief_user_prompt(example)
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 
@@ -1336,6 +1395,210 @@ def score_practice_hint(
     }
 
 
+def score_practice_debrief(
+    raw_output: str,
+    example: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    """Deterministic scorer for end-of-practice supportive CARL debrief (`practice_debrief`)."""
+    failures: list[str] = []
+    suggestions: list[str] = []
+
+    parsed, json_score, json_note = _parse_json_with_strictness(raw_output)
+    if json_note:
+        failures.append(json_note)
+        if parsed is not None:
+            suggestions.append("Emit raw JSON only with zero markdown fences or prose preamble.")
+    if parsed is None:
+        return 0.0, {
+            "example_id": example.get("id"),
+            "subscores": {"json_validity": 0.0},
+            "failures": failures,
+            "suggestions": ["Return strictly valid JSON matching the practice_debrief schema."],
+        }
+
+    expected = example.get("expected") or {}
+    exp_qids = [str(q) for q in (expected.get("question_ids") or [])]
+    exp_carl_map = expected.get("expected_carl") or {}
+    must_not_inflate_map = expected.get("must_not_inflate") or {}
+    exp_drill_qids = [str(q) for q in (expected.get("retry_drill_question_ids") or exp_qids)]
+
+    overall = str(parsed.get("overall_encouragement") or "").strip() if isinstance(parsed.get("overall_encouragement"), str) else ""
+    primer = str(parsed.get("carl_primer") or "").strip() if isinstance(parsed.get("carl_primer"), str) else ""
+    raw_strengths = parsed.get("top_strengths") if isinstance(parsed.get("top_strengths"), list) else []
+    strengths = [s.strip() for s in raw_strengths if isinstance(s, str) and s.strip()]
+    raw_reviews = parsed.get("question_reviews") if isinstance(parsed.get("question_reviews"), list) else []
+    raw_drill = parsed.get("retry_drill") if isinstance(parsed.get("retry_drill"), dict) else {}
+
+    reviews_by_id: dict[str, dict[str, Any]] = {}
+    for item in raw_reviews:
+        if isinstance(item, dict) and isinstance(item.get("question_id"), str) and item["question_id"].strip():
+            reviews_by_id[item["question_id"].strip()] = item
+
+    # 1. Schema & exact question_id preservation
+    matched_qids = [qid for qid in exp_qids if qid in reviews_by_id]
+    missing_qids = [qid for qid in exp_qids if qid not in reviews_by_id]
+    if missing_qids:
+        failures.append(f"Missing or mangled `question_id`(s) in `question_reviews`: {missing_qids}")
+        suggestions.append("Copy every answered `question_id` verbatim into `question_reviews` (never rename to Q1/Q2).")
+
+    per_review_schema: list[float] = []
+    for qid in exp_qids:
+        rev = reviews_by_id.get(qid)
+        if rev is None:
+            per_review_schema.append(0.0)
+            continue
+        carl = rev.get("carl") if isinstance(rev.get("carl"), dict) else {}
+        carl_ok = sum(
+            1 for d in CARL_DIMS if isinstance(carl.get(d), str) and carl[d].strip().lower() in CARL_RANK
+        ) == 4
+        fields_ok = [
+            isinstance(rev.get("title"), str) and bool(rev["title"].strip()),
+            isinstance(rev.get("prompt"), str) and bool(rev["prompt"].strip()),
+            carl_ok,
+            isinstance(rev.get("strength"), str) and bool(rev["strength"].strip()),
+            isinstance(rev.get("coaching_tip"), str) and bool(rev["coaching_tip"].strip()),
+            isinstance(rev.get("carl_reframe"), str) and bool(rev["carl_reframe"].strip()),
+        ]
+        if not carl_ok:
+            failures.append(f"[{qid}] Invalid or incomplete `carl` dimensions.")
+        per_review_schema.append(sum(1.0 for ok in fields_ok if ok) / len(fields_ok))
+
+    drill_qid = str(raw_drill.get("question_id") or "").strip() if isinstance(raw_drill.get("question_id"), str) else ""
+    drill_focus = str(raw_drill.get("focus") or "").strip() if isinstance(raw_drill.get("focus"), str) else ""
+    drill_prompt = str(raw_drill.get("prompt") or "").strip() if isinstance(raw_drill.get("prompt"), str) else ""
+    drill_schema_ok = bool(drill_qid and drill_focus and drill_prompt)
+    if not drill_schema_ok:
+        failures.append("Incomplete `retry_drill` object (needs `question_id`, `focus`, `prompt`).")
+
+    top_schema_checks = [
+        bool(overall),
+        2 <= len(strengths) <= 4,
+        bool(primer),
+        drill_schema_ok,
+        len(matched_qids) == len(exp_qids),
+    ]
+    if not (2 <= len(strengths) <= 4):
+        failures.append(f"`top_strengths` count ({len(strengths)}) outside 2-4 range.")
+    top_schema_score = sum(1.0 for ok in top_schema_checks if ok) / len(top_schema_checks)
+    review_schema_score = (sum(per_review_schema) / len(per_review_schema)) if per_review_schema else 0.0
+    schema_score = 0.5 * top_schema_score + 0.5 * review_schema_score
+
+    # 2. CARL accuracy + anti-sycophancy + highest-leverage retry drill selection
+    carl_pts: list[float] = []
+    inflated: list[str] = []
+    for qid in exp_qids:
+        rev = reviews_by_id.get(qid)
+        exp_c = exp_carl_map.get(qid) or {}
+        no_inf = set(must_not_inflate_map.get(qid) or [])
+        if rev is None or not isinstance(rev.get("carl"), dict):
+            carl_pts.extend([0.0] * len(CARL_DIMS))
+            continue
+        raw_c = rev["carl"]
+        for dim in CARL_DIMS:
+            pv = raw_c.get(dim).strip().lower() if isinstance(raw_c.get(dim), str) else ""
+            ev = str(exp_c.get(dim, "missing")).strip().lower()
+            if pv not in CARL_RANK:
+                carl_pts.append(0.0)
+                continue
+            diff = abs(CARL_RANK[pv] - CARL_RANK[ev])
+            if diff == 0:
+                carl_pts.append(1.0)
+            elif diff == 1:
+                carl_pts.append(0.5)
+                failures.append(f"[{qid}] `carl.{dim}` slightly off: expected {ev!r}, got {pv!r}.")
+            else:
+                carl_pts.append(0.0)
+                failures.append(f"[{qid}] `carl.{dim}` far off: expected {ev!r}, got {pv!r}.")
+            if dim in no_inf and CARL_RANK[pv] > CARL_RANK[ev]:
+                inflated.append(f"{qid}.{dim}: expected {ev}, got {pv}")
+
+    carl_raw = (sum(carl_pts) / len(carl_pts)) if carl_pts else 0.0
+    if inflated:
+        failures.append("Sycophantic CARL inflation on unprovided dimension(s): " + ", ".join(inflated))
+        suggestions.append("Grade each question's CARL honestly from transcript evidence; never mark missing Results or Learnings as `strong`.")
+    carl_penalized = carl_raw * max(0.0, 1.0 - 0.35 * len(inflated))
+
+    drill_target_ok = drill_qid in exp_drill_qids
+    if not drill_target_ok:
+        failures.append(f"`retry_drill.question_id`={drill_qid!r} did not pick weakest question ({exp_drill_qids}).")
+        suggestions.append("Point `retry_drill.question_id` to the question with the weakest/missing CARL signal.")
+    carl_and_drill = 0.72 * carl_penalized + 0.28 * (1.0 if drill_target_ok else 0.0)
+
+    # 3. Grounding in candidate specifics & UI-friendly conciseness
+    text_parts = [overall, primer, drill_focus, drill_prompt, *strengths]
+    concise_checks: list[bool] = [
+        bool(overall) and _count_sentences(overall) <= 3 and len(overall.split()) <= 68,
+        bool(primer) and _count_sentences(primer) <= 2 and len(primer.split()) <= 40,
+        bool(drill_focus) and len(drill_focus.split()) <= 14,
+        bool(drill_prompt) and _count_sentences(drill_prompt) <= 3 and len(drill_prompt.split()) <= 60,
+    ]
+    if overall and not concise_checks[0]:
+        failures.append(f"`overall_encouragement` too verbose ({len(overall.split())} words, {_count_sentences(overall)} sentences).")
+        suggestions.append("Keep `overall_encouragement` to 2-3 punchy sentences (under 65 words) so Q1 stays above the fold.")
+    if primer and not concise_checks[1]:
+        failures.append(f"`carl_primer` too verbose ({len(primer.split())} words).")
+
+    for qid in exp_qids:
+        rev = reviews_by_id.get(qid)
+        if not rev:
+            concise_checks.extend([False, False, False])
+            continue
+        st = str(rev.get("strength") or "").strip()
+        ct = str(rev.get("coaching_tip") or "").strip()
+        rf = str(rev.get("carl_reframe") or "").strip()
+        text_parts.extend([st, ct, rf])
+        st_ok = bool(st) and _count_sentences(st) <= 2 and len(st.split()) <= 48
+        ct_ok = bool(ct) and _count_sentences(ct) <= 2 and len(ct.split()) <= 48
+        rf_ok = bool(rf) and _count_sentences(rf) <= 3 and len(rf.split()) <= 75
+        if st and not st_ok:
+            failures.append(f"[{qid}] `strength` too long ({len(st.split())} words, {_count_sentences(st)} sents).")
+        if ct and not ct_ok:
+            failures.append(f"[{qid}] `coaching_tip` too long ({len(ct.split())} words, {_count_sentences(ct)} sents).")
+        if rf and not rf_ok:
+            failures.append(f"[{qid}] `carl_reframe` too long ({len(rf.split())} words, {_count_sentences(rf)} sents).")
+        concise_checks.extend([st_ok, ct_ok, rf_ok])
+
+    combined = " ".join(text_parts)
+    low = combined.lower()
+    must_ref = [str(k).lower() for k in (expected.get("must_reference_any") or []) if str(k).strip()]
+    hits = [tok for tok in must_ref if tok in low]
+    grounding_ratio = 1.0 if (not must_ref or len(hits) >= min(2, len(must_ref))) else (0.5 if hits else 0.0)
+    if grounding_ratio < 1.0:
+        failures.append(f"Debrief lacked concrete transcript/workspace grounding (hits={hits}, expected >=2 of {must_ref[:6]}).")
+        suggestions.append("Ground `top_strengths`, `strength`, and `carl_reframe` in exact numbers, systems, or details from the candidate's transcript/code/diagram.")
+
+    concise_ratio = sum(1.0 for ok in concise_checks if ok) / max(1, len(concise_checks))
+    grounding_and_conciseness = 0.50 * grounding_ratio + 0.50 * concise_ratio
+
+    # 4. Warm tone guard
+    harsh_hits = [pat.pattern for pat in HARSH_TONE_PATTERNS if pat.search(combined)]
+    if harsh_hits:
+        failures.append(f"Harsh phrasing detected: {harsh_hits}")
+        suggestions.append("Keep coaching warm, encouraging, and strengths-first even on missing CARL dimensions.")
+    tone_score = 0.0 if (harsh_hits or not overall) else 1.0
+
+    subscores = {
+        "json_validity": round(json_score, 4),
+        "schema_and_ids": round(schema_score, 4),
+        "carl_and_drill": round(carl_and_drill, 4),
+        "grounding_and_conciseness": round(grounding_and_conciseness, 4),
+        "tone": round(tone_score, 4),
+    }
+    total = (
+        0.10 * subscores["json_validity"]
+        + 0.20 * subscores["schema_and_ids"]
+        + 0.35 * subscores["carl_and_drill"]
+        + 0.25 * subscores["grounding_and_conciseness"]
+        + 0.10 * subscores["tone"]
+    )
+    return round(max(0.0, min(1.0, total)), 4), {
+        "example_id": example.get("id"),
+        "subscores": subscores,
+        "failures": failures,
+        "suggestions": list(dict.fromkeys(suggestions)),
+    }
+
+
 def score_example(
     target: str,
     raw_output: str,
@@ -1351,4 +1614,6 @@ def score_example(
         return score_practice_retry_eval(raw_output, example)
     if target == "practice_hint":
         return score_practice_hint(raw_output, example)
+    if target == "practice_debrief":
+        return score_practice_debrief(raw_output, example)
     raise ValueError(f"Unsupported eval target: {target!r}")
