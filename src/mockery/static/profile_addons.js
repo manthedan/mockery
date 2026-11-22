@@ -37,7 +37,7 @@ function friendlyLabel(raw) {
   return LABEL_FRIENDLY[raw] || String(raw || "PII").replace(/_/g, " ");
 }
 
-function jdRoleLabel(jd) {
+export function jdRoleLabel(jd) {
   if (!jd?.title) return "";
   return jd.company ? `${jd.title} (${jd.company})` : jd.title;
 }
@@ -55,6 +55,8 @@ export function createProfileAddonsController({
   showToast,
   setModalState,
   onRoleApply,
+  onLevelApply = null,
+  isPracticeHome = null,
   onAddonsChange,
   onPracticeQuestion = null,
   clientMachines = null,
@@ -82,6 +84,9 @@ export function createProfileAddonsController({
     busyJdImport: false,
     busyJdIds: new Set(),
     busyModules: new Set(),
+    // Home role headline: hand edits end the automatic target-job alignment.
+    roleEditedByHand: false,
+    autoRoleLabel: "",
   };
 
   sharedPackOps.subscribe(() => {
@@ -98,6 +103,27 @@ export function createProfileAddonsController({
       if (found) return found;
     }
     return profile.job_listings[0];
+  }
+
+  /* Practice Home opens aligned with the active target job: while the role headline is
+     still the untouched stock default (or the label this function last wrote), adopt
+     the JD's role and level. A hand edit ends the auto-sync; "Use JD role" snaps back. */
+  function autoAlignHomeToJd(jd) {
+    const input = el("setupRoleInput");
+    if (!jd?.title || !input || local.roleEditedByHand) return;
+    if (typeof isPracticeHome !== "function" || !isPracticeHome()) return;
+    if (document.activeElement === input) return;
+    const current = input.value.trim();
+    const label = jdRoleLabel(jd);
+    if (current !== label) {
+      const untouched =
+        current === input.defaultValue || (local.autoRoleLabel !== "" && current === local.autoRoleLabel);
+      if (!untouched) return;
+      input.value = label;
+    }
+    // Already on the JD role (just written, or applied in an earlier visit): the level follows too.
+    local.autoRoleLabel = label;
+    if (typeof onLevelApply === "function") onLevelApply(jd.target_level, { auto: true });
   }
 
   function renderProfileSummaryIndicators(summary = null) {
@@ -139,6 +165,7 @@ export function createProfileAddonsController({
     // and offers the one-tap "Use JD role" chip only while the role differs.
     const jdLine = el("homeJdTargetLine");
     const jdText = el("homeJdTargetText");
+    autoAlignHomeToJd(jd);
     const roleVal = String(el("setupRoleInput")?.value || "").trim();
     const applied = Boolean(jd) && roleVal !== "" && roleVal === jdRoleLabel(jd);
     if (jdLine) {
@@ -147,7 +174,7 @@ export function createProfileAddonsController({
     }
     if (jdText && jd) {
       const label = jd.company ? `${jd.title} · ${jd.company}` : jd.title;
-      jdText.textContent = applied ? `Practicing for your target job · ${jd.company || jd.title}` : `Target job: ${label}`;
+      jdText.textContent = applied ? `From your active target job · ${jd.company || jd.title}` : `Target job: ${label}`;
       jdText.title = label;
     }
     if (homeApplyBtn) {
@@ -1139,6 +1166,7 @@ export function createProfileAddonsController({
     });
     // Keep the "Use JD role" chip honest as the role headline is edited by hand.
     el("setupRoleInput")?.addEventListener("input", () => {
+      local.roleEditedByHand = true;
       if (state.profileSummary) renderProfileSummaryIndicators(state.profileSummary);
     });
 
@@ -1308,6 +1336,10 @@ export function createProfileAddonsController({
 
   return {
     applyStatusSnapshot,
+    // Re-evaluate the Home target-job line (e.g. after switching Home to practice mode).
+    syncHomeJdTarget: () => {
+      if (state.profileSummary) renderProfileSummaryIndicators(state.profileSummary);
+    },
     openProfileModal,
     refreshProfile,
     refreshAddons,
