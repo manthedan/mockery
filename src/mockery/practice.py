@@ -92,6 +92,8 @@ class PracticeTurn(BaseModel):
     is_retry: bool = False
     carl_signals: dict[str, str] | None = None
     coach_tip: str = ""
+    fallback_reason: str = ""
+    """Set on an interviewer turn that is a built-in reply because the connected model failed."""
 
 
 class PracticeSession(BaseModel):

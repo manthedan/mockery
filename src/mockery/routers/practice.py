@@ -506,6 +506,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 role="interviewer",
                 question_id=target_q_id,
                 text=reply_text or "Thanks for sharing that — let's keep going.",
+                fallback_reason=str(reply.get("fallback_reason") or ""),
             )
             session.turns.append(cand_turn)
             session.turns.append(interviewer_turn)

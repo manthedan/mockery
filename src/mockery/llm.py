@@ -3360,7 +3360,7 @@ class InterviewCopilotLLM:
             if not reply:
                 if session_key:
                     await self.close_session_worker(session_key)
-                return _fallback()
+                return {**_fallback(), "fallback_reason": built_in_reason(self.config, None)}
             raw_adv = parsed.get("should_advance", False)
             if isinstance(raw_adv, bool):
                 should_advance = raw_adv
@@ -3400,7 +3400,7 @@ class InterviewCopilotLLM:
             logger.warning("LLM generate_practice_interviewer_reply failed (%s); using fallback", type(exc).__name__)
             if session_key:
                 await self.close_session_worker(session_key)
-            return _fallback()
+            return {**_fallback(), "fallback_reason": built_in_reason(self.config, exc)}
 
     async def generate_practice_hint(
         self,
@@ -3672,7 +3672,7 @@ class InterviewCopilotLLM:
             overall = str(parsed.get("overall_encouragement") or "").strip()
             raw_reviews = parsed.get("question_reviews")
             if not overall or not isinstance(raw_reviews, list):
-                return fallback_debrief
+                return {**fallback_debrief, "fallback_reason": built_in_reason(self.config, None)}
 
             all_q_ids = {str(q.get("id")) for q in questions if q.get("id")}
             answered_q_by_id = {str(q.get("id")): q for q in answered_questions if q.get("id")}
@@ -3702,7 +3702,7 @@ class InterviewCopilotLLM:
                     }
                 )
             if not clean_reviews:
-                return fallback_debrief
+                return {**fallback_debrief, "fallback_reason": built_in_reason(self.config, None)}
 
             raw_strengths = parsed.get("top_strengths") if isinstance(parsed.get("top_strengths"), list) else []
             clean_strengths = [str(s).strip() for s in raw_strengths if isinstance(s, str) and s.strip()][:5]
@@ -3730,7 +3730,7 @@ class InterviewCopilotLLM:
             }
         except Exception as exc:
             logger.warning("LLM generate_practice_debrief failed (%s); using heuristic debrief", exc)
-            return fallback_debrief
+            return {**fallback_debrief, "fallback_reason": built_in_reason(self.config, exc)}
 
     async def evaluate_practice_retry(
         self,
@@ -3811,7 +3811,7 @@ class InterviewCopilotLLM:
             parsed = _extract_json_object(raw)
             enc = str(parsed.get("encouragement") or "").strip()
             if not enc:
-                return fallback
+                return {**fallback, "fallback_reason": built_in_reason(self.config, None)}
             graded_after = rubric.signals_from_grader(parsed.get("carl_after"))
             norm_ca = {dim: graded_after.get(dim, carl_after[dim]) for dim in SIGNAL_SLOTS}
             return {
@@ -3822,7 +3822,7 @@ class InterviewCopilotLLM:
             }
         except Exception as exc:
             logger.warning("LLM evaluate_practice_retry failed (%s); using fallback", exc)
-            return fallback
+            return {**fallback, "fallback_reason": built_in_reason(self.config, exc)}
 
 
 _probe_guidance_for = probe_guidance_for
@@ -3856,6 +3856,18 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     if end > start:
         return json.loads(cleaned[start : end + 1])
     return json.loads(cleaned)
+
+
+UNUSABLE_MODEL_REPLY = (
+    "Your AI model answered, but not in a form Mockery could use. A more capable model usually fixes this."
+)
+
+
+def built_in_reason(cfg: LLMRuntimeConfig, exc: Exception | None) -> str:
+    """Why a built-in reply is standing in for the connected model, in words the user can act on."""
+    if exc is None or isinstance(exc, (json.JSONDecodeError, KeyError, TypeError, ValueError)):
+        return UNUSABLE_MODEL_REPLY
+    return f"Your AI did not respond. {_friendly_connection_hint(cfg, str(exc))}"
 
 
 def _friendly_connection_hint(cfg: LLMRuntimeConfig, err_msg: str) -> str:

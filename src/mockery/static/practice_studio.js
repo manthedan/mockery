@@ -2746,6 +2746,9 @@ export function createPracticeStudioController({
       if (data.interviewer_turn?.text && local.voiceEnabled) {
         speakText(data.interviewer_turn.text, { thenListen: true });
       }
+      if (data.interviewer_turn?.fallback_reason) {
+        showToast(`Built-in reply: ${data.interviewer_turn.fallback_reason}`, 6000);
+      }
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         let serverCommitted = false;
@@ -3303,6 +3306,13 @@ export function createPracticeStudioController({
     return `<div class="retry-outcome">${moves.join("")}<span class="retry-outcome-score">${escapeHtml(scoreLine)}</span></div>`;
   }
 
+  /* A built-in reply standing in for the connected AI always says so, with the way to fix it. */
+  function renderBuiltInNote(reason, what = "This is a built-in reply.") {
+    if (!reason) return "";
+    return `<p class="built-in-note" role="note"><span>${escapeHtml(what)} ${escapeHtml(reason)}</span>
+      <button type="button" class="link-quiet" data-open-ai-settings>Open Settings</button></p>`;
+  }
+
   function renderTurnCard(t, { showCoachNote = false } = {}) {
     if (t.role === "interviewer") {
       return `
@@ -3312,6 +3322,7 @@ export function createPracticeStudioController({
             <button type="button" class="link-quiet pturn-replay-btn" data-replay-turn="${escapeHtml(t.id)}" title="Hear this question again" aria-label="Replay this question aloud"><svg class="icon-xs" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 3.4v9.2a.5.5 0 00.77.42l7.1-4.6a.5.5 0 000-.84l-7.1-4.6A.5.5 0 005 3.4z" fill="currentColor"/></svg><span>Replay</span></button>
           </div>
           <div class="pturn-body pturn-serif">${formatWithNewlines(t.text)}</div>
+          ${renderBuiltInNote(t.fallback_reason)}
         </article>
       `;
     }
@@ -3363,6 +3374,7 @@ export function createPracticeStudioController({
 
     contentEl.innerHTML = `
       <section class="debrief-hero">
+        ${renderBuiltInNote(debrief.fallback_reason, "This is a built-in debrief, not one written by your AI.")}
         <div class="practice-kicker">Coaching debrief</div>
         <h2 class="debrief-encouragement">${escapeHtml(debrief.overall_encouragement || "Great practice session!")}</h2>
         ${
@@ -3498,6 +3510,7 @@ export function createPracticeStudioController({
                 </div>
                 ${outcome}
                 <blockquote class="retry-quote">${escapeHtml(r.candidate_answer || "")}</blockquote>
+                ${renderBuiltInNote(fb.fallback_reason, "This is built-in feedback.")}
                 ${fb.encouragement ? `<p class="retry-encourage">${escapeHtml(fb.encouragement)}</p>` : ""}
                 ${fb.what_improved ? `<p class="retry-detail"><span class="debrief-q-label">What improved</span><span>${escapeHtml(fb.what_improved)}</span></p>` : ""}
                 ${fb.one_more_polish ? `<p class="retry-detail"><span class="debrief-q-label">One more polish</span><span>${escapeHtml(fb.one_more_polish)}</span></p>` : ""}
@@ -3933,6 +3946,9 @@ export function createPracticeStudioController({
     };
     el("practiceFeed")?.addEventListener("click", onReplayClick);
     el("practiceDebriefTranscript")?.addEventListener("click", onReplayClick);
+    el("practiceWorkspace")?.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-open-ai-settings]")) el("settingsBtn")?.click();
+    });
 
     el("practiceInstallPhononBtn")?.addEventListener("click", () => {
       if (typeof onInstallPack === "function") {
