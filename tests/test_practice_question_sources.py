@@ -109,6 +109,42 @@ def test_custom_question_opens_the_session_verbatim(tmp_path: Path) -> None:
     assert too_long.status_code == 422
 
 
+def test_custom_question_loses_contact_details_and_nothing_else(tmp_path: Path) -> None:
+    client = _offline_client(tmp_path)
+    own = (
+        "Priya Raman at Northwind asked me this in the Lisbon onsite: design a rate limiter for "
+        "10.0.0.1 behind https://api.example.com handling 1,000,000 requests a day.\n"
+        "Follow up with her at priya.raman@example.com or (555) 010-0199. "
+        "Reference 123-45-6789, card 4111 1111 1111 1111."
+    )
+    started = client.post(
+        "/api/practice/start",
+        json={"interview_type": "system_design", "custom_question": own},
+    ).json()
+    prompt = started["session"]["questions"][0]["prompt"]
+
+    for gone in ("priya.raman@example.com", "(555) 010-0199", "123-45-6789", "4111 1111 1111 1111"):
+        assert gone not in prompt
+        assert gone not in started["opening_turn"]["text"]
+    for kept in ("Priya Raman", "Northwind", "Lisbon", "10.0.0.1", "https://api.example.com", "1,000,000"):
+        assert kept in prompt
+    assert "[email address removed]" in prompt and "[phone number removed]" in prompt
+    assert started["removed_details"] == [
+        "email address",
+        "phone number",
+        "Social Security number",
+        "card number",
+    ]
+
+    plain = "Tell me about the time you cut 2024 onboarding from 14 days to 9 for 300 new hires."
+    untouched = client.post(
+        "/api/practice/start",
+        json={"interview_type": "behavioral", "question_source": "bank_only", "custom_question": plain},
+    ).json()
+    assert untouched["session"]["questions"][0]["prompt"] == plain
+    assert untouched["removed_details"] == []
+
+
 def test_system_design_level_bar_reaches_the_interviewer_plan(tmp_path: Path) -> None:
     client = _offline_client(tmp_path)
 

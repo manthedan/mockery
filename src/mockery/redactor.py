@@ -42,6 +42,14 @@ MAX_SPAN_CACHE_ENTRIES = 8
 LOCATION_LABELS = {"CITY", "STATE", "ZIP_CODE"}
 ADDRESS_LABELS = {"BUILDING_NUMBER", "STREET_NAME", "SECONDARY_ADDRESS", "STREET_ADDRESS"}
 NAME_LABELS = {"GIVEN_NAME", "SURNAME", "PERSON_NAME"}
+# Contact details and identifiers removed from text the candidate wrote themselves (a custom
+# practice question). Names, employers and places stay: the candidate chose to put them there.
+CONTACT_DETAIL_NAMES = {
+    "EMAIL": "email address",
+    "PHONE": "phone number",
+    "SSN": "Social Security number",
+    "CREDIT_CARD": "card number",
+}
 
 _PDF_LIGATURES = str.maketrans(
     {
@@ -931,6 +939,31 @@ class RampartRedactor:
         for m in _CITY_STATE_RE.finditer(text):
             spans.append(DetectedSpan(m.start(), m.end(), "CITY", "rules"))
         return spans
+
+    def strip_contact_details(self, text: str) -> tuple[str, list[str]]:
+        """
+        Light redaction for text the candidate wrote themselves: replace email addresses, phone
+        numbers, Social Security numbers and card numbers with a plain note, and leave every other
+        word as written. Returns the cleaned text and the kinds of detail removed, in reading order.
+        """
+        spans = sorted(
+            (sp for sp in self._run_deterministic_rules(text) if sp.label in CONTACT_DETAIL_NAMES),
+            key=lambda sp: (sp.start, -(sp.end - sp.start)),
+        )
+        parts: list[str] = []
+        removed: list[str] = []
+        cursor = 0
+        for sp in spans:
+            if sp.start < cursor:
+                continue
+            name = CONTACT_DETAIL_NAMES[sp.label]
+            parts.append(text[cursor : sp.start])
+            parts.append(f"[{name} removed]")
+            if name not in removed:
+                removed.append(name)
+            cursor = sp.end
+        parts.append(text[cursor:])
+        return "".join(parts), removed
 
     def _detect_header_candidate_name(self, text: str) -> list[DetectedSpan]:
         """
