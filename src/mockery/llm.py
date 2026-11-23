@@ -22,8 +22,10 @@ import httpx
 from dotenv import dotenv_values
 from openai import AsyncOpenAI
 
+from .levels import normalize_level
 from .models import (
     DEFAULT_PARAKEET_MODEL,
+    DEFAULT_PRACTICE_ROLE_TITLE,
     LLM_PRESETS,
     DiveDeeperResponse,
     InterviewSession,
@@ -2973,11 +2975,13 @@ class InterviewCopilotLLM:
         redacted_resume: str = "",
         jd_text: str = "",
         selected_question_id: str | None = None,
+        custom_question: str = "",
     ) -> tuple[list[dict[str, Any]], str]:
         """
         Build the interview question plan and a warm opening greeting.
         Returns `(questions_list, opening_message)`.
         Always keeps `redacted_resume` privacy-safe and degrades cleanly to curated banks if unconfigured.
+        A `custom_question` opens the session exactly as the candidate wrote it.
         """
         effective_count = 1 if interview_type in ("system_design", "coding") else max(1, min(6, question_count))
 
@@ -3014,11 +3018,34 @@ class InterviewCopilotLLM:
                 "starter_code": dict(q.get("starter_code")) if isinstance(q.get("starter_code"), dict) else {},
                 "tests": dict(q.get("tests")) if isinstance(q.get("tests"), dict) else {},
                 "difficulty": str(q.get("difficulty") or ""),
+                "level_bar": _level_bar(playbook.get("level_extensions")),
             }
+
+        def _level_bar(extensions: Any) -> str:
+            if not isinstance(extensions, dict):
+                return ""
+            wanted = normalize_level(target_level)
+            for level, bar in extensions.items():
+                if normalize_level(level) == wanted:
+                    return str(bar or "").strip()
+            return ""
 
         selected_bank = [_bank_to_item(q) for q in bank_candidates[:effective_count]]
         pinned_item: dict[str, Any] | None = None
-        if selected_question_id:
+        custom_text = custom_question.strip()
+        if custom_text:
+            first_line = custom_text.splitlines()[0].strip()
+            pinned_item = {
+                **_bank_to_item({}),
+                "bank_question_id": None,
+                "source": "custom",
+                "category": interview_type,
+                "title": first_line if len(first_line) <= 64 else first_line[:63].rstrip() + "…",
+                "competency": "Your question",
+                "prompt": custom_text,
+            }
+            selected_bank = [pinned_item, *selected_bank][:effective_count]
+        elif selected_question_id:
             for item in selected_bank:
                 if item.get("bank_question_id") == selected_question_id:
                     pinned_item = item
@@ -3026,9 +3053,14 @@ class InterviewCopilotLLM:
         remaining_bank = [item for item in selected_bank if item is not pinned_item]
 
         role_label = f"{role_title} at {company}" if company else role_title
+        session_for = (
+            f"at the {target_level} level"
+            if role_title == DEFAULT_PRACTICE_ROLE_TITLE and not company
+            else f"for {role_label} ({target_level})"
+        )
         default_opening = (
             f"Welcome! Today we're running a supportive {interview_type.replace('_', ' ')} practice session "
-            f"for {role_label} ({target_level}). Take a breath, think out loud whenever helpful, and let's dive right in."
+            f"{session_for}. Take a breath, think out loud whenever helpful, and let's dive right in."
         )
 
         # If bank_only OR LLM not configured OR system_design/coding with a specific bank problem:
@@ -3044,7 +3076,7 @@ class InterviewCopilotLLM:
             # Keep the rich curated playbook/test-harness item, and ask LLM only for a tailored framing + greeting
             # when a target JD is actually present (the framing prompt does not use resume text).
             base = pinned_item or selected_bank[0]
-            if not jd_text.strip():
+            if not jd_text.strip() or base.get("source") == "custom":
                 return [base], default_opening
             sys_p = render_prompt("practice_plan_framing")
             usr_p = (

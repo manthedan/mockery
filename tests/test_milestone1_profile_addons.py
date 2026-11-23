@@ -282,8 +282,17 @@ def test_question_banks_and_jd_ranking(tmp_path: Path) -> None:
     ranked = store.list_questions(category="system_design", jd_text=SYNTHETIC_JD)
     assert ranked[0]["jd_relevance_score"] > 0
 
-    l6_only = store.list_questions(level="L6")
-    assert all("L6" in q.get("levels", []) for q in l6_only)
+    # Ladder codes from older user packs and saved profiles fold onto role-neutral seniority
+    lead_only = store.list_questions(level="Lead")
+    assert lead_only and all("Lead" in q.get("levels", []) for q in lead_only)
+    assert [q["id"] for q in store.list_questions(level="L6")] == [q["id"] for q in lead_only]
+    custom = next(q for q in lead_only if q["id"] == "custom_01")
+    assert custom["levels"] == ["Senior", "Lead"]
+
+    # Every bundled question is told apart by its own title in the picker and the bank browser
+    bundled_titles = [q["title"] for q in beh + sd + coding if q["id"] != "custom_01"]
+    assert all(bundled_titles) and len(set(bundled_titles)) == len(bundled_titles)
+    assert not any(code in q.get("levels", []) for q in beh + sd + coding for code in ("L4", "L5", "L6", "L7", "EM"))
 
 
 def test_profile_store_permissions_and_llm_safety(tmp_path: Path) -> None:

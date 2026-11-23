@@ -8,7 +8,8 @@
     {
       "id": "code_ttl_lru_01",
       "competency": "Data Structures & Systems",
-      "levels": ["L4", "L5"],
+      "levels": ["Mid", "Senior"],
+      "difficulty": "Medium",
       "title": "LRU Cache with Per-Key TTL",
       "prompt": "Implement an in-memory cache `TTLLRUCache(capacity)` supporting `get(key, now_ms)` and `put(key, value, ttl_ms, now_ms)` in O(1) average time. Expired entries must not be returned by `get` and should be evicted before live entries when at capacity.",
       "starter_code": {
@@ -16,8 +17,8 @@
         "javascript": "class TTLLRUCache {\n  constructor(capacity) {\n    this.capacity = capacity;\n  }\n  get(key, nowMs) {\n    // Return value if present and not expired, else null\n    return null;\n  }\n  put(key, value, ttlMs, nowMs) {\n  }\n}\n"
       },
       "tests": {
-        "python": "c = TTLLRUCache(2)\nc.put('a', 1, 100, 0)\nc.put('b', 2, 500, 10)\nassert c.get('a', 50) == 1\nassert c.get('a', 100) is None  # expired at 100\nc.put('c', 3, 500, 120)         # 'a' is expired, 'b' must stay\nassert c.get('b', 130) == 2\nassert c.get('c', 130) == 3\nc.put('d', 4, 500, 140)         # evicts LRU ('c' since 'b' was touched? actually 'c' touched at 130 after 'b')\nassert c.get('d', 150) == 4\nprint('ALL TESTS PASSED')\n",
-        "javascript": "const assert = (cond, msg) => { if (!cond) throw new Error(msg || 'Assertion failed'); };\nconst c = new TTLLRUCache(2);\nc.put('a', 1, 100, 0);\nc.put('b', 2, 500, 10);\nassert(c.get('a', 50) === 1, 'a should be alive at 50');\nassert(c.get('a', 100) === null, 'a should expire at 100');\nc.put('c', 3, 500, 120);\nassert(c.get('b', 130) === 2, 'b should survive');\nassert(c.get('c', 130) === 3, 'c should exist');\nc.put('d', 4, 500, 140);\nassert(c.get('d', 150) === 4, 'd should exist');\nconsole.log('ALL TESTS PASSED');\n"
+        "python": "c = TTLLRUCache(2)\nc.put('a', 1, 100, 0)\nc.put('b', 2, 500, 10)\nassert c.get('a', 50) == 1\nassert c.get('a', 100) is None  # expired at 100\nc.put('c', 3, 500, 120)         # 'a' is expired, 'b' must stay\nassert c.get('b', 130) == 2\nassert c.get('c', 130) == 3\nc.put('d', 4, 500, 140)         # full with two live entries: 'b' is least recently used\nassert c.get('d', 150) == 4\nassert c.get('b', 150) is None\nassert c.get('c', 150) == 3\nprint('ALL TESTS PASSED')\n",
+        "javascript": "const assert = (cond, msg) => { if (!cond) throw new Error(msg || 'Assertion failed'); };\nconst c = new TTLLRUCache(2);\nc.put('a', 1, 100, 0);\nc.put('b', 2, 500, 10);\nassert(c.get('a', 50) === 1, 'a should be alive at 50');\nassert(c.get('a', 100) === null, 'a should expire at 100');\nc.put('c', 3, 500, 120);\nassert(c.get('b', 130) === 2, 'b should survive');\nassert(c.get('c', 130) === 3, 'c should exist');\nc.put('d', 4, 500, 140);\nassert(c.get('d', 150) === 4, 'd should exist');\nassert(c.get('b', 150) === null, 'b was least recently used and should be evicted');\nassert(c.get('c', 150) === 3, 'c should survive');\nconsole.log('ALL TESTS PASSED');\n"
       },
       "hints": [
         "Think about separating recency tracking (OrderedDict / Map) from lazy vs. proactive expiration.",
@@ -28,7 +29,8 @@
     {
       "id": "code_rate_01",
       "competency": "Practical Systems",
-      "levels": ["L4", "L5"],
+      "levels": ["Entry", "Mid", "Senior"],
+      "difficulty": "Easy",
       "title": "Sliding-Window Rate Limiter",
       "prompt": "Implement `RateLimiter(limit, window_ms)` with `allow(user_id, now_ms) -> bool` that permits at most `limit` requests per user in any rolling `window_ms` interval `(now_ms - window_ms, now_ms]`. Follow-up: how would you bound memory across millions of idle users?",
       "starter_code": {
@@ -48,7 +50,8 @@
     {
       "id": "code_sse_01",
       "competency": "Full-Stack & Streaming",
-      "levels": ["L4", "L5", "L6"],
+      "levels": ["Mid", "Senior", "Lead"],
+      "difficulty": "Hard",
       "title": "Incremental SSE Stream Parser",
       "prompt": "Write an incremental Server-Sent Events parser `SSEParser` with `feed(chunk: str) -> list[dict]` that handles arbitrary chunk boundaries (including splits mid-line or mid-CRLF), `event:` and multi-line `data:` fields, comments starting with `:`, and blank-line event dispatch.",
       "starter_code": {
@@ -68,7 +71,8 @@
     {
       "id": "code_dag_01",
       "competency": "Graphs & Build/Workflow Systems",
-      "levels": ["L4", "L5"],
+      "levels": ["Mid", "Senior"],
+      "difficulty": "Medium",
       "title": "Parallel Task Scheduler (Topological Layers)",
       "prompt": "Given tasks `tasks: list[str]` and prerequisite pairs `deps: list[tuple[str, str]]` where `(a, b)` means `a` must finish before `b`, return `schedule_layers(tasks, deps)` — a list of parallel execution waves (each wave sorted alphabetically). Raise `ValueError` (or throw Error in JS) if a cycle exists.",
       "starter_code": {
@@ -88,7 +92,8 @@
     {
       "id": "code_undo_01",
       "competency": "Frontend & Editor Internals",
-      "levels": ["L4", "L5"],
+      "levels": ["Mid", "Senior"],
+      "difficulty": "Medium",
       "title": "Transactional Text Buffer with Undo / Redo",
       "prompt": "Implement `TextEditor` supporting `insert(pos, text)`, `delete(pos, length)`, `undo()`, `redo()`, and `get_text() -> str`. Calling `insert` or `delete` after an `undo()` must clear the redo stack. Out-of-bounds positions should be clamped safely.",
       "starter_code": {
@@ -108,7 +113,8 @@
     {
       "id": "code_merge_int_01",
       "competency": "Algorithms & Intervals",
-      "levels": ["L4", "L5"],
+      "levels": ["Mid", "Senior"],
+      "difficulty": "Medium",
       "title": "Calendar Availability & Meeting Slot Finder",
       "prompt": "Given busy intervals for multiple attendees `schedules: list[list[tuple[int, int]]]`, a working window `(day_start, day_end)`, and `duration`, return all merged free intervals of length >= `duration` where everyone is available.",
       "starter_code": {
@@ -128,7 +134,8 @@
     {
       "id": "code_async_pool_01",
       "competency": "Concurrency & Async",
-      "levels": ["L5", "L6"],
+      "levels": ["Senior", "Lead"],
+      "difficulty": "Hard",
       "title": "Bounded-Concurrency Async Batch Runner",
       "prompt": "Implement `run_with_limit(items, worker, limit)` (or `runWithLimit` in JS) that runs an async `worker(item)` over `items` with at most `limit` concurrent executions, preserves input order in the returned results list, and fails fast if any worker throws.",
       "starter_code": {
@@ -148,7 +155,8 @@
     {
       "id": "code_kv_txn_01",
       "competency": "Database & Storage Internals",
-      "levels": ["L5", "L6"],
+      "levels": ["Senior", "Lead"],
+      "difficulty": "Medium",
       "title": "Transactional Key-Value Store with Nested Transactions",
       "prompt": "Implement `TransactionalKV` supporting `set(k, v)`, `get(k)`, `delete(k)`, `begin()`, `commit()`, and `rollback()`. Transactions can be nested arbitrarily deep; `commit()` applies only the innermost transaction to its parent (or base store), while `rollback()` discards only the innermost transaction.",
       "starter_code": {

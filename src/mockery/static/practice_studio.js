@@ -14,11 +14,19 @@ import { jdRoleLabel } from "./profile_addons.js";
 
 const SOURCE_NOTES = {
   mixed:
-    "Blends curated role-ranked prompts with questions tailored to your locally redacted resume & JD.",
+    "Blends curated role-ranked prompts with questions tailored to your locally redacted resume & job listing.",
   bank_only:
     "Uses only Mockery's curated question banks — ranked by relevance to your target job listing.",
   resume_jd_tailored:
     "Generates tailored prompts from your locally redacted resume and target job listing.",
+};
+
+const CUSTOM_QUESTION_VALUE = "__custom__";
+const CUSTOM_QUESTION_PLACEHOLDERS = {
+  behavioral: "Type the question you want to practice, such as one a recruiter told you to expect.",
+  general: "Type the question you want to practice, such as one a recruiter told you to expect.",
+  system_design: "Describe the system to design, with any scale or constraints you want to be held to.",
+  coding: "Paste the problem statement, with examples if you have them. You can add your own tests in the studio.",
 };
 
 const FORMAT_LABELS = {
@@ -222,7 +230,7 @@ export function createPracticeStudioController({
   const local = {
     homeMode: "copilot", // "copilot" | "practice"
     questionSource: "mixed",
-    targetLevel: "L5",
+    targetLevel: "Senior",
     session: null,
     sessionGen: 0,
     ttsStatus: null,
@@ -661,7 +669,7 @@ export function createPracticeStudioController({
     const picker = el("practiceQuestionPicker");
     if (!picker) return;
     const fmt = getSelectedFormat();
-    const catParam = fmt === "general" ? "" : `&category=${encodeURIComponent(fmt)}`;
+    const catParam = `&category=${encodeURIComponent(fmt)}`;
     const lvlParam = local.targetLevel ? `&level=${encodeURIComponent(local.targetLevel)}` : "";
     // Level and format can change back to back; only the latest request may paint.
     const seq = ++local.pickerSeq;
@@ -670,7 +678,7 @@ export function createPracticeStudioController({
       if (!res.ok) return;
       const data = await res.json();
       let questions = data.questions || [];
-      if (questions.length === 0 && catParam) {
+      if (questions.length === 0) {
         const fallbackRes = await fetch(`/api/banks?match_active_jd=true${catParam}`);
         if (fallbackRes.ok) {
           questions = (await fallbackRes.json()).questions || [];
@@ -679,13 +687,15 @@ export function createPracticeStudioController({
       if (seq !== local.pickerSeq) return;
       const prevVal = picker.value;
       picker.innerHTML =
-        `<option value="">Auto-select best match for your target JD</option>` +
+        `<option value="">Auto-select the best match for your job listing</option>` +
+        `<option value="${CUSTOM_QUESTION_VALUE}">Write my own question…</option>` +
         questions
           .slice(0, 24)
           .map((q) => {
-            const tag = q.jd_relevance_score > 0 ? " ★ JD match" : "";
-            const title = q.title || q.competency || q.prompt?.slice(0, 52) || q.id;
-            return `<option value="${escapeHtml(q.id)}">${escapeHtml(title)}${tag}</option>`;
+            const tag = q.jd_relevance_score > 0 ? " ★ matches your listing" : "";
+            const title = q.title || q.prompt?.slice(0, 60) || q.competency || q.id;
+            const difficulty = q.difficulty ? ` · ${q.difficulty}` : "";
+            return `<option value="${escapeHtml(q.id)}">${escapeHtml(`${title}${difficulty}`)}${tag}</option>`;
           })
           .join("");
       if ([...picker.options].some((o) => o.value === prevVal)) {
@@ -694,6 +704,16 @@ export function createPracticeStudioController({
     } catch {
       /* ignore */
     }
+    syncCustomQuestionField();
+  }
+
+  /* "Write my own question…" swaps the bank pick for a free-text opening question. */
+  function syncCustomQuestionField() {
+    const field = el("practiceCustomQuestionInput");
+    if (!field) return;
+    const isCustom = el("practiceQuestionPicker")?.value === CUSTOM_QUESTION_VALUE;
+    field.classList.toggle("hidden", !isCustom);
+    field.placeholder = CUSTOM_QUESTION_PLACEHOLDERS[getSelectedFormat()] || CUSTOM_QUESTION_PLACEHOLDERS.behavioral;
   }
 
   async function refreshPracticeHistory() {
@@ -747,7 +767,7 @@ export function createPracticeStudioController({
               <span class="home-item-meta ph-meta">
                 <span class="ph-badge ph-badge-${escapeHtml(fmtKey)}">${escapeHtml(fmt)}</span>
                 <span class="ph-pill ${pillCls}">${escapeHtml(pillText)}</span>
-                <span class="session-meta-main">${escapeHtml(`${role} · ${s.target_level || "L5"}`)}</span>
+                <span class="session-meta-main">${escapeHtml(`${role} · ${s.target_level || "Senior"}`)}</span>
               </span>
             </button>
           `;
@@ -2279,6 +2299,14 @@ export function createPracticeStudioController({
       return;
     }
     if (opMachine.state !== "idle") return;
+    const pickedQuestion = el("practiceQuestionPicker")?.value || "";
+    const isCustomQuestion = pickedQuestion === CUSTOM_QUESTION_VALUE;
+    const customQuestion = isCustomQuestion ? (el("practiceCustomQuestionInput")?.value || "").trim() : "";
+    if (isCustomQuestion && !customQuestion) {
+      showToast("Type the question you want to practice, or pick one from the list.", 3000);
+      el("practiceCustomQuestionInput")?.focus();
+      return;
+    }
     if (!opMachine.transition("starting", { event: "start_practice" })) return;
 
     local.sessionGen += 1;
@@ -2311,7 +2339,7 @@ export function createPracticeStudioController({
     const roleTitle =
       activeJd?.title && activeJd.company && typedRole === jdRoleLabel(activeJd) ? activeJd.title : typedRole;
     const fmt = getSelectedFormat();
-    const selectedQ = el("practiceQuestionPicker")?.value || null;
+    const selectedQ = isCustomQuestion ? null : pickedQuestion || null;
     const liveNudges = Boolean(el("practiceNudgesCheckbox")?.checked ?? true);
     const voiceOn = Boolean(el("practiceVoiceCheckbox")?.checked ?? true);
     local.voiceEnabled = voiceOn;
@@ -2323,7 +2351,7 @@ export function createPracticeStudioController({
       if (sec >= 6.0) {
         hintEl.textContent = `Still working — waiting on model response to open your session…${suffix}`;
       } else if (sec >= 2.2 && isTailored) {
-        hintEl.textContent = `Tailoring interview questions to your redacted resume & JD…${suffix}`;
+        hintEl.textContent = `Tailoring interview questions to your redacted resume & job listing…${suffix}`;
       } else {
         hintEl.textContent = `Selecting prompts and warming up your AI interviewer…${suffix}`;
       }
@@ -2343,6 +2371,7 @@ export function createPracticeStudioController({
           voice_enabled: voiceOn,
           question_count: fmt === "system_design" || fmt === "coding" ? 1 : 4,
           selected_question_id: selectedQ || null,
+          custom_question: customQuestion,
         }),
       });
       const data = await res.json();
@@ -3312,7 +3341,7 @@ export function createPracticeStudioController({
       .map((q, idx) => {
         const isCur = !isCompleted && !isAwaitingDebrief && idx === curIdx;
         const cls = isCur ? "is-active" : q.status === "completed" ? "is-done" : "";
-        const badge = q.source === "tailored" ? "Tailored" : "Bank";
+        const badge = q.source === "tailored" ? "Tailored" : q.source === "custom" ? "Yours" : "Bank";
         const signals = effective ? effective[idx] || q.carl_signals : q.carl_signals;
         return `
           <div class="roadmap-item ${cls}">
@@ -3361,7 +3390,7 @@ export function createPracticeStudioController({
     }
     if (el("practiceMetaPill")) {
       const fmt = FORMAT_LABELS[sess.config?.interview_type] || sess.config?.interview_type || "Practice";
-      el("practiceMetaPill").textContent = `${fmt} · ${sess.config?.target_level || "L5"}`;
+      el("practiceMetaPill").textContent = `${fmt} · ${sess.config?.target_level || "Senior"}`;
     }
     if (el("practiceProgressBadge")) {
       el("practiceProgressBadge").textContent = isCompleted
@@ -3550,7 +3579,12 @@ export function createPracticeStudioController({
       const btn = ev.target.closest("[data-practice-level]");
       if (!btn) return;
       local.levelTouched = true;
-      setTargetLevel(btn.getAttribute("data-practice-level") || "L5");
+      setTargetLevel(btn.getAttribute("data-practice-level") || "Senior");
+    });
+
+    el("practiceQuestionPicker")?.addEventListener("change", () => {
+      syncCustomQuestionField();
+      if (el("practiceQuestionPicker")?.value === CUSTOM_QUESTION_VALUE) el("practiceCustomQuestionInput")?.focus();
     });
 
     el("practiceStartBtn")?.addEventListener("click", () => startNewPractice());

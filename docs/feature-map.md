@@ -8,7 +8,7 @@ Shared vocabulary mapping user-facing surfaces to exact DOM landmarks, JS module
 - **Primary modules:** `src/mockery/static/app.js`, `src/mockery/static/practice_studio.js`, `src/mockery/static/styles.css`
 - **Mode switch:** `#homeModeSwitch` (AI Mock Practice vs Live Interviewer Copilot), `#homePracticeHistorySection` (`#homePracticeList`), `#homeSessionList`
 - **Role & target alignment:** `#setupRoleInput` (`<textarea rows="1">` with newline stripping via `bindRoleHeadline()`), `#homeJdTargetLine` (`#homeApplyJdRoleBtn`), `#setupTypePills`
-- **Practice launch controls (`#practiceLaunchRows`, `#practiceLaunchCta`):** `#practiceSourcePills`, `#practiceLevelPills`, `#practiceQuestionPicker`, `#practiceNudgesCheckbox`, `#practiceVoiceCheckbox`, `#practiceVoiceSelect`, `#practicePreviewVoiceBtn`, `#practiceStartBtn`
+- **Practice launch controls (`#practiceLaunchRows`, `#practiceLaunchCta`):** `#practiceSourcePills`, `#practiceLevelPills` (role-neutral seniority from `src/mockery/levels.py`: Entry, Mid, Senior, Lead, Manager), `#practiceQuestionPicker` (bank question, auto-select, or "Write my own question…" revealing `#practiceCustomQuestionInput`), `#practiceNudgesCheckbox`, `#practiceVoiceCheckbox`, `#practiceVoiceSelect`, `#practicePreviewVoiceBtn`, `#practiceStartBtn`
 - **Copilot launch controls (`#copilotLaunchRows`, `#copilotLaunchCta`):** `#setupModePills`, `#setupRubricInput`, `#setupSaveAudioProxy`, `#setupStartBtn`, `#setupSimulateBtn`
 - **Backend routes:** `GET /api/status`, `GET /api/practice/sessions`, `POST /api/practice/start`, `GET /api/sessions`
 
@@ -19,6 +19,7 @@ Shared vocabulary mapping user-facing surfaces to exact DOM landmarks, JS module
 
 ## 3. Profile, Resume Redaction & Question Banks (`#profileModal`)
 - **Primary modules:** `src/mockery/static/profile_addons.js`, `src/mockery/routers/profile.py`, `src/mockery/profiles.py`, `src/mockery/redactor.py`, `src/mockery/banks/__init__.py`
+- **Bundled banks (`src/mockery/banks/*.json`, one category each):** `behavioral` (role-neutral), `general` (motivation, fit, and practical questions), `system_design` (per-level depth in `playbook.level_extensions`), `coding` (`difficulty` plus runnable suites verified by `tests/test_bank_reference_solutions.py`). A Practice session draws only from the bank matching its format.
 - **Key landmarks:** `#profileBtn`, `#homeEditProfileBtn`, `#resumeEmptyState`, `#resumePiiChips`, `#resumeRedactedPreview`, JD list & active selector, Question Banks browser
 - **Backend routes (`routers/profile.py`):** `GET /api/profile`, `POST /api/profile/resume/file`, `POST /api/profile/resume/text`, `POST /api/profile/resume/redact`, `POST /api/profile/resume/toggle/{span_id}`, `DELETE /api/profile/resume`, `POST /api/profile/jd`, `POST /api/profile/jd/{jd_id}/select`, `DELETE /api/profile/jd/{jd_id}`, `GET /api/banks`
 - **State machine:** `ResumeRedactionState` (`src/mockery/state_machines.py`) + `createRedactionQueueCoordinator` (`src/mockery/static/state_machines.js`)

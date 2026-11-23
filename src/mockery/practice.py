@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from .models import short_id
+from .levels import DEFAULT_LEVEL, normalize_level
+from .models import DEFAULT_PRACTICE_ROLE_TITLE, short_id
 from .practice_conversation import PracticeConversation
 
 PracticeInterviewType = Literal["behavioral", "system_design", "coding", "general"]
@@ -26,18 +27,23 @@ MAX_CACHED_PRACTICE_SESSIONS = 32
 class PracticeConfig(BaseModel):
     interview_type: PracticeInterviewType = "behavioral"
     question_source: PracticeQuestionSource = "mixed"
-    target_level: str = "L5"
+    target_level: str = DEFAULT_LEVEL
     coach_style: Literal["supportive", "balanced"] = "supportive"
     live_coach_nudges: bool = True
     voice_enabled: bool = True
     question_count: int = Field(default=4, ge=1, le=8)
     selected_question_id: str | None = None
 
+    @field_validator("target_level", mode="before")
+    @classmethod
+    def _fold_ladder_codes(cls, value: object) -> str:
+        return normalize_level(value) or DEFAULT_LEVEL
+
 
 class PracticeQuestionItem(BaseModel):
     id: str = Field(default_factory=lambda: short_id("pq"))
     bank_question_id: str | None = None
-    source: Literal["bank", "tailored"] = "bank"
+    source: Literal["bank", "tailored", "custom"] = "bank"
     category: str = "behavioral"
     title: str = ""
     competency: str = ""
@@ -49,6 +55,7 @@ class PracticeQuestionItem(BaseModel):
     starter_code: dict[str, str] = Field(default_factory=dict)
     tests: dict[str, str] = Field(default_factory=dict)
     difficulty: str = ""
+    level_bar: str = ""
     status: Literal["pending", "active", "completed"] = "pending"
     follow_up_count: int = 0
     carl_signals: dict[str, str] = Field(
@@ -78,7 +85,7 @@ class PracticeSession(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
     updated_at_ms: int = Field(default_factory=lambda: int(time.time() * 1000))
-    role_title: str = "Senior Software Engineer"
+    role_title: str = DEFAULT_PRACTICE_ROLE_TITLE
     company: str = ""
     config: PracticeConfig = Field(default_factory=PracticeConfig)
     phase: PracticePhase = "active"
@@ -288,12 +295,12 @@ def build_heuristic_nudge(carl: dict[str, str], interview_type: str) -> dict[str
     if carl.get("result") == "missing":
         return {
             "tone": "tip",
-            "message": "Strong ownership on the actions — next, anchor it with a concrete result or metric (latency, adoption, time saved).",
+            "message": "Strong ownership on the actions — next, anchor it with a concrete result or number (time saved, revenue, adoption, quality).",
         }
     if carl.get("learning") == "missing":
         return {
             "tone": "encourage",
-            "message": "Solid C-A-R foundation! Adding a 1-sentence Learning ('what I'd do differently or kept doing since') makes senior answers shine.",
+            "message": "Solid C-A-R foundation! Adding a 1-sentence Learning ('what I'd do differently or kept doing since') makes strong answers shine.",
         }
     return {
         "tone": "encourage",
@@ -328,7 +335,7 @@ class PracticeSessionStore:
             "role_title": raw.get("role_title", "Practice Interview"),
             "company": raw.get("company", ""),
             "interview_type": cfg.get("interview_type", "behavioral"),
-            "target_level": cfg.get("target_level", "L5"),
+            "target_level": normalize_level(cfg.get("target_level")) or DEFAULT_LEVEL,
             "phase": raw.get("phase", "active"),
             "question_count": len(raw.get("questions") or []),
             "turn_count": len(raw.get("turns") or []),

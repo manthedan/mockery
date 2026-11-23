@@ -4843,6 +4843,17 @@ kbd {
   box-shadow: 0 0 0 3px var(--mark-strong);
 }
 
+.practice-custom-question {
+  display: block;
+  margin-top: 8px;
+  min-height: 72px;
+  max-height: 240px;
+}
+
+.practice-custom-question.hidden {
+  display: none;
+}
+
 .home-cta {
   display: flex;
   align-items: center;

@@ -168,6 +168,10 @@ PARAKEET_CHECKPOINTS: dict[str, str] = {
 }
 
 
+# Role shown for a Practice session started with no role typed and no active job listing.
+DEFAULT_PRACTICE_ROLE_TITLE = "General role"
+
+
 def short_id(prefix: str = "") -> str:
     uid = uuid.uuid4().hex[:8]
     return f"{prefix}_{uid}" if prefix else uid
@@ -306,7 +310,7 @@ class PendingReviewItem(BaseModel):
 
 
 class SessionConfig(BaseModel):
-    role_title: str = "Senior Software Engineer"
+    role_title: str = ""
     interview_type: InterviewType = "behavioral"
     mode: CaptureMode = "remote_meet"
     rubric_notes: str = ""

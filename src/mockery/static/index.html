@@ -38,7 +38,7 @@
               aria-controls="sessionSetupPopover"
               title="Edit role, format and audio"
             >
-              <span id="contextRoleSummary" class="session-title-role">Senior Software Engineer</span>
+              <span id="contextRoleSummary" class="session-title-role">Untitled interview</span>
               <span id="contextTypeSummary" class="session-title-type">Behavioral</span>
               <svg class="icon-xs chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M4.5 6.5L8 10l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
@@ -54,7 +54,7 @@
               <div class="set-rows">
                 <label class="set-row">
                   <span class="set-label">Role</span>
-                  <input id="roleInput" class="field-input" type="text" value="Senior Software Engineer" placeholder="Role and level" />
+                  <input id="roleInput" class="field-input" type="text" value="" placeholder="What role is this for?" />
                 </label>
                 <label class="set-row">
                   <span class="set-label">Format</span>
@@ -177,12 +177,12 @@
                 id="setupRoleInput"
                 class="home-role"
                 rows="1"
-                placeholder="Role and level"
+                placeholder="What role is this for?"
                 title="Click to edit the role"
                 spellcheck="false"
                 autocomplete="off"
                 enterkeyhint="done"
-              >Senior Software Engineer</textarea>
+              ></textarea>
               <svg class="home-role-cue" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M10.6 3.2l2.2 2.2M3.25 12.75l.5-2.6 7.1-7.1a1.1 1.1 0 011.55 0l.55.55a1.1 1.1 0 010 1.55l-7.1 7.1-2.6.5z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
@@ -192,7 +192,7 @@
                 <path d="M4 2.5v6.25a2 2 0 002 2h6.5M10 8l2.75 2.75L10 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
               <span id="homeJdTargetText" class="home-jd-text">Target job listing</span>
-              <button id="homeApplyJdRoleBtn" class="chip-action hidden" type="button" title="Fill the role above from your active target job listing">Use JD role</button>
+              <button id="homeApplyJdRoleBtn" class="chip-action hidden" type="button" title="Fill the role above from your active target job listing">Use listing role</button>
             </div>
 
             <div class="props">
@@ -246,10 +246,10 @@
                     <div id="practiceSourcePills" class="seg" role="radiogroup" aria-label="Question source">
                       <button type="button" class="seg-opt active" data-practice-source="mixed">Mixed</button>
                       <button type="button" class="seg-opt" data-practice-source="bank_only">Curated Bank</button>
-                      <button type="button" class="seg-opt" data-practice-source="resume_jd_tailored">Resume + JD</button>
+                      <button type="button" class="seg-opt" data-practice-source="resume_jd_tailored">Resume + job listing</button>
                     </div>
                     <p id="practiceSourceDesc" class="prop-note">
-                      Blends curated role-ranked prompts with questions tailored to your locally redacted resume &amp; JD.
+                      Blends curated role-ranked prompts with questions tailored to your locally redacted resume &amp; job listing.
                     </p>
                   </div>
                 </div>
@@ -257,20 +257,31 @@
                 <div class="prop">
                   <span class="prop-label">Level</span>
                   <div id="practiceLevelPills" class="seg" role="radiogroup" aria-label="Target level">
-                    <button type="button" class="seg-opt" data-practice-level="L4">L4</button>
-                    <button type="button" class="seg-opt active" data-practice-level="L5">L5</button>
-                    <button type="button" class="seg-opt" data-practice-level="L6">L6</button>
-                    <button type="button" class="seg-opt" data-practice-level="L7">Staff+</button>
-                    <button type="button" class="seg-opt" data-practice-level="EM">EM</button>
+                    <button type="button" class="seg-opt" data-practice-level="Entry">Entry</button>
+                    <button type="button" class="seg-opt" data-practice-level="Mid">Mid</button>
+                    <button type="button" class="seg-opt active" data-practice-level="Senior">Senior</button>
+                    <button type="button" class="seg-opt" data-practice-level="Lead" title="Lead, staff, or principal">Lead</button>
+                    <button type="button" class="seg-opt" data-practice-level="Manager">Manager</button>
                   </div>
                 </div>
 
-                <label class="prop">
-                  <span class="prop-label">Opening question</span>
-                  <select id="practiceQuestionPicker" class="field-select">
-                    <option value="">Auto-select best match for your target JD</option>
-                  </select>
-                </label>
+                <div class="prop">
+                  <label class="prop-label" for="practiceQuestionPicker">Opening question</label>
+                  <div class="prop-value">
+                    <select id="practiceQuestionPicker" class="field-select">
+                      <option value="">Auto-select the best match for your job listing</option>
+                      <option value="__custom__">Write my own question…</option>
+                    </select>
+                    <textarea
+                      id="practiceCustomQuestionInput"
+                      class="profile-textarea practice-custom-question hidden"
+                      rows="3"
+                      maxlength="6000"
+                      aria-label="Your own opening question"
+                      placeholder="Type or paste the question you want to practice."
+                    ></textarea>
+                  </div>
+                </div>
 
                 <div class="prop">
                   <span class="prop-label">Coaching</span>
@@ -312,7 +323,7 @@
                     Optional — upload resume (redacted locally) &amp; target job listing
                   </span>
                   <div class="home-profile-actions">
-                    <button id="homeEditProfileBtn" class="btn btn-outline btn-sm" type="button">Profile &amp; JD…</button>
+                    <button id="homeEditProfileBtn" class="btn btn-outline btn-sm" type="button">Profile &amp; job listing…</button>
                   </div>
                 </div>
               </div>
@@ -555,8 +566,8 @@
             </button>
             <span class="studio-bar-rule" aria-hidden="true"></span>
             <div class="practice-title-block">
-              <span id="practiceRoleTitle" class="practice-role-title">Senior Software Engineer</span>
-              <span id="practiceMetaPill" class="practice-meta-pill">Behavioral · L5</span>
+              <span id="practiceRoleTitle" class="practice-role-title">Practice interview</span>
+              <span id="practiceMetaPill" class="practice-meta-pill">Behavioral · Senior</span>
             </div>
             <span id="practiceProgressBadge" class="practice-progress-badge">Q1 of 4</span>
             <button
@@ -1058,7 +1069,7 @@
           </div>
           <div class="tabs profile-tabs" role="tablist" aria-label="Profile sections">
             <button type="button" class="tab active" role="tab" aria-selected="true" data-profile-tab="resume">Resume &amp; Privacy</button>
-            <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="jd">Target Job</button>
+            <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="jd">Job Listing</button>
             <button type="button" class="tab" role="tab" aria-selected="false" data-profile-tab="banks">Question Banks</button>
           </div>
         </div>
@@ -1148,11 +1159,11 @@
               <div class="jd-import-row">
                 <input id="jdUrlInput" class="field-input" type="url" placeholder="Paste a Greenhouse, Lever, Ashby, or careers job URL…" />
                 <select id="jdLevelSelect" class="field-select jd-level-select" aria-label="Target level">
-                  <option value="L4">L4</option>
-                  <option value="L5" selected>L5 / Senior</option>
-                  <option value="L6">L6 / Staff</option>
-                  <option value="L7">L7 / Principal</option>
-                  <option value="EM">Engineering Manager</option>
+                  <option value="Entry">Entry</option>
+                  <option value="Mid">Mid</option>
+                  <option value="Senior" selected>Senior</option>
+                  <option value="Lead">Lead / Staff+</option>
+                  <option value="Manager">Manager</option>
                 </select>
                 <button id="jdImportBtn" class="btn btn-primary" type="button">Import</button>
               </div>
@@ -1164,10 +1175,10 @@
 
               <div id="jdPasteWrap" class="jd-paste-wrap hidden">
                 <div class="jd-paste-meta">
-                  <input id="jdPasteTitleInput" class="field-input" type="text" placeholder="Role title (e.g. Senior Software Engineer)" />
+                  <input id="jdPasteTitleInput" class="field-input" type="text" placeholder="Role title (e.g. Operations Manager)" />
                   <input id="jdPasteCompanyInput" class="field-input" type="text" placeholder="Company (optional)" />
                 </div>
-                <textarea id="jdPasteTextarea" class="profile-textarea" rows="5" placeholder="Paste the job description here…"></textarea>
+                <textarea id="jdPasteTextarea" class="profile-textarea" rows="5" placeholder="Paste the job listing text here…"></textarea>
               </div>
             </div>
 
@@ -1179,21 +1190,22 @@
             <div class="banks-filter-bar">
               <select id="bankCategorySelect" class="field-select field-select-sm" aria-label="Category">
                 <option value="">All categories</option>
-                <option value="behavioral">Behavioral &amp; Leadership</option>
+                <option value="behavioral">Behavioral</option>
                 <option value="system_design">System Design</option>
                 <option value="coding">Coding</option>
+                <option value="general">General</option>
               </select>
               <select id="bankLevelSelect" class="field-select field-select-sm" aria-label="Level">
                 <option value="">All levels</option>
-                <option value="L4">L4</option>
-                <option value="L5">L5</option>
-                <option value="L6">L6</option>
-                <option value="L7">L7</option>
-                <option value="EM">EM</option>
+                <option value="Entry">Entry</option>
+                <option value="Mid">Mid</option>
+                <option value="Senior">Senior</option>
+                <option value="Lead">Lead</option>
+                <option value="Manager">Manager</option>
               </select>
               <label class="check-line">
                 <input id="bankMatchJdCheckbox" class="switch" type="checkbox" role="switch" checked />
-                <span>Rank for my target job</span>
+                <span>Rank for my job listing</span>
               </label>
             </div>
             <div id="banksCountLabel" class="banks-count-label"></div>

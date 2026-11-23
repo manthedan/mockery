@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
+from ..levels import DEFAULT_LEVEL
 from ..profiles import ResumeRedactionPrefs, StaleResumeDocumentError
 from ..redactor import (
     clean_job_listing_text,
@@ -30,7 +31,7 @@ class JobListingImportRequest(BaseModel):
     text: str = ""
     title: str = ""
     company: str = ""
-    target_level: str = "L5"
+    target_level: str = DEFAULT_LEVEL
 
 
 def build_profile_router(runtime: Any) -> APIRouter:
@@ -142,7 +143,7 @@ def build_profile_router(runtime: Any) -> APIRouter:
             company=company,
             url=url,
             text=text,
-            target_level=body.target_level or "L5",
+            target_level=body.target_level or DEFAULT_LEVEL,
         )
         out = runtime.profiles.public_dict()
         out["imported_jd"] = jd.model_dump()

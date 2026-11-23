@@ -1,0 +1,177 @@
+{
+  "pack_id": "general_core",
+  "title": "General & Fit",
+  "category": "general",
+  "version": "1.0",
+  "description": "The motivation, fit, and practical questions most interviews open or close with, for any role.",
+  "questions": [
+    {
+      "id": "gen_intro_01",
+      "title": "Tell Me About Yourself",
+      "competency": "Introduction",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "Tell me about yourself and what brings you to this role.",
+      "follow_ups": [
+        "Which part of your background is most relevant to this job?",
+        "What is not on your resume that I should know?"
+      ],
+      "carl_focus": "Keep it to about ninety seconds: where you are now, the two or three experiences that led here, and why this role is the next step."
+    },
+    {
+      "id": "gen_resume_01",
+      "title": "Walking Through Your Resume",
+      "competency": "Introduction",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "Walk me through your resume, including any changes of direction or gaps.",
+      "follow_ups": [
+        "Which move taught you the most?",
+        "Is there a decision in there you would make differently now?"
+      ],
+      "carl_focus": "Give each move a reason rather than a list of duties, and address a gap or a change of direction plainly in one sentence."
+    },
+    {
+      "id": "gen_company_01",
+      "title": "Why This Company",
+      "competency": "Motivation & Fit",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "Why do you want to work here?",
+      "follow_ups": [
+        "What do you know about what we do that most candidates would not?",
+        "What would make you turn this offer down?"
+      ],
+      "carl_focus": "Name something specific about the company, connect it to work you have actually done, and say what you want to contribute."
+    },
+    {
+      "id": "gen_role_01",
+      "title": "Why This Role",
+      "competency": "Motivation & Fit",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "What interests you about this role in particular?",
+      "follow_ups": [
+        "Which part of the job do you expect to be hardest for you?",
+        "How is this different from what you do now?"
+      ],
+      "carl_focus": "Point to two or three parts of the job itself, show you have done similar work, and be honest about what would be new."
+    },
+    {
+      "id": "gen_leaving_01",
+      "title": "Why You're Moving On",
+      "competency": "Motivation & Fit",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "Why are you looking for a new position right now?",
+      "follow_ups": [
+        "What would have had to change for you to stay where you are?",
+        "What have you learned about what you need from a job?"
+      ],
+      "carl_focus": "Stay honest and forward-looking: say what you are moving toward, and avoid criticizing people at your current or last job."
+    },
+    {
+      "id": "gen_hire_01",
+      "title": "Why We Should Hire You",
+      "competency": "Motivation & Fit",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "Why should we hire you for this role?",
+      "follow_ups": [
+        "What would you want to accomplish in your first ninety days?",
+        "What is the biggest gap between your background and this job?"
+      ],
+      "carl_focus": "Match your two strongest qualifications to what the role needs most, with one piece of evidence for each."
+    },
+    {
+      "id": "gen_future_01",
+      "title": "Where You See Yourself in Five Years",
+      "competency": "Goals & Growth",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "Where do you see yourself in five years?",
+      "follow_ups": [
+        "What skills do you need to build to get there?",
+        "How does this role move you toward that?"
+      ],
+      "carl_focus": "Describe a direction rather than a job title, and tie it to how you would grow in this role."
+    },
+    {
+      "id": "gen_proud_01",
+      "title": "The Work You're Proudest Of",
+      "competency": "Goals & Growth",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "What professional accomplishment are you most proud of, and why?",
+      "follow_ups": [
+        "What part of that was hardest for you personally?",
+        "What would you do differently if you did it again?"
+      ],
+      "carl_focus": "Choose one accomplishment, make your own part in it clear, and say what the result was and why it matters to you."
+    },
+    {
+      "id": "gen_strength_01",
+      "title": "Your Greatest Strength",
+      "competency": "Self-Awareness",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "What would you say is your greatest strength?",
+      "follow_ups": [
+        "Can you give me a recent example of it in action?",
+        "When has that strength worked against you?"
+      ],
+      "carl_focus": "Pick one strength that matters for this job and back it with a short, specific example and its outcome."
+    },
+    {
+      "id": "gen_weak_01",
+      "title": "A Weakness You're Working On",
+      "competency": "Self-Awareness",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "What is a weakness you are working on?",
+      "follow_ups": [
+        "What have you done about it in the last six months?",
+        "How would a colleague know it has improved?"
+      ],
+      "carl_focus": "Choose a real weakness, not a strength in disguise, then spend most of the answer on what you are doing about it and the evidence it is working."
+    },
+    {
+      "id": "gen_env_01",
+      "title": "How You Work Best",
+      "competency": "Working Style",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "What kind of work environment and management style bring out your best work?",
+      "follow_ups": [
+        "Tell me about a manager you worked well with. What did they do?",
+        "What do you do when the environment is not ideal?"
+      ],
+      "carl_focus": "Be specific about what helps you do good work, give an example, and show you can adapt when you do not get it."
+    },
+    {
+      "id": "gen_pressure_01",
+      "title": "Handling Pressure and Competing Deadlines",
+      "competency": "Working Style",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "How do you handle pressure when several deadlines land at once?",
+      "follow_ups": [
+        "Tell me about the last time that happened.",
+        "How do you decide what not to do?"
+      ],
+      "carl_focus": "Describe how you actually decide what comes first, with a recent example and how it turned out."
+    },
+    {
+      "id": "gen_comp_01",
+      "title": "Salary Expectations",
+      "competency": "Practical Questions",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "What are your salary expectations for this role?",
+      "follow_ups": [
+        "How did you arrive at that range?",
+        "Other than pay, what matters most to you in an offer?"
+      ],
+      "carl_focus": "Give a researched range rather than a single number, tie it to the role and location, and stay open about the full package."
+    },
+    {
+      "id": "gen_questions_01",
+      "title": "Your Questions for the Interviewer",
+      "competency": "Practical Questions",
+      "levels": ["Entry", "Mid", "Senior", "Lead", "Manager"],
+      "prompt": "What questions do you have for me about the role, the team, or the company?",
+      "follow_ups": [
+        "What would you most want to know before accepting an offer?",
+        "What would you ask the person who would be your manager?"
+      ],
+      "carl_focus": "Ask two or three questions that show you have thought about doing the job, such as how success is measured or what the team finds hard right now."
+    }
+  ]
+}
