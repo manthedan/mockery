@@ -285,7 +285,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 jd_text=jd_text or None,
             )
 
-        custom_question = body.custom_question.strip()
+        custom_question, removed_details = runtime.redactor.strip_contact_details(body.custom_question.strip())
         selected_qid = body.selected_question_id.strip() if body.selected_question_id else None
         if custom_question:
             selected_qid = None
@@ -379,6 +379,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
         return {
             "session": serialize_practice_session(runtime, session),
             "opening_turn": opening_turn.model_dump(),
+            "removed_details": removed_details,
         }
 
     @router.post("/api/practice/{session_id}/turn")

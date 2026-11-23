@@ -2605,6 +2605,9 @@ export function createPracticeStudioController({
       local.session = data.session;
       setPracticeVisible(true);
       renderPracticeSession();
+      if (data.removed_details?.length) {
+        showToast(`Removed from your question before it was sent: ${data.removed_details.join(", ")}.`, 4200);
+      }
       if (data.opening_turn?.text && local.voiceEnabled) {
         speakText(data.opening_turn.text, { thenListen: true });
       }
