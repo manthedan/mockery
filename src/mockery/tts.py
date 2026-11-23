@@ -22,6 +22,8 @@ from typing import Any
 import httpx
 import numpy as np
 
+from .speech_text import speak_text
+
 logger = logging.getLogger("mockery.tts")
 
 KOKORO_REPO_ID = "thewh1teagle/kokoro-onnx"
@@ -111,7 +113,6 @@ KOKORO_INTER_SENTENCE_SILENCE_MS = 140
 MACOS_PREFERRED_VOICES = ("Samantha", "Daniel", "Karen", "Moira", "Tessa", "Alex")
 
 _CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
-_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC_RE = re.compile(r"\*([^*]+)\*")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -150,9 +151,9 @@ def optimal_ort_threads() -> int:
 
 
 def _clean_text_for_speech(text: str) -> str:
-    """Strip markdown formatting and clamp length so spoken questions sound natural."""
+    """Strip markdown, read inline code the way a person would say it, and clamp length."""
     cleaned = _CODE_BLOCK_RE.sub(" ", text or "")
-    cleaned = _INLINE_CODE_RE.sub(r"\1", cleaned)
+    cleaned = speak_text(cleaned)
     cleaned = _BOLD_RE.sub(r"\1", cleaned)
     cleaned = _ITALIC_RE.sub(r"\1", cleaned)
     cleaned = _LINK_RE.sub(r"\1", cleaned)

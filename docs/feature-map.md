@@ -31,7 +31,7 @@ Shared vocabulary mapping user-facing surfaces to exact DOM landmarks, JS module
 - **State machine:** `AddonPackState` + `createPackOpTracker`
 
 ## 5. AI Mock Practice Studio (`#practiceWorkspace`)
-- **Primary modules:** `src/mockery/static/practice_studio.js`, `src/mockery/routers/practice.py`, `src/mockery/practice.py`, `src/mockery/tts.py`, `src/mockery/asr.py`
+- **Primary modules:** `src/mockery/static/practice_studio.js`, `src/mockery/routers/practice.py`, `src/mockery/practice.py`, `src/mockery/tts.py`, `src/mockery/speech_text.py` (rewrites inline code and signatures into spoken words for the voice only; on-screen text is untouched), `src/mockery/asr.py`
 - **Header & rail:** `#practiceHomeBtn`, `#practiceConvToggleBtn`, `#practiceRoleTitle`, `#practiceMetaPill`, `#practiceProgressBadge`, `#practiceWorkspaceSaveStatus`, `#practiceBargeInBtn`, `#practiceVoiceToggleBtn`, `#practiceHintBtn`, `#practiceNextQBtn`, `#practiceDebriefBtn`
 - **Conversation & composer (`#practiceActiveView`):** `#practiceFeed`, `#practiceComposerWrap`, `#practiceMicBtn`, `#practiceMicStatus`, `#practiceAnswerInput`, `#practiceSendBtn`, `#practiceCoachMessage`
 - **Split-studio layout:** `#practiceStudioSlot`, `#practiceSplitHandle` (`PointerEvent` drag resize + persisted width), `[data-conv-collapsed]` attribute on `#practiceWorkspace`
