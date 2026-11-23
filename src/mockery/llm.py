@@ -383,6 +383,41 @@ def _extract_usage_counts(usage: Any, *, provider_format: str = "generic") -> di
     return out
 
 
+REASONING_ALLOWANCE_CAP = 8192
+"""The most extra output a thinking model is given on top of what a call asked for."""
+REASONING_ASSUMED_TOKENS_PER_SECOND = 40
+_UNCLOSED_THINK_RE = re.compile(r"<think>(?!.*</think>)", re.DOTALL | re.IGNORECASE)
+
+
+def _reasoning_tokens_spent(usage: Any, thinking_text: str = "", content: str = "") -> int:
+    """
+    Tokens a model spent thinking before its answer: the provider's own count when it reports one,
+    otherwise an estimate from the thinking it returned beside (or, unfinished, inside) the answer.
+    """
+    details = None
+    if usage is not None:
+        details = usage.get("completion_tokens_details") if isinstance(usage, dict) else getattr(usage, "completion_tokens_details", None)
+    reported = None
+    if details is not None:
+        reported = details.get("reasoning_tokens") if isinstance(details, dict) else getattr(details, "reasoning_tokens", None)
+    if isinstance(reported, int) and not isinstance(reported, bool) and reported > 0:
+        return reported
+    thinking = thinking_text or (content if _UNCLOSED_THINK_RE.search(content) else "")
+    return len(thinking) // 3
+
+
+def _thinking_text(carrier: Any) -> str:
+    """The thinking a local server returns next to a message or stream delta, under either common name."""
+    if carrier is None:
+        return ""
+    extra = getattr(carrier, "model_extra", None) or {}
+    for name in ("reasoning_content", "reasoning"):
+        value = getattr(carrier, name, None) or extra.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _fast_extra_body(model_name: str) -> dict[str, Any] | None:
     """
     DeepSeek V4.1 Flash (`deepseek-flash`) enables Chain-of-Thought thinking by default.
@@ -712,6 +747,8 @@ class InterviewCopilotLLM:
         self._worker_generation: int = 0
         self._warm_spare_generation: int = 0
         self.recent_usage_events: deque[dict[str, Any]] = deque(maxlen=50)
+        # Extra output tokens per model for thinking that comes before the answer, learned from its replies.
+        self._reasoning_allowance: dict[str, int] = {}
 
     def _client(self) -> AsyncOpenAI:
         key = self.config.api_key.strip() or "ollama-local"
@@ -2359,37 +2396,63 @@ class InterviewCopilotLLM:
             if extra_body:
                 kwargs["extra_body"] = extra_body
 
-            if on_delta is not None:
-                stream_kwargs = dict(kwargs)
-                if is_openai_direct or self.config.provider == "openrouter":
-                    stream_kwargs["stream_options"] = {"include_usage": True}
-                stream = await client.chat.completions.create(**stream_kwargs, stream=True, timeout=timeout)
-                parts: list[str] = []
-                async for chunk in stream:
-                    chunk_usage = getattr(chunk, "usage", None)
-                    if chunk_usage is not None:
-                        meta["usage"] = _extract_usage_counts(chunk_usage)
-                    if not chunk.choices:
-                        continue
-                    fr = getattr(chunk.choices[0], "finish_reason", None)
+            # A model that thinks before it answers spends its output allowance on the thinking and can
+            # return nothing. Each model is given the room its own replies show it needs, and a reply that
+            # was cut off for that reason is asked for again with more.
+            allowance = self._reasoning_allowance.get(model, 0)
+            for _attempt in range(3):
+                kwargs["max_tokens"] = max_tokens + allowance
+                call_timeout = timeout + allowance / REASONING_ASSUMED_TOKENS_PER_SECOND
+                usage_raw: Any = None
+                thinking = ""
+                meta.pop("finish_reason", None)
+
+                if on_delta is not None:
+                    stream_kwargs = dict(kwargs)
+                    if is_openai_direct or self.config.provider == "openrouter":
+                        stream_kwargs["stream_options"] = {"include_usage": True}
+                    stream = await client.chat.completions.create(**stream_kwargs, stream=True, timeout=call_timeout)
+                    parts: list[str] = []
+                    thinking_parts: list[str] = []
+                    async for chunk in stream:
+                        chunk_usage = getattr(chunk, "usage", None)
+                        if chunk_usage is not None:
+                            usage_raw = chunk_usage
+                            meta["usage"] = _extract_usage_counts(chunk_usage)
+                        if not chunk.choices:
+                            continue
+                        fr = getattr(chunk.choices[0], "finish_reason", None)
+                        if isinstance(fr, str) and fr:
+                            meta["finish_reason"] = fr
+                        thinking_parts.append(_thinking_text(chunk.choices[0].delta))
+                        delta = chunk.choices[0].delta.content
+                        if delta:
+                            parts.append(delta)
+                            await on_delta(delta)
+                    out = "".join(parts).strip()
+                    thinking = "".join(thinking_parts)
+                    already_shown = bool(parts)
+                else:
+                    resp = await client.chat.completions.create(**kwargs, timeout=call_timeout)
+                    usage_raw = getattr(resp, "usage", None)
+                    if usage_raw is not None:
+                        meta["usage"] = _extract_usage_counts(usage_raw)
+                    fr = getattr(resp.choices[0], "finish_reason", None) if resp.choices else None
                     if isinstance(fr, str) and fr:
                         meta["finish_reason"] = fr
-                    delta = chunk.choices[0].delta.content
-                    if delta:
-                        parts.append(delta)
-                        await on_delta(delta)
-                out = "".join(parts).strip()
-                ok = True
-                return out
+                    message = resp.choices[0].message if resp.choices else None
+                    out = ((message.content if message is not None else "") or "").strip()
+                    thinking = _thinking_text(message)
+                    already_shown = False
 
-            resp = await client.chat.completions.create(**kwargs, timeout=timeout)
-            resp_usage = getattr(resp, "usage", None)
-            if resp_usage is not None:
-                meta["usage"] = _extract_usage_counts(resp_usage)
-            fr = getattr(resp.choices[0], "finish_reason", None) if resp.choices else None
-            if isinstance(fr, str) and fr:
-                meta["finish_reason"] = fr
-            out = (resp.choices[0].message.content or "").strip()
+                spent = _reasoning_tokens_spent(usage_raw, thinking, out)
+                cut_off = meta.get("finish_reason") in ("length", "max_tokens")
+                if spent:
+                    needed = spent + spent // 2 + 256 if cut_off else spent + spent // 4
+                    self._reasoning_allowance[model] = min(REASONING_ALLOWANCE_CAP, max(allowance, needed))
+                if not (spent and cut_off) or already_shown or allowance >= REASONING_ALLOWANCE_CAP:
+                    break
+                allowance = min(REASONING_ALLOWANCE_CAP, max(self._reasoning_allowance[model], allowance * 2))
             ok = True
             return out
         finally:
