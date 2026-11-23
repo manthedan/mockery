@@ -70,7 +70,9 @@ TARGET_OBJECTIVES: dict[str, str] = {
         "Maximize strict raw-JSON output, natural concise spoken replies (1-3 sentences) grounded in "
         "the candidate's answer and workspace context, accurate `should_advance` timing, accurate and "
         "strictly monotonic `carl_signals`, supportive encouraging coaching tone, and zero code/algorithm spoilers. "
-        "MUST keep `{interview_type_label}`, `{role_title}`, `{target_level}`, and `{tone_instruction}` verbatim."
+        "MUST keep `{interview_type_label}`, `{role_title}`, `{target_level}`, `{tone_instruction}`, "
+        "`{signal_schema}`, `{signal_definitions}`, `{carry_forward_note}`, and `{nudge_examples}` verbatim: "
+        "the last four carry the session's answer framework (CARL, STAR, or a general-question rubric)."
     ),
     "suggest_probes": (
         "Optimize the system prompt for Live Copilot real-time follow-up probes ('Dive Deeper'). "

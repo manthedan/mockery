@@ -9,6 +9,10 @@ from typing import Any
 
 from mockery.llm import _extract_json_object, _head_tail_excerpt
 from mockery.prompts import (
+    practice_debrief_rubric_args,
+    practice_hint_behavioral_nudge,
+    practice_reply_rubric_args,
+    practice_signal_schema,
     practice_tone_instruction,
     probe_guidance_for,
     render_prompt,
@@ -233,6 +237,7 @@ def render_system_prompt_for_example(
             role_title=str(example.get("role_title") or "Software Engineer"),
             target_level=str(example.get("target_level") or "Senior (L5)"),
             tone_instruction=practice_tone_instruction(coach_style),
+            **practice_reply_rubric_args(),
         )
     if target == "suggest_probes":
         interview_type = str(example.get("interview_type") or "behavioral")
@@ -242,11 +247,15 @@ def render_system_prompt_for_example(
             probe_guidance=probe_guidance_for(interview_type),
         )
     if target == "practice_retry_eval":
-        return render_prompt("practice_retry_eval", override_text=override_text)
+        return render_prompt(
+            "practice_retry_eval", override_text=override_text, signal_schema=practice_signal_schema()
+        )
     if target == "practice_hint":
-        return render_prompt("practice_hint", override_text=override_text)
+        return render_prompt(
+            "practice_hint", override_text=override_text, behavioral_nudge=practice_hint_behavioral_nudge()
+        )
     if target == "practice_debrief":
-        return render_prompt("practice_debrief", override_text=override_text)
+        return render_prompt("practice_debrief", override_text=override_text, **practice_debrief_rubric_args())
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 

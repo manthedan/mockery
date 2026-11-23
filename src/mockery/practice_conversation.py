@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from .prompts import practice_tone_instruction, render_prompt
+from .prompts import practice_reply_rubric_args, practice_tone_instruction, render_prompt
 
 if TYPE_CHECKING:
     from .practice import PracticeSession
@@ -115,12 +115,14 @@ def _format_workspace_delta(prev: dict[str, str], curr: dict[str, str]) -> str:
 
 def build_practice_session_system_prompt(session: PracticeSession) -> str:
     """Render the frozen session-wide Practice Studio system prompt."""
+    rubric = session.config.rubric
     return render_prompt(
         "practice_interviewer_reply",
         interview_type_label=session.config.interview_type.replace("_", " "),
         role_title=session.role_title,
         target_level=session.config.target_level,
         tone_instruction=practice_tone_instruction(session.config.coach_style),
+        **practice_reply_rubric_args(rubric.grader, rubric.signal_keys, coached=rubric.coached),
     )
 
 
@@ -134,7 +136,7 @@ def _format_question_plan(session: PracticeSession) -> str:
         lines.append(f"Q{idx} [{q.id}] {q.title or q.competency or 'Question'}")
         lines.append(f"  Prompt: {q.prompt}")
         if focus:
-            lines.append(f"  CARL / Rubric Focus: {focus}")
+            lines.append(f"  {session.config.rubric.focus_label}: {focus}")
         if q.level_bar:
             lines.append(f"  Depth expected at {session.config.target_level} level: {q.level_bar}")
         if q.follow_ups:
@@ -151,6 +153,7 @@ def _format_turn_directive(
     intervening_notes: list[str],
     ws_delta: str,
     candidate_answer: str,
+    debrief_name: str,
 ) -> str:
     q_id = current_question.get("id") or "current"
     q_title = current_question.get("title") or ""
@@ -158,7 +161,7 @@ def _format_turn_directive(
         f"Next planned question (ONLY introduce if should_advance=true): "
         f"[{next_question.get('id', 'next')}] {next_question.get('prompt')}"
         if next_question
-        else "This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their CARL Coaching Debrief."
+        else f"This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their {debrief_name}."
     )
     sections: list[str] = []
     if intervening_notes:
@@ -231,6 +234,7 @@ def build_practice_turn_messages(
             intervening_notes=intervening,
             ws_delta=ws_delta,
             candidate_answer=candidate_answer,
+            debrief_name=session.config.rubric.debrief_name,
         )
         if total_chars + len(user_content) <= MAX_PRACTICE_CONVERSATION_CHARS:
             messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
@@ -252,6 +256,7 @@ def build_practice_turn_messages(
         intervening_notes=[],
         ws_delta=ws_delta,
         candidate_answer=candidate_answer,
+        debrief_name=session.config.rubric.debrief_name,
     )
     fixed_overhead = len(system_prompt) + len(plan_block) + len(base_directive) + 64
     history_budget = max(0, _SEED_HISTORY_TARGET_CHARS - fixed_overhead)
@@ -264,6 +269,7 @@ def build_practice_turn_messages(
         intervening_notes=prior_notes,
         ws_delta=ws_delta,
         candidate_answer=candidate_answer,
+        debrief_name=session.config.rubric.debrief_name,
     )
     user_content = f"{plan_block}\n\n{directive}"
     messages = [

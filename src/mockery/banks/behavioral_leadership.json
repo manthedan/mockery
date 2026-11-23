@@ -16,7 +16,7 @@
         "Where did you cut scope so you could deliver something real instead of over-building?",
         "What would you do differently if you started over today?"
       ],
-      "carl_focus": "Make your own framing of the problem crisp in Context, show the trade-offs you weighed in Action, and close with a Learning you still use."
+      "carl_focus": "Make your own framing of the problem crisp, show the trade-offs you weighed, and close with something you learned and still use."
     },
     {
       "id": "beh_own_02",
@@ -52,7 +52,7 @@
         "What made the evidence strong enough to shift a plan people had already committed to?",
         "What did switching late cost, and how did you reduce that risk?"
       ],
-      "carl_focus": "Pair the moment the evidence landed with the concrete outcome for the business or the people you serve in Result."
+      "carl_focus": "Pair the moment the evidence landed with the concrete outcome for the business or the people you serve."
     },
     {
       "id": "beh_conf_01",
@@ -88,7 +88,7 @@
         "What was the earliest warning sign you missed?",
         "What did you put in place so a colleague could not make the same mistake?"
       ],
-      "carl_focus": "Own the mistake directly without deflecting, then spend about half your answer on the Learning and what you changed."
+      "carl_focus": "Own the mistake directly without deflecting, then spend about half your answer on what you learned and what you changed."
     },
     {
       "id": "beh_fail_02",
@@ -160,7 +160,7 @@
         "What would you have missed if you had only worked from the original brief?",
         "How did you balance getting it right with getting it done on time?"
       ],
-      "carl_focus": "Connect what you learned from them to the specific changes you made and the difference it made in Result."
+      "carl_focus": "Connect what you learned from them to the specific changes you made and the difference it made."
     },
     {
       "id": "beh_prod_02",
@@ -208,7 +208,7 @@
         "Which part carried the most risk, and how did you reduce it before it could hurt you?",
         "How did you decide it was ready?"
       ],
-      "carl_focus": "Keep Context to about 30 seconds so you have room for your hardest decisions in Action and the real outcome in Result."
+      "carl_focus": "Keep the setup to about 30 seconds so you have room for your hardest decisions and the real outcome."
     },
     {
       "id": "beh_exec_02",
@@ -220,7 +220,7 @@
         "How did you keep the shortcut from becoming the normal way of working?",
         "Did you go back and fix it, or did it turn out not to matter?"
       ],
-      "carl_focus": "Pragmatic answers show the limits you set on purpose and honest hindsight in Learning."
+      "carl_focus": "Pragmatic answers show the limits you set on purpose and honest hindsight."
     },
     {
       "id": "beh_lead_01",

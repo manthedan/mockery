@@ -1,5 +1,5 @@
 /* AI Mock Practice Studio — Solo AI Interviewer, Local Voice (TTS + Parakeet Mic),
- * Live CARL Coaching Meter, Supportive CARL Debrief, 45-Second Retry Drill,
+ * Live Coaching Meter (CARL, STAR, or per-format signals), Supportive Debrief, 45-Second Retry Drill,
  * and extensible Studio Slot for System Design & Coding studios.
  */
 
@@ -59,10 +59,13 @@ const CARL_STATE_LABELS_FINAL = {
 
 const CARL_DIMS = ["context", "action", "result", "learning"];
 
-// The four-signal data model is shared by every format; only the words a person reads change.
+// The four signal slots are shared by every rubric; the session says what each one is called.
 const CARL_RUBRIC = {
+  coached: true,
+  named: "CARL",
   kicker: "Live CARL Meter",
   help: "Context → Action (what you drove) → Result (metric or outcome) → Learning.",
+  readyTip: "Think out loud. Set the context, show what you drove, and close with a measurable result and what you learned.",
   dims: {
     context: ["C", "Context"],
     action: ["A", "Action"],
@@ -71,33 +74,28 @@ const CARL_RUBRIC = {
   },
 };
 
-const RUBRIC_BY_FORMAT = {
-  behavioral: CARL_RUBRIC,
-  general: CARL_RUBRIC,
-  system_design: {
-    kicker: "Live Design Signals",
-    help: "Requirements (scope & constraints) → Architecture (components & data flow) → Scale (bottlenecks & numbers) → Tradeoffs (what you chose and why).",
-    dims: {
-      context: ["R", "Requirements"],
-      action: ["A", "Architecture"],
-      result: ["S", "Scale"],
-      learning: ["T", "Tradeoffs"],
-    },
-  },
-  coding: {
-    kicker: "Live Coding Signals",
-    help: "Approach (plan before code) → Correctness (working solution) → Complexity (time & space) → Edge cases (tested boundaries).",
-    dims: {
-      context: ["A", "Approach"],
-      action: ["C", "Correctness"],
-      result: ["O", "Complexity"],
-      learning: ["E", "Edge cases"],
-    },
-  },
+const FRAMEWORK_STORAGE_KEY = "mockery_practice_framework";
+const FRAMEWORK_NOTES = {
+  carl: "Context → Action → Result → Learning. The live meter and coaching follow it.",
+  star: "Situation → Task → Action → Result. The live meter and coaching follow it.",
+  none: "No framework and no live meter. Coaching looks at what you said, not the shape you said it in.",
 };
 
-function rubricFor(fmt) {
-  return RUBRIC_BY_FORMAT[fmt] || CARL_RUBRIC;
+/* A session carries the rubric it is graded on (rubrics.py); sessions without one read as CARL. */
+function rubricOf(sess) {
+  const raw = sess?.rubric;
+  if (!raw || !Array.isArray(raw.signals)) return CARL_RUBRIC;
+  const dims = {};
+  for (const signal of raw.signals) dims[signal.slot] = [signal.letter, signal.label];
+  if (!CARL_DIMS.every((slot) => dims[slot])) return CARL_RUBRIC;
+  return {
+    coached: raw.coached !== false,
+    named: raw.id === "carl" || raw.id === "star" ? raw.name : "",
+    kicker: raw.meter_title,
+    help: raw.summary,
+    readyTip: raw.ready_tip,
+    dims,
+  };
 }
 
 function carlScore(signals) {
@@ -235,6 +233,14 @@ export function createPracticeStudioController({
     savedVoice = "";
   }
 
+  let savedFramework = "carl";
+  try {
+    const stored = window.localStorage?.getItem(FRAMEWORK_STORAGE_KEY);
+    if (stored && FRAMEWORK_NOTES[stored]) savedFramework = stored;
+  } catch {
+    savedFramework = "carl";
+  }
+
   let savedHandsFree = true;
   try {
     savedHandsFree = window.localStorage?.getItem(HANDS_FREE_STORAGE_KEY) !== "0";
@@ -245,6 +251,7 @@ export function createPracticeStudioController({
   const local = {
     homeMode: "copilot", // "copilot" | "practice"
     questionSource: "mixed",
+    answerFramework: savedFramework, // "carl" | "star" | "none" (behavioral rounds)
     targetLevel: "Senior",
     session: null,
     sessionGen: 0,
@@ -699,8 +706,23 @@ export function createPracticeStudioController({
         : SOURCE_NOTES[local.questionSource] || SOURCE_NOTES.mixed;
   }
 
+  /* Behavioral rounds choose their answer structure; the other formats bring their own signals. */
+  function renderFrameworkRow() {
+    el("practiceFrameworkRow")?.classList.toggle("hidden", getSelectedFormat() !== "behavioral");
+    el("practiceFrameworkPills")
+      ?.querySelectorAll("[data-practice-framework]")
+      .forEach((btn) => {
+        const active = btn.getAttribute("data-practice-framework") === local.answerFramework;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-checked", active ? "true" : "false");
+      });
+    const desc = el("practiceFrameworkDesc");
+    if (desc) desc.textContent = FRAMEWORK_NOTES[local.answerFramework] || FRAMEWORK_NOTES.carl;
+  }
+
   async function refreshQuestionPicker() {
     renderSourceNote();
+    renderFrameworkRow();
     const picker = el("practiceQuestionPicker");
     if (!picker) return;
     const fmt = getSelectedFormat();
@@ -2508,6 +2530,7 @@ export function createPracticeStudioController({
           role_title: roleTitle,
           interview_type: fmt,
           question_source: local.questionSource,
+          answer_framework: fmt === "behavioral" ? local.answerFramework : "carl",
           target_level: local.targetLevel,
           coach_style: "supportive",
           live_coach_nudges: liveNudges,
@@ -3102,8 +3125,10 @@ export function createPracticeStudioController({
     return table[val] || table.missing;
   }
 
-  function renderCarlMeter(carl, { fmt = sessionFormat(), final = false, kicker = null } = {}) {
-    const rubric = rubricFor(fmt);
+  function renderCarlMeter(carl, { final = false, kicker = null } = {}) {
+    const rubric = rubricOf(local.session);
+    el("practiceMeterCard")?.classList.toggle("hidden", !rubric.coached);
+    if (!rubric.coached) return;
     const signals = carl || { context: "missing", action: "missing", result: "missing", learning: "missing" };
     for (const dim of CARL_DIMS) {
       const val = signals[dim] || "missing";
@@ -3128,8 +3153,9 @@ export function createPracticeStudioController({
     if (scoreEl) scoreEl.textContent = `${fmtScore(carlScore(signals))} / 4`;
   }
 
-  function renderCarlBadgesInline(carl, { fmt = sessionFormat(), final = false } = {}) {
-    const rubric = rubricFor(fmt);
+  function renderCarlBadgesInline(carl, { final = false } = {}) {
+    const rubric = rubricOf(local.session);
+    if (!rubric.coached) return "";
     return `<span class="carl-inline-strip">${CARL_DIMS.map((key) => {
       const val = (carl && carl[key]) || "missing";
       const [letter, name] = rubric.dims[key];
@@ -3204,9 +3230,9 @@ export function createPracticeStudioController({
     return out;
   }
 
-  function renderRetryOutcome(before, after, fmt) {
-    if (!after) return "";
-    const rubric = rubricFor(fmt);
+  function renderRetryOutcome(before, after) {
+    const rubric = rubricOf(local.session);
+    if (!after || !rubric.coached) return "";
     const moves = [];
     for (const dim of CARL_DIMS) {
       const from = (before && before[dim]) || "missing";
@@ -3276,8 +3302,7 @@ export function createPracticeStudioController({
     const debrief = sess.debrief;
     if (!contentEl || !debrief) return;
 
-    const fmt = sessionFormat(sess);
-    const isCarl = rubricFor(fmt) === CARL_RUBRIC;
+    const rubric = rubricOf(sess);
     const strengths = Array.isArray(debrief.top_strengths) ? debrief.top_strengths : [];
     const reviews = Array.isArray(debrief.question_reviews) ? debrief.question_reviews : [];
     const drill = debrief.retry_drill || {};
@@ -3306,10 +3331,14 @@ export function createPracticeStudioController({
                 : `<button type="button" class="btn btn-primary btn-sm" data-jump-retry>Jump to 45s retry drill ↓</button>`
               : ""
           }
-          <span class="debrief-hero-score">
+          ${
+            rubric.coached
+              ? `<span class="debrief-hero-score">
             <span class="debrief-hero-score-num">${escapeHtml(fmtScore(carlScore(sessionSignals)))} / 4</span>
             <span>session score${retried ? " · after your retry" : ""}</span>
-          </span>
+          </span>`
+              : ""
+          }
         </div>
       </section>
 
@@ -3344,7 +3373,7 @@ export function createPracticeStudioController({
                       </div>
                       <span class="debrief-q-score">
                         ${improvedSignals ? `<span class="debrief-q-retried">After retry</span>` : ""}
-                        ${renderCarlBadgesInline(improvedSignals || qr.carl, { fmt, final: true })}
+                        ${renderCarlBadgesInline(improvedSignals || qr.carl, { final: true })}
                       </span>
                     </div>
                     ${qr.prompt ? `<p class="debrief-q-prompt">${formatInline(qr.prompt)}</p>` : ""}
@@ -3361,7 +3390,7 @@ export function createPracticeStudioController({
                     ${
                       qr.carl_reframe
                         ? `<div class="debrief-q-reframe">
-                            <span class="practice-kicker">${isCarl ? "Suggested CARL reframe" : "Suggested reframe"}</span>
+                            <span class="practice-kicker">${rubric.named ? `Suggested ${escapeHtml(rubric.named)} reframe` : "Suggested reframe"}</span>
                             <p>${formatInline(qr.carl_reframe)}</p>
                           </div>`
                         : ""
@@ -3412,13 +3441,13 @@ export function createPracticeStudioController({
             const before = beforeByQIdx.has(targetIdx)
               ? beforeByQIdx.get(targetIdx)
               : originalQuestionSignals(sess, targetIdx);
-            const outcome = renderRetryOutcome(before, after, fmt);
+            const outcome = renderRetryOutcome(before, after);
             if (after) beforeByQIdx.set(targetIdx, after);
             return `
               <div class="retry-result-card">
                 <div class="retry-result-head">
                   <span>Retry ${idx + 1}</span>
-                  ${after ? renderCarlBadgesInline(after, { fmt, final: true }) : ""}
+                  ${after ? renderCarlBadgesInline(after, { final: true }) : ""}
                 </div>
                 ${outcome}
                 <blockquote class="retry-quote">${escapeHtml(r.candidate_answer || "")}</blockquote>
@@ -3447,7 +3476,6 @@ export function createPracticeStudioController({
     const kicker = el("practiceRoadmapKicker");
     if (!roadmap || !sess) return;
 
-    const fmt = sessionFormat(sess);
     const questions = Array.isArray(sess.questions) ? sess.questions : [];
     const isCompleted = sess.phase === "completed" && Boolean(sess.debrief);
     const isAwaitingDebrief = sess.phase === "awaiting_debrief";
@@ -3493,7 +3521,7 @@ export function createPracticeStudioController({
               <span class="roadmap-title">${escapeHtml(q.title || q.competency || "Question")}</span>
               <span class="roadmap-src">${escapeHtml(badge)}</span>
             </div>
-            <div class="roadmap-carl">${renderCarlBadgesInline(signals, { fmt, final: isCompleted })}</div>
+            <div class="roadmap-carl">${renderCarlBadgesInline(signals, { final: isCompleted })}</div>
           </div>
         `;
       })
@@ -3606,12 +3634,11 @@ export function createPracticeStudioController({
     // Live meter while interviewing; one session score (reflecting any retry) once it is over.
     if (isCompleted) {
       renderCarlMeter(aggregateSignals(effectiveQuestionSignals(sess)), {
-        fmt: fmtKey,
         final: true,
         kicker: "Session Score",
       });
     } else {
-      renderCarlMeter(curQ?.carl_signals, { fmt: fmtKey });
+      renderCarlMeter(curQ?.carl_signals);
     }
 
     // Live Supportive Coach card
@@ -3648,12 +3675,7 @@ export function createPracticeStudioController({
         coachMsgEl.textContent = `Key requirements: ${curQ.core_requirements.slice(0, 2).join(" · ")}`;
       } else {
         coachToneEl.textContent = "Ready";
-        coachMsgEl.textContent =
-          fmtKey === "system_design"
-            ? "Think out loud. Pin down requirements first, then sketch the architecture and name your tradeoffs."
-            : fmtKey === "coding"
-            ? "Think out loud. State your approach and its complexity before you write the first line."
-            : "Think out loud. Set the context, show what you drove, and close with a measurable result and what you learned.";
+        coachMsgEl.textContent = rubricOf(sess).readyTip;
       }
     }
 
@@ -3716,6 +3738,19 @@ export function createPracticeStudioController({
         ?.querySelectorAll("[data-practice-source]")
         .forEach((b) => b.classList.toggle("active", b === btn));
       renderSourceNote();
+    });
+
+    el("practiceFrameworkPills")?.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-practice-framework]");
+      if (!btn) return;
+      const picked = btn.getAttribute("data-practice-framework");
+      local.answerFramework = FRAMEWORK_NOTES[picked] ? picked : "carl";
+      try {
+        window.localStorage?.setItem(FRAMEWORK_STORAGE_KEY, local.answerFramework);
+      } catch {
+        /* the choice still holds for this visit */
+      }
+      renderFrameworkRow();
     });
 
     el("practiceLevelPills")?.addEventListener("click", (ev) => {
