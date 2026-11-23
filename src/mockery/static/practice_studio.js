@@ -11,6 +11,7 @@ import {
   formatApiDetail,
 } from "./state_machines.js";
 import { jdRoleLabel } from "./profile_addons.js";
+import { ASR_SAMPLE_RATE, splitClipForAsr } from "./voice_clip.js";
 
 const SOURCE_NOTES = {
   mixed:
@@ -22,6 +23,10 @@ const SOURCE_NOTES = {
 };
 
 const CUSTOM_QUESTION_VALUE = "__custom__";
+const HANDS_FREE_STORAGE_KEY = "mockery_practice_hands_free";
+/* The longest single spoken take; it is transcribed in pieces (voice_clip.js). */
+const MAX_TAKE_SECONDS = 360;
+const MIN_TAKE_SAMPLES = ASR_SAMPLE_RATE / 10;
 const CUSTOM_QUESTION_PLACEHOLDERS = {
   behavioral: "Type the question you want to practice, such as one a recruiter told you to expect.",
   general: "Type the question you want to practice, such as one a recruiter told you to expect.",
@@ -227,6 +232,13 @@ export function createPracticeStudioController({
     savedVoice = "";
   }
 
+  let savedHandsFree = true;
+  try {
+    savedHandsFree = window.localStorage?.getItem(HANDS_FREE_STORAGE_KEY) !== "0";
+  } catch {
+    savedHandsFree = true;
+  }
+
   const local = {
     homeMode: "copilot", // "copilot" | "practice"
     questionSource: "mixed",
@@ -257,6 +269,11 @@ export function createPracticeStudioController({
     debriefConfirmArmed: false,
     nextQConfirmTimer: null,
     nextQConfirmArmed: false,
+
+    // Hands-free answers: speak, one press sends, and the mic opens when the interviewer finishes.
+    handsFree: savedHandsFree,
+    micBlocked: false, // the mic was refused this session, so the typing box stays in reach
+    listenAfterGen: -1, // speakGen of the interviewer turn that hands the floor to the mic
 
     // Local mic recording state
     recordingTarget: null, // null | "answer" | "retry"
@@ -889,6 +906,25 @@ export function createPracticeStudioController({
     setSpeakingUI(false, null);
   }
 
+  /* The interviewer reached the end of what it was saying (as opposed to being cut off). */
+  function finishSpeaking(myGen) {
+    if (myGen !== local.speakGen) return;
+    const handFloorToMic = local.listenAfterGen === myGen;
+    stopSpeaking();
+    if (handFloorToMic) autoListen();
+  }
+
+  /* Conversation rounds only: in a studio round you may be drawing or coding in silence. */
+  function autoListen() {
+    if (!local.handsFree || local.micBlocked || local.mountedPluginKey) return;
+    if (!local.session || local.session.phase !== "active") return;
+    if (opMachine.state !== "idle" || micMachine.state !== "idle") return;
+    if (document.hidden || (state.modalState && state.modalState !== "none")) return;
+    const micBtn = el("practiceMicBtn");
+    if (!micBtn || micBtn.disabled) return;
+    toggleMicRecording("answer");
+  }
+
   async function tryStreamSpeak(payload, myGen, ctrl) {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx || typeof ReadableStream === "undefined") return false;
@@ -1000,19 +1036,21 @@ export function createPracticeStudioController({
     if (scheduledCount === 0) return false;
 
     const remainingMs = Math.max(0, Math.ceil((nextStartTime - ctx.currentTime) * 1000)) + 40;
-    local.streamDoneTimer = window.setTimeout(() => {
-      if (myGen === local.speakGen) stopSpeaking();
-    }, remainingMs);
+    local.streamDoneTimer = window.setTimeout(() => finishSpeaking(myGen), remainingMs);
     return true;
   }
 
-  async function speakText(text, { force = false, voice = null, engine = null, previewTag = null } = {}) {
+  async function speakText(
+    text,
+    { force = false, voice = null, engine = null, previewTag = null, thenListen = false } = {}
+  ) {
     const clean = String(text || "").trim();
     if (!clean) return;
     if (!local.voiceEnabled && !force) return;
 
     stopSpeaking();
     const myGen = local.speakGen;
+    local.listenAfterGen = thenListen ? myGen : -1;
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     local.ttsAbort = ctrl;
     setSpeakingUI("preparing", previewTag);
@@ -1057,7 +1095,7 @@ export function createPracticeStudioController({
         local.activeAudio = audio;
         local.activeAudioUrl = url;
         audio.onended = () => {
-          if (local.activeAudio === audio) stopSpeaking();
+          if (local.activeAudio === audio) finishSpeaking(myGen);
         };
         audio.onerror = () => {
           if (local.activeAudio === audio) stopSpeaking();
@@ -1088,9 +1126,7 @@ export function createPracticeStudioController({
         const utt = new SpeechSynthesisUtterance(clean.slice(0, 1400));
         utt.voice = localVoice;
         utt.rate = 1.02;
-        utt.onend = () => {
-          if (myGen === local.speakGen) setSpeakingUI(false);
-        };
+        utt.onend = () => finishSpeaking(myGen);
         utt.onerror = () => {
           if (myGen === local.speakGen) setSpeakingUI(false);
         };
@@ -1117,10 +1153,15 @@ export function createPracticeStudioController({
     }
     if (lbl) {
       if (phase === "requesting_mic") lbl.textContent = "Requesting mic…";
-      else if (phase === "recording") lbl.textContent = "Done speaking";
-      else if (phase === "transcribing") lbl.textContent = "Transcribing…";
+      else if (phase === "recording") {
+        lbl.textContent = !local.handsFree ? "Done speaking" : isRetry ? "Evaluate retry" : "Send answer";
+      } else if (phase === "transcribing") lbl.textContent = "Transcribing…";
       else lbl.textContent = isRetry ? "Speak retry" : "Speak answer";
     }
+    el(isRetry ? "practiceRetryDiscardBtn" : "practiceDiscardTakeBtn")?.classList.toggle(
+      "hidden",
+      phase !== "recording"
+    );
     const lockedByPhase = Boolean(
       !isRetry &&
         local.session &&
@@ -1188,6 +1229,45 @@ export function createPracticeStudioController({
         }
       }
     }
+    syncAnswerDock();
+  }
+
+  /* Hands-free keeps the typing box out of sight unless it holds words still to send
+     (a cancelled or failed send) or speaking is not possible on this machine right now. */
+  function syncAnswerDock() {
+    const canSpeak = local.handsFree && !local.micBlocked && state.asr?.state !== "error";
+    const docks = [
+      ["practiceComposerWrap", "practiceAnswerInput", "submitting_turn"],
+      ["practiceRetryRep", "practiceRetryInput", "submitting_retry"],
+    ];
+    for (const [dockId, inputId, sendingOp] of docks) {
+      const hasDraft = opMachine.state !== sendingOp && Boolean((el(inputId)?.value || "").trim());
+      el(dockId)?.classList.toggle("is-voice-first", canSpeak && !hasDraft);
+    }
+    const modeBtn = el("practiceAnswerModeBtn");
+    if (modeBtn) modeBtn.textContent = local.handsFree ? "Type instead" : "Answer out loud";
+    const launchSwitch = el("practiceHandsFreeCheckbox");
+    if (launchSwitch) launchSwitch.checked = local.handsFree;
+  }
+
+  function setHandsFree(on) {
+    local.handsFree = Boolean(on);
+    if (local.handsFree) local.micBlocked = false;
+    try {
+      window.localStorage?.setItem(HANDS_FREE_STORAGE_KEY, local.handsFree ? "1" : "0");
+    } catch {
+      /* the choice still holds for this visit */
+    }
+    syncAnswerDock();
+    if (micMachine.state === "recording" && local.recordingTarget) {
+      updateMicUI(local.recordingTarget, "recording");
+    }
+  }
+
+  /* Where the keyboard should rest between turns: the mic when answering out loud. */
+  function focusAnswerControl() {
+    const voiceFirst = el("practiceComposerWrap")?.classList.contains("is-voice-first");
+    el(voiceFirst ? "practiceMicBtn" : "practiceAnswerInput")?.focus({ preventScroll: true });
   }
 
   function cleanupMicResources() {
@@ -1264,15 +1344,25 @@ export function createPracticeStudioController({
     micMachine.transition("transcribing", { event: "start_transcribe" });
     updateMicUI(target, "transcribing", "Transcribing on this Mac…");
     try {
-      const res = await fetch("/api/asr/transcribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: int16.buffer,
-      });
-      const data = await res.json();
-      if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return false;
-      if (!res.ok) {
-        throw new Error(formatApiDetail(data.detail, "Transcription failed"));
+      const pieces = splitClipForAsr(int16);
+      const heard = [];
+      let inferenceMs = 0;
+      for (let i = 0; i < pieces.length; i++) {
+        if (pieces.length > 1) {
+          updateMicUI(target, "transcribing", `Transcribing on this Mac… part ${i + 1} of ${pieces.length}`);
+        }
+        const res = await fetch("/api/asr/transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: pieces[i],
+        });
+        const data = await res.json();
+        if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return false;
+        if (!res.ok) {
+          throw new Error(formatApiDetail(data.detail, "Transcription failed"));
+        }
+        heard.push(String(data.text || "").trim());
+        inferenceMs += Number(data.inference_ms) || 0;
       }
       local.lastFailedClip = null;
       // If the user advanced to a different question while transcribing, discard stale answer audio
@@ -1280,26 +1370,29 @@ export function createPracticeStudioController({
         local.micTarget = null;
         micMachine.transition("idle", { event: "transcribe_discarded_question_changed" });
         updateMicUI(target, "idle", "Transcribed privately on this Mac");
-        return true;
+        return false;
       }
-      const transcript = String(data.text || "").trim();
+      const transcript = heard.filter(Boolean).join(" ");
       const inputEl = el(target === "retry" ? "practiceRetryInput" : "practiceAnswerInput");
       if (inputEl && transcript) {
         const prefix = inputEl.value.trim();
         inputEl.value = prefix ? `${prefix} ${transcript}` : transcript;
-        inputEl.focus();
+        if (!local.handsFree) inputEl.focus();
       }
       local.micTarget = null;
       micMachine.transition("idle", { event: "transcribe_done" });
-      const ms = data.inference_ms ? ` (${Math.round(data.inference_ms)} ms local)` : "";
+      const ms = inferenceMs ? ` (${Math.round(inferenceMs)} ms local)` : "";
       updateMicUI(
         target,
         "idle",
-        transcript
-          ? `Transcribed locally${ms} — edit or press Send`
-          : "No speech detected — try speaking closer to the mic"
+        !transcript
+          ? "No speech detected — try speaking closer to the mic"
+          : local.handsFree
+          ? `Transcribed locally${ms}`
+          : `Transcribed locally${ms} — edit or press Send`
       );
-      return true;
+      syncAnswerDock();
+      return Boolean(transcript);
     } catch (err) {
       if (mySessionGen !== local.sessionGen || myRecGen !== local.recGen) return false;
       local.micTarget = null;
@@ -1318,12 +1411,40 @@ export function createPracticeStudioController({
     if (!clip || !clip.int16 || micMachine.state !== "idle" || opMachine.state === "exiting") return;
     local.recGen += 1;
     local.micTarget = clip.target;
-    await transcribeInt16Clip(clip.int16, {
+    const heard = await transcribeInt16Clip(clip.int16, {
       target: clip.target,
       myQuestionId: clip.questionId,
       mySessionGen: local.sessionGen,
       myRecGen: local.recGen,
     });
+    if (heard) deliverSpokenAnswer(clip.target);
+  }
+
+  /* Hands-free: the words you just said go straight to the interviewer. Each submit
+     reads its own box, so anything left from a cancelled send goes with them. */
+  function deliverSpokenAnswer(target) {
+    if (!local.handsFree) return;
+    if (target === "retry") submitRetry();
+    else submitTurn();
+  }
+
+  async function finishTake() {
+    const target = local.recordingTarget;
+    const heard = await stopMicAndTranscribe();
+    if (heard) deliverSpokenAnswer(target);
+  }
+
+  /* Throw the current take away without transcribing or sending it. */
+  function discardTake() {
+    const target = local.recordingTarget;
+    if (!target || micMachine.state !== "recording") return;
+    local.recGen += 1;
+    local.recordingTarget = null;
+    local.micTarget = null;
+    cleanupMicResources();
+    micMachine.transition("idle", { event: "take_discarded" });
+    updateMicUI(target, "idle", "Take discarded — nothing was sent");
+    if (target === "retry") resetRetryTimer();
   }
 
   async function toggleMicRecording(target = "answer") {
@@ -1335,7 +1456,7 @@ export function createPracticeStudioController({
       return;
     }
     if (micMachine.state === "recording" && local.recordingTarget === target) {
-      await stopMicAndTranscribe();
+      await finishTake();
       return;
     }
     if (micMachine.state === "recording" && local.recordingTarget && local.recordingTarget !== target) {
@@ -1393,7 +1514,7 @@ export function createPracticeStudioController({
       const ctx = new AudioCtx();
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
-      const maxSamples = Math.round((ctx.sampleRate || 48000) * 120);
+      const maxSamples = Math.round((ctx.sampleRate || 48000) * MAX_TAKE_SECONDS);
 
       local.recChunks = [];
       local.recSamples = 0;
@@ -1412,15 +1533,15 @@ export function createPracticeStudioController({
         const remaining = maxSamples - local.recSamples;
         if (remaining <= 0) {
           local.recAutoStopping = true;
-          stopMicAndTranscribe();
+          finishTake();
           return;
         }
         if (ch.length > remaining) {
           local.recChunks.push(new Float32Array(ch.subarray(0, remaining)));
           local.recSamples += remaining;
           local.recAutoStopping = true;
-          showToast("Reached 2-minute clip limit — transcribing locally…", 2800);
-          stopMicAndTranscribe();
+          showToast(`Reached the ${MAX_TAKE_SECONDS / 60}-minute limit for one take — transcribing locally…`, 2800);
+          finishTake();
           return;
         }
         local.recChunks.push(new Float32Array(ch));
@@ -1430,13 +1551,14 @@ export function createPracticeStudioController({
       processor.connect(ctx.destination);
 
       local.lastFailedClip = null;
+      local.micBlocked = false;
       updateMicUI(target, "recording", "Listening · 0:00");
       if (target === "retry") startRetryTimerIfIdle();
       local.recTimerHandle = setInterval(() => {
         const elapsed = (Date.now() - local.recStartedAt) / 1000;
-        const left = Math.max(0, Math.ceil(120 - elapsed));
+        const left = Math.max(0, Math.ceil(MAX_TAKE_SECONDS - elapsed));
         const label =
-          elapsed >= 90
+          left <= 30
             ? `Listening · ${fmtShortClock(elapsed)} (${left}s left)`
             : `Listening · ${fmtShortClock(elapsed)}`;
         updateMicUI(target, "recording", label);
@@ -1456,7 +1578,9 @@ export function createPracticeStudioController({
         local.recordingTarget = null;
         local.micTarget = null;
         micMachine.reset("idle", { event: "mic_denied" });
+        local.micBlocked = true;
         updateMicUI(target, "idle", "Microphone unavailable — type your answer below");
+        syncAnswerDock();
       }
       showToast(`Microphone access denied: ${err.message || err}`, 3200);
     }
@@ -1474,8 +1598,8 @@ export function createPracticeStudioController({
     local.recordingTarget = null;
     cleanupMicResources();
 
-    const int16 = downsampleToInt16(chunks, sampleRate, 16000);
-    if (int16.length < 1600) {
+    const int16 = downsampleToInt16(chunks, sampleRate, ASR_SAMPLE_RATE);
+    if (int16.length < MIN_TAKE_SAMPLES) {
       local.micTarget = null;
       micMachine.transition("idle", { event: "clip_too_short" });
       updateMicUI(target, "idle", "Recording was too short — try again or type below.");
@@ -1922,6 +2046,7 @@ export function createPracticeStudioController({
     const ret = el("practiceRetryInput");
     if (ret) ret.value = "";
     syncRetrySubmit();
+    syncAnswerDock();
   }
 
   async function exitPracticeToHome({ force = false } = {}) {
@@ -2017,7 +2142,7 @@ export function createPracticeStudioController({
     return true;
   }
 
-  const DEFAULT_PRACTICE_START_HINT = "Answer out loud or by typing. A supportive debrief follows.";
+  const DEFAULT_PRACTICE_START_HINT = "Answer out loud. A supportive debrief follows.";
 
   function setButtonLoading(btnId, loading, loadingLabel = null, idleLabel = null) {
     const btn = el(btnId);
@@ -2385,7 +2510,7 @@ export function createPracticeStudioController({
       setPracticeVisible(true);
       renderPracticeSession();
       if (data.opening_turn?.text && local.voiceEnabled) {
-        speakText(data.opening_turn.text);
+        speakText(data.opening_turn.text, { thenListen: true });
       }
     } catch (err) {
       if (mySessionGen === local.sessionGen) {
@@ -2531,7 +2656,7 @@ export function createPracticeStudioController({
       local.session = data.session;
       renderPracticeSession();
       if (data.interviewer_turn?.text && local.voiceEnabled) {
-        speakText(data.interviewer_turn.text);
+        speakText(data.interviewer_turn.text, { thenListen: true });
       }
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
@@ -2577,7 +2702,7 @@ export function createPracticeStudioController({
       }
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
         setBusy(false);
-        el("practiceAnswerInput")?.focus();
+        focusAnswerControl();
       }
     }
   }
@@ -2684,7 +2809,7 @@ export function createPracticeStudioController({
       if (!data.has_more) {
         showToast("All questions complete — click End & Debrief when you are ready.", 3400);
       } else if (data.interviewer_turn?.text && local.voiceEnabled) {
-        speakText(data.interviewer_turn.text);
+        speakText(data.interviewer_turn.text, { thenListen: true });
       }
     } catch (err) {
       if (mySessionGen === local.sessionGen && opMachine.state !== "exiting") {
@@ -3543,6 +3668,7 @@ export function createPracticeStudioController({
       opState: opMachine.state,
       micState: micMachine.state,
       micTarget: local.micTarget,
+      handsFree: local.handsFree,
       voiceEnabled: local.voiceEnabled,
       isSpeaking: local.isSpeaking,
       speakingState: local.speakingState,
@@ -3649,10 +3775,23 @@ export function createPracticeStudioController({
 
     el("practiceMicBtn")?.addEventListener("click", () => toggleMicRecording("answer"));
     el("practiceRetryMicBtn")?.addEventListener("click", () => toggleMicRecording("retry"));
+    el("practiceDiscardTakeBtn")?.addEventListener("click", () => discardTake());
+    el("practiceRetryDiscardBtn")?.addEventListener("click", () => discardTake());
+    el("practiceAnswerModeBtn")?.addEventListener("click", () => {
+      setHandsFree(!local.handsFree);
+      focusAnswerControl();
+    });
+    el("practiceHandsFreeCheckbox")?.addEventListener("change", (ev) => {
+      setHandsFree(Boolean(ev.target?.checked));
+    });
+    el("practiceAnswerInput")?.addEventListener("input", () => syncAnswerDock());
 
     el("practiceRetryTimerBtn")?.addEventListener("click", () => toggleRetryTimer());
     el("practiceRetrySubmitBtn")?.addEventListener("click", () => submitRetry());
-    el("practiceRetryInput")?.addEventListener("input", () => syncRetrySubmit());
+    el("practiceRetryInput")?.addEventListener("input", () => {
+      syncRetrySubmit();
+      syncAnswerDock();
+    });
     el("practiceRetryInput")?.addEventListener("keydown", (ev) => {
       if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter" && !el("practiceRetrySubmitBtn")?.disabled) {
         ev.preventDefault();

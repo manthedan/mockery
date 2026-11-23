@@ -6009,6 +6009,76 @@ label.addon-row {
   white-space: nowrap;
 }
 
+/* Hands-free answers: the dock is the mic alone. The typing box only comes back when it
+   holds words still to send, or when speaking is not possible. */
+
+.is-voice-first .composer-dock {
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.is-voice-first .composer-dock:focus-within {
+  box-shadow: none;
+}
+
+.is-voice-first .composer-dock .practice-textarea,
+.is-voice-first .composer-dock .practice-send-btn,
+.is-voice-first .composer-kbd-type,
+.practice-composer:not(.is-voice-first) .composer-kbd-voice {
+  display: none;
+}
+
+.is-voice-first .composer-dock .mic-hero {
+  height: 52px;
+  margin: 0;
+  padding: 0 24px 0 7px;
+  font-size: 14.5px;
+}
+
+.is-voice-first .composer-dock .mic-orb {
+  width: 38px;
+  height: 38px;
+}
+
+.is-voice-first .practice-composer-tools {
+  justify-content: center;
+}
+
+.is-voice-first .composer-kbd {
+  margin-left: 0;
+}
+
+.practice-workspace[data-studio] .is-voice-first .composer-dock,
+.practice-workspace[data-studio] .is-voice-first .practice-composer-tools {
+  justify-content: flex-start;
+}
+
+.practice-workspace[data-studio] .is-voice-first .practice-composer-tools {
+  padding: 0 4px;
+}
+
+.composer-mode-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.composer-mode-btn:hover {
+  color: var(--ink);
+}
+
+.practice-composer.is-locked .composer-mode-btn {
+  visibility: hidden;
+}
+
 /* Coaching rail: three quiet sections on hairlines, not three boxes. */
 
 .practice-side {

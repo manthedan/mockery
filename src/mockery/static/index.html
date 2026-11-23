@@ -290,6 +290,10 @@
                       <input id="practiceNudgesCheckbox" class="switch" type="checkbox" role="switch" checked />
                       <span>Live coach tips that lead with your strengths</span>
                     </label>
+                    <label class="check-line" for="practiceHandsFreeCheckbox" title="The mic opens when the interviewer finishes, and one press of Space sends what you said. Turn off to type or review answers before sending.">
+                      <input id="practiceHandsFreeCheckbox" class="switch" type="checkbox" role="switch" checked />
+                      <span>Answer out loud, hands-free</span>
+                    </label>
                     <label class="check-line" for="practiceVoiceCheckbox" title="Speak or click Stop speaking at any time to interrupt the interviewer instantly">
                       <input id="practiceVoiceCheckbox" class="switch" type="checkbox" role="switch" checked />
                       <span id="practiceVoiceLabel">Interviewer reads questions aloud</span>
@@ -341,7 +345,7 @@
               <button id="practiceStartBtn" class="btn btn-primary btn-lg" type="button">
                 <span id="practiceStartBtnLabel">Start AI mock interview</span>
               </button>
-              <span id="practiceStartHint" class="home-cta-hint">Answer out loud or by typing. A supportive debrief follows.</span>
+              <span id="practiceStartHint" class="home-cta-hint">Answer out loud. A supportive debrief follows.</span>
             </div>
           </div>
 
@@ -646,7 +650,7 @@
 
               <div id="practiceComposerWrap" class="practice-composer">
                 <div class="practice-composer-input-row composer-dock">
-                  <button id="practiceMicBtn" class="practice-mic-btn mic-hero" type="button" title="Answer out loud — transcribed on this Mac. Starting to speak silences the interviewer instantly.">
+                  <button id="practiceMicBtn" class="practice-mic-btn mic-hero" type="button" title="Answer out loud (Space) — transcribed on this Mac. Starting to speak silences the interviewer instantly.">
                     <span class="mic-orb" aria-hidden="true">
                       <svg class="mic-glyph" viewBox="0 0 16 16" fill="none">
                         <rect x="5.75" y="1.75" width="4.5" height="8" rx="2.25" stroke="currentColor" stroke-width="1.4" />
@@ -668,7 +672,10 @@
                 </div>
                 <div class="practice-composer-tools">
                   <span id="practiceMicStatus" class="practice-mic-status">Transcribed privately on this Mac</span>
-                  <span class="composer-kbd"><kbd>⌘↵</kbd> to send</span>
+                  <button id="practiceDiscardTakeBtn" class="chip-action hidden" type="button" title="Throw this take away without sending it">Discard take</button>
+                  <span class="composer-kbd composer-kbd-type"><kbd>⌘↵</kbd> to send</span>
+                  <span class="composer-kbd composer-kbd-voice"><kbd>Space</kbd> to start, <kbd>Space</kbd> to send</span>
+                  <button id="practiceAnswerModeBtn" class="composer-mode-btn" type="button">Type instead</button>
                 </div>
               </div>
             </div>
@@ -717,6 +724,7 @@
                   </div>
                   <div class="practice-composer-tools">
                     <span id="practiceRetryMicStatus" class="practice-mic-status">One focused 45-second rep</span>
+                    <button id="practiceRetryDiscardBtn" class="chip-action hidden" type="button" title="Throw this take away without evaluating it">Discard take</button>
                   </div>
                 </div>
                 <div id="practiceRetryHistory" class="practice-retry-history"></div>
