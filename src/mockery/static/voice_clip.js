@@ -1,5 +1,6 @@
-/* Spoken-take helpers shared by the Practice mic: a long answer is transcribed in pieces
- * the local transcriber accepts, cut at the quietest moment near each limit so no word is split.
+/* Practice voice helpers. A long spoken answer is transcribed in pieces the local transcriber
+ * accepts, cut at the quietest moment near each limit so no word is split. A long message for
+ * the interviewer's voice is read in pieces too, cut between sentences, so none of it is dropped.
  */
 
 export const ASR_SAMPLE_RATE = 16000;
@@ -40,5 +41,34 @@ export function splitClipForAsr(
   if (samples.length - start >= frameSamples || pieces.length === 0) {
     pieces.push(samples.subarray(start));
   }
+  return pieces;
+}
+
+/* Split a message into pieces of at most `maxChars`, breaking between sentences where possible
+   and between words otherwise. Nothing is dropped. */
+export function splitForSpeech(text, maxChars) {
+  const pieces = [];
+  let current = "";
+  const sentences = String(text || "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  for (const sentence of sentences) {
+    const joined = current ? `${current} ${sentence}` : sentence;
+    if (joined.length <= maxChars) {
+      current = joined;
+      continue;
+    }
+    if (current) pieces.push(current);
+    let rest = sentence;
+    while (rest.length > maxChars) {
+      const breakAt = rest.lastIndexOf(" ", maxChars);
+      const cut = breakAt > 0 ? breakAt : maxChars;
+      pieces.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+    }
+    current = rest;
+  }
+  if (current) pieces.push(current);
   return pieces;
 }

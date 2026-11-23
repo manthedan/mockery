@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mockery.speech_text import speak_code, speak_identifier, speak_text
+from mockery.speech_text import speak_code, speak_identifier, speak_prose, speak_text
 from mockery.tts import _clean_text_for_speech
 
 BANKS_DIR = Path(__file__).resolve().parents[1] / "src" / "mockery" / "banks"
@@ -32,7 +32,14 @@ BANKS_DIR = Path(__file__).resolve().parents[1] / "src" / "mockery" / "banks"
         ("min(limit, len(items))", "min of limit and len of items"),
         ("undo()", "undo"),
         ("get_text() -> str", "get text, returning a string"),
-        ("(now_ms - window_ms, now_ms]", "now M S minus window M S, now M S"),
+        (
+            "(now_ms - window_ms, now_ms]",
+            "from now M S minus window M S, exclusive, to now M S, inclusive",
+        ),
+        ("[0, n)", "from 0, inclusive, to n, exclusive"),
+        ("a * (b + c)", "a times the quantity b plus c"),
+        ("a * b + c", "a times b plus c"),
+        ("(a + b) * c", "the quantity a plus b, times c"),
         ("a[i] >= a[i-1]", "a at i is greater than or equal to a at i minus 1"),
         ("event:", "event"),
         (":", "a colon"),
@@ -77,3 +84,27 @@ def test_no_bundled_prompt_reaches_the_voice_as_raw_code(bank: str) -> None:
         spoken = _clean_text_for_speech(question["prompt"])
         assert spoken, question["id"]
         assert not re.search(r"[`_\[\]<>=]|->|\w\(", spoken), (question["id"], spoken)
+
+
+def test_file_names_paths_and_addresses_in_prose_are_left_as_written() -> None:
+    spoken = speak_prose("Open Five_Year_Plan.pdf, see docs/api_guide.md, write to first_last@example.com.")
+    assert "Five_Year_Plan.pdf" in spoken
+    assert "docs/api_guide.md" in spoken
+    assert "first_last@example.com" in spoken
+    assert speak_prose("Pass now_ms. Then user_id is set.") == "Pass now M S. Then user I D is set."
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "`x: int" + "[]" * 2900 + "`",
+        "`" + "list[" * 900 + "int" + "]" * 900 + "`",
+        "`" + "f(" * 1400 + "x" + ")" * 1400 + "`",
+        "`" + "(" * 2900 + ")" * 2900 + "`",
+        "`a: " + "A|" * 2900 + "B`",
+    ],
+)
+def test_deeply_nested_code_within_the_question_limit_is_still_spoken(hostile: str) -> None:
+    assert len(hostile) <= 6000
+    assert speak_text(hostile)
+    assert _clean_text_for_speech(hostile)
