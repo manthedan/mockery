@@ -20,7 +20,10 @@ _CALL_RE = re.compile(rf"^({_DOTTED_NAME})\((.*)\)\s*(?:->\s*(.+))?$", re.DOTALL
 _ANNOTATED_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(\S.*)$", re.DOTALL)
 _FIELD_RE = re.compile(rf"^({_DOTTED_NAME}):$")
 _EXPR_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|->|=>|>=|<=|==|!=|\S")
-_SNAKE_CALL_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(\(\))?")
+# A snake_case name standing alone in a sentence; file names, paths and addresses are left as written.
+_SNAKE_CALL_RE = re.compile(
+    r"(?<![\w./@-])([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(?![A-Za-z0-9_])(\(\))?(?![./@-]\w)"
+)
 _BIG_O_RE = re.compile(r"\bO\(([^()]{1,24})\)")
 _PROSE_OPERATORS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\s*>=\s*"), " greater than or equal to "),
@@ -86,6 +89,9 @@ _KNOWN_TYPE_NAMES = frozenset({*_TYPE_WORDS, *_TYPE_ALIASES, "optional", "none",
 _GROUP_NAMES = {2: ("pair", "pairs"), 3: ("triple", "triples")}
 
 _TypeNode = tuple[str, list["_TypeNode"]]
+# Deeper nesting than anyone says aloud is read token by token instead of being parsed.
+_MAX_NESTING = 8
+_INTERVAL_ENDS = {"(": "exclusive", "[": "inclusive", ")": "exclusive", "]": "inclusive"}
 
 
 def _spell(letters: str) -> str:
@@ -142,16 +148,24 @@ def _article(phrase: str) -> str:
     return f"{'an' if phrase[:1].lower() in 'aeiou' else 'a'} {phrase}"
 
 
-def _parse_type(text: str) -> _TypeNode | None:
+def _parse_type(text: str, depth: int = 0) -> _TypeNode | None:
     text = text.strip()
-    if text.endswith("[]") and len(text) > 2:
-        element = _parse_type(text[:-2])
-        return ("list", [element]) if element else None
+    array_levels = 0
+    while text.endswith("[]") and len(text) > 2:
+        text = text[:-2].rstrip()
+        array_levels += 1
+    if depth + array_levels > _MAX_NESTING:
+        return None
+    if array_levels:
+        element = _parse_type(text, depth + array_levels)
+        for _ in range(array_levels):
+            element = ("list", [element]) if element else None
+        return element
     if _GENERIC_ANGLE_RE.match(text):
         text = text.replace("<", "[").replace(">", "]")
     union = _split_top_level(text, "|")
     if len(union) > 1:
-        members = [_parse_type(member) for member in union]
+        members = [_parse_type(member, depth + 1) for member in union]
         return ("|", members) if all(members) else None  # type: ignore[arg-type]
     if text == "...":
         return ("...", [])
@@ -161,7 +175,7 @@ def _parse_type(text: str) -> _TypeNode | None:
     name = match.group(1).rsplit(".", 1)[-1]
     if match.group(2) is None:
         return (name, [])
-    args = [_parse_type(arg) for arg in _split_top_level(match.group(2))]
+    args = [_parse_type(arg, depth + 1) for arg in _split_top_level(match.group(2))]
     return (name, args) if args and all(args) else None  # type: ignore[arg-type]
 
 
@@ -198,36 +212,62 @@ def _speak_type(node: _TypeNode, *, plural: bool = False) -> str:
 
 
 def _speak_expression(text: str) -> str:
+    """Read an expression left to right. Brackets are spoken, so `a * (b + c)` and `a * b + c` differ."""
     words: list[str] = []
     previous = ""
     for token in _EXPR_TOKEN_RE.findall(text):
+        follows_value = bool(previous) and (previous in ")]" or bool(_IDENT_RE.fullmatch(previous)))
         if _IDENT_RE.fullmatch(token):
             words.append(speak_identifier(token))
         elif token[0].isdigit():
             words.append(token)
-        elif token == "[" and (previous in ")]" or _IDENT_RE.fullmatch(previous)) and previous:
+        elif token == "[" and follows_value:
             words.append("at")
+        elif token == "(":
+            words.append("of" if follows_value else "the quantity")
+        elif token == ")":
+            words.append(",")
         elif token in _EXPR_WORDS:
             words.append(_EXPR_WORDS[token])
         previous = token
-    return re.sub(r"\s+,", ",", " ".join(words)).strip(" ,")
+    spoken = re.sub(r"\s+,", ",", " ".join(words))
+    return re.sub(r",{2,}", ",", spoken).strip(" ,")
 
 
-def _speak_argument(arg: str) -> str:
+def _speak_argument(arg: str, depth: int) -> str:
     arg = arg.lstrip("*")
     annotated = _ANNOTATED_RE.match(arg)
     if annotated:
         parsed = _parse_type(annotated.group(2).split("=", 1)[0])
         if parsed:
             return f"{speak_identifier(annotated.group(1))}, {_article(_speak_type(parsed))}"
-    return speak_code(arg.split("=", 1)[0] if _IDENT_RE.match(arg) else arg)
+    return _speak_code(arg.split("=", 1)[0] if _IDENT_RE.match(arg) else arg, depth)
+
+
+def _speak_interval(code: str) -> str | None:
+    """`(a, b]` -> "from a, exclusive, to b, inclusive". Only mixed brackets are surely an interval."""
+    if {code[0], code[-1]} not in ({"(", "]"}, {"[", ")"}):
+        return None
+    ends = _split_top_level(code[1:-1])
+    if len(ends) != 2:
+        return None
+    return (
+        f"from {_speak_expression(ends[0])}, {_INTERVAL_ENDS[code[0]]}, "
+        f"to {_speak_expression(ends[1])}, {_INTERVAL_ENDS[code[-1]]}"
+    )
 
 
 def speak_code(code: str) -> str:
     """Read one inline code span aloud: a name, a call ("get of key"), a type, or an expression."""
+    return _speak_code(code, 0)
+
+
+def _speak_code(code: str, depth: int) -> str:
     code = code.strip()
     if not code:
         return ""
+    if depth > _MAX_NESTING:
+        return _speak_expression(code)
     if code == ":":
         return "a colon"
     if _IDENT_RE.fullmatch(code):
@@ -239,7 +279,7 @@ def speak_code(code: str) -> str:
     call = _CALL_RE.match(code)
     if call and code.count("(") == code.count(")"):
         spoken = speak_identifier(call.group(1))
-        args = [_speak_argument(arg) for arg in _split_top_level(call.group(2))]
+        args = [_speak_argument(arg, depth + 1) for arg in _split_top_level(call.group(2))]
         if args:
             spoken += f" of {_join_and(args)}"
         returns = _parse_type(call.group(3)) if call.group(3) else None
@@ -260,7 +300,9 @@ def speak_code(code: str) -> str:
         return _article(_speak_type(bare_type))
 
     if code[0] in "([" and code[-1] in ")]":
-        return ", ".join(_speak_expression(part) for part in _split_top_level(code[1:-1]))
+        return _speak_interval(code) or ", ".join(
+            _speak_expression(part) for part in _split_top_level(code[1:-1])
+        )
     return _speak_expression(code)
 
 

@@ -291,8 +291,11 @@ def build_practice_router(runtime: Any) -> APIRouter:
             selected_qid = None
         if selected_qid:
             picked = runtime.banks.get_question(selected_qid)
-            if picked is not None:
+            if picked is not None and picked.get("category") == body.interview_type:
                 bank_candidates = [picked] + [q for q in bank_candidates if q.get("id") != picked.get("id")]
+            else:
+                # A pick made under another format (or since removed) does not carry over; the format decides.
+                selected_qid = None
 
         cfg = PracticeConfig(
             interview_type=body.interview_type,

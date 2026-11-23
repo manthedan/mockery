@@ -188,3 +188,17 @@ def test_a_job_listing_is_enough_to_tailor(tmp_path: Path) -> None:
     assert res.status_code == 200, res.text
     assert len(asked) == 1 and "surgical unit" in asked[0]
     assert "tailored" in {q["source"] for q in res.json()["session"]["questions"]}
+
+
+def test_a_question_picked_under_another_format_is_not_carried_over(tmp_path: Path) -> None:
+    client = _offline_client(tmp_path)
+    design_id = client.get("/api/banks?category=system_design&match_active_jd=false").json()["questions"][0]["id"]
+
+    res = client.post(
+        "/api/practice/start",
+        json={"interview_type": "general", "question_source": "bank_only", "selected_question_id": design_id},
+    )
+    assert res.status_code == 200, res.text
+    session = res.json()["session"]
+    assert {q["category"] for q in session["questions"]} == {"general"}
+    assert session["config"]["selected_question_id"] is None

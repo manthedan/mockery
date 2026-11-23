@@ -570,6 +570,7 @@ class LocalTTSEngine:
             voices = []
         return {
             "engine": engine,
+            "max_chars": MAX_TTS_CHARS,
             "backend_state": backend_state.value,
             "kokoro_installed": kokoro_installed,
             "kokoro_available": kokoro_runtime,
