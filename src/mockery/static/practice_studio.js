@@ -795,14 +795,14 @@ export function createPracticeStudioController({
     field.placeholder = CUSTOM_QUESTION_PLACEHOLDERS[getSelectedFormat()] || CUSTOM_QUESTION_PLACEHOLDERS.behavioral;
   }
 
-  /* Save to the candidate's own pack for the selected format: one question as written, or every
-     question in a pasted list. Returns the server's answer, or null when nothing was saved. */
-  async function saveMyQuestions(text, { asList }) {
+  /* Save to the candidate's own pack for one format: one question as written, or every question
+     in a pasted list. Returns the server's answer, or null when nothing was saved. */
+  async function saveMyQuestions(category, text, { asList }) {
     try {
       const res = await fetch("/api/banks/mine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ category: getSelectedFormat(), text, as_list: asList }),
+        body: JSON.stringify({ category, text, as_list: asList }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not save to My questions"));
@@ -822,11 +822,13 @@ export function createPracticeStudioController({
     return parts.join(" ");
   }
 
-  async function showSavedQuestion(data) {
+  /* Select a question just saved, unless the form has moved on to another format or choice since. */
+  async function showSavedQuestion(category, data) {
     await refreshQuestionPicker();
     const picker = el("practiceQuestionPicker");
     const firstId = data.added?.[0]?.id;
-    if (picker && firstId && local.myQuestionIds.has(firstId)) {
+    const formUnchanged = getSelectedFormat() === category && picker?.value === CUSTOM_QUESTION_VALUE;
+    if (formUnchanged && firstId && local.myQuestionIds.has(firstId)) {
       picker.value = firstId;
       syncCustomQuestionField();
     }
@@ -834,42 +836,56 @@ export function createPracticeStudioController({
 
   async function saveQuestionList() {
     const field = el("practiceQuestionListInput");
+    const button = el("practiceSaveQuestionListBtn");
     const text = (field?.value || "").trim();
     if (!text) {
       showToast("Paste the questions you want to keep, one per line.", 3000);
       field?.focus();
       return;
     }
-    const data = await saveMyQuestions(text, { asList: true });
+    if (button?.disabled) return;
+    const category = getSelectedFormat();
+    if (button) button.disabled = true;
+    const data = await saveMyQuestions(category, text, { asList: true });
+    if (button) button.disabled = false;
     if (!data) return;
     showToast(savedQuestionsSummary(data), 4200);
-    field.value = "";
-    el("practiceQuestionListDetails")?.removeAttribute("open");
-    await showSavedQuestion(data);
+    if (field.value.trim() === text) {
+      field.value = "";
+      el("practiceQuestionListDetails")?.removeAttribute("open");
+    }
+    await showSavedQuestion(category, data);
   }
 
   /* The question just used to start a session moves from the box into the saved list. */
-  async function keepStartedQuestion(text) {
-    const data = await saveMyQuestions(text, { asList: false });
+  async function keepStartedQuestion(category, text) {
+    const data = await saveMyQuestions(category, text, { asList: false });
     if (!data) return;
     const field = el("practiceCustomQuestionInput");
     if (field && field.value.trim() === text) field.value = "";
-    await showSavedQuestion(data);
+    await showSavedQuestion(category, data);
   }
 
   async function removeMyQuestion() {
     const picker = el("practiceQuestionPicker");
     const id = picker?.value || "";
     if (!local.myQuestionIds.has(id)) return;
+    const category = getSelectedFormat();
     try {
-      const res = await fetch(`/api/banks/mine/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const res = await fetch(`/api/banks/mine/${encodeURIComponent(category)}/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not remove the question"));
     } catch (err) {
       showToast(String(err?.message || "Could not remove the question."), 3800);
       return;
     }
+    // Drop it here first, so it cannot be picked again even if the list fails to reload.
+    local.myQuestionIds.delete(id);
+    [...picker.options].find((option) => option.value === id)?.remove();
     picker.value = "";
+    syncCustomQuestionField();
     await refreshQuestionPicker();
     showToast("Removed from My questions.", 2600);
   }
@@ -2648,6 +2664,7 @@ export function createPracticeStudioController({
       activeJd?.title && activeJd.company && typedRole === jdRoleLabel(activeJd) ? activeJd.title : typedRole;
     const fmt = getSelectedFormat();
     const selectedQ = isCustomQuestion ? null : pickedQuestion || null;
+    const keepQuestion = isCustomQuestion && Boolean(el("practiceKeepQuestionCheckbox")?.checked);
     const liveNudges = Boolean(el("practiceNudgesCheckbox")?.checked ?? true);
     const voiceOn = Boolean(el("practiceVoiceCheckbox")?.checked ?? true);
     local.voiceEnabled = voiceOn;
@@ -2696,7 +2713,7 @@ export function createPracticeStudioController({
       if (data.removed_details?.length) {
         showToast(`Removed from your question before it was sent: ${data.removed_details.join(", ")}.`, 4200);
       }
-      if (customQuestion && el("practiceKeepQuestionCheckbox")?.checked) keepStartedQuestion(customQuestion);
+      if (keepQuestion) keepStartedQuestion(fmt, customQuestion);
       if (data.opening_turn?.text && local.voiceEnabled) {
         speakText(data.opening_turn.text, { thenListen: true });
       }

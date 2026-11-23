@@ -80,8 +80,14 @@ def test_praise_follows_only_from_the_signal_that_earned_it() -> None:
     assert unearned["message"] == CARL.signal("action").nudge
 
     short_general = "Because money."
-    assert build_heuristic_nudge(
+    thin = build_heuristic_nudge(
         estimate_carl_heuristic(short_general, rubric=GENERAL), "general", GENERAL, short_general
+    )
+    assert thin == {"tone": "tip", "message": GENERAL.signal("result").nudge}
+
+    silence = "Um, hmm."
+    assert build_heuristic_nudge(
+        estimate_carl_heuristic(silence, rubric=GENERAL), "general", GENERAL, silence
     )["message"] == GENERAL.nothing_yet
 
 

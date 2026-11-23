@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
@@ -279,6 +280,15 @@ def build_practice_turn_messages(
     return messages, user_content, curr_ws, system_prompt, True
 
 
+_SIGNAL_GRADES_RE = re.compile(r'"carl_signals"\s*:\s*\{[^{}]*\}')
+_EARNED_GRADE_RE = re.compile(r'"(?:strong|partial)"')
+
+
+def _without_signal_grades(assistant_raw: str) -> str:
+    """The interviewer's reply with every structure grade set back to "missing"."""
+    return _SIGNAL_GRADES_RE.sub(lambda grades: _EARNED_GRADE_RE.sub('"missing"', grades.group(0)), assistant_raw)
+
+
 def commit_practice_conversation_turn(
     session: PracticeSession,
     *,
@@ -289,7 +299,12 @@ def commit_practice_conversation_turn(
     synced_turn_count: int,
     reset_conversation: bool,
 ) -> None:
-    """Atomically append the exact committed `(user, assistant)` exchange onto `session.llm_conversation`."""
+    """
+    Atomically append the committed `(user, assistant)` exchange onto `session.llm_conversation`.
+    A session that is not graded on structure keeps no grades in the reply it stores and replays.
+    """
+    if not session.config.rubric.coached:
+        assistant_raw = _without_signal_grades(assistant_raw)
     if reset_conversation or session.llm_conversation is None:
         session.llm_conversation = PracticeConversation(
             version=1,

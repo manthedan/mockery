@@ -262,6 +262,7 @@ class AppRuntime:
         self.store = SessionStore(project_root / "sessions")
         self.grouper = QAGrouper()
         self.redactor = RampartRedactor()
+        self.llm.practice_text_filter = lambda text: self.redactor.strip_contact_details(text)[0]
         self.profiles = CandidateProfileStore(project_root / "profiles", self.redactor)
         self.banks = QuestionBankStore(project_root / "banks")
         self.addons = AddonManager(project_root, self.redactor)

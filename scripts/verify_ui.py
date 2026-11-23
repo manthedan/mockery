@@ -890,6 +890,30 @@ async def run_uat(out_dir: Path | None) -> int:
                 my_removed["titles"] == ["Why this role?"] and not my_removed["pickedIsMine"] and not my_removed["removeShown"],
                 str(my_removed),
             )
+            await cdp.eval(
+                """(() => {
+                  const picker = document.getElementById('practiceQuestionPicker');
+                  picker.value = '__custom__';
+                  picker.dispatchEvent(new Event('change', { bubbles: true }));
+                  document.getElementById('practiceCustomQuestionInput').value = 'Tell me about a launch you would redo.';
+                  const keep = document.getElementById('practiceKeepQuestionCheckbox');
+                  if (!keep.checked) keep.click();
+                  document.getElementById('practiceVoiceCheckbox').checked = false;
+                  document.getElementById('practiceStartBtn').click();
+                })()"""
+            )
+            await asyncio.sleep(2.5)
+            await cdp.eval("document.getElementById('practiceHomeBtn')?.click()")
+            await asyncio.sleep(1.0)
+            my_kept = await cdp.eval(my_questions_probe)
+            record(
+                "question_kept_on_start_is_saved_and_selected",
+                my_kept["titles"] == ["Why this role?", "Tell me about a launch you would redo."]
+                and my_kept["pickedIsMine"]
+                and not my_kept["boxShown"],
+                str(my_kept),
+            )
+            await cdp.eval("document.getElementById('practiceKeepQuestionCheckbox')?.click()")
             await cdp.eval("""document.querySelector('[data-home-mode="copilot"]')?.click()""")
             await asyncio.sleep(0.3)
 

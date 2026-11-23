@@ -132,9 +132,13 @@ _FOCUS_BRIEFS: dict[str, str] = {
 _NO_FRAMEWORK_FOCUS_BRIEF = "what a strong answer covers here, without naming an answer framework"
 
 
-def practice_signal_schema(signal_keys: tuple[str, ...] = CARL_SIGNAL_KEYS) -> str:
-    """The JSON object the grader fills in: one level per signal, under the rubric's own names."""
-    return "{" + ", ".join(f'"{key}": "strong|partial|missing"' for key in signal_keys) + "}"
+def practice_signal_schema(signal_keys: tuple[str, ...] = CARL_SIGNAL_KEYS, *, coached: bool = True) -> str:
+    """
+    The JSON object the grader fills in: one level per signal, under the rubric's own names.
+    A session that is not graded on structure (`coached=False`) is shown every level already set to "missing".
+    """
+    levels = "strong|partial|missing" if coached else "missing"
+    return "{" + ", ".join(f'"{key}": "{levels}"' for key in signal_keys) + "}"
 
 
 def practice_reply_rubric_args(
@@ -145,7 +149,7 @@ def practice_reply_rubric_args(
 ) -> dict[str, str]:
     """Rubric-specific placeholders for `practice_interviewer_reply`; `coached=False` means no framework is taught."""
     return {
-        "signal_schema": practice_signal_schema(signal_keys),
+        "signal_schema": practice_signal_schema(signal_keys, coached=coached),
         "signal_definitions": _SIGNAL_DEFINITIONS[grader] if coached else _NO_FRAMEWORK_SIGNAL_DEFINITIONS,
         "carry_forward_note": _CARRY_FORWARD_NOTES[grader] if coached else "",
         "nudge_examples": _NUDGE_EXAMPLES[grader] if coached else _NO_FRAMEWORK_NUDGE_EXAMPLES,
@@ -162,7 +166,7 @@ def practice_debrief_rubric_args(
     return {
         "coach_focus": _COACH_FOCUS[grader] if coached else _NO_FRAMEWORK_COACH_FOCUS,
         "primer_brief": _PRIMER_BRIEFS[grader] if coached else _NO_FRAMEWORK_PRIMER_BRIEF,
-        "signal_schema": practice_signal_schema(signal_keys),
+        "signal_schema": practice_signal_schema(signal_keys, coached=coached),
         "reframe_brief": _REFRAME_BRIEFS[grader] if coached else _NO_FRAMEWORK_REFRAME_BRIEF,
         "drill_focus_example": _DRILL_FOCUS_EXAMPLES[grader] if coached else _NO_FRAMEWORK_DRILL_FOCUS_EXAMPLE,
     }

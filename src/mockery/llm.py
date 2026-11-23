@@ -407,6 +407,15 @@ def _reasoning_tokens_spent(usage: Any, thinking_text: str = "", content: str = 
     return len(thinking) // 3
 
 
+def _visible_answer(content: str) -> str:
+    """A reply without the thinking some local models write inline, finished or cut off."""
+    if "<think" not in content.lower():
+        return content
+    without_blocks = THINK_BLOCK_RE.sub("", content)
+    unfinished = _UNCLOSED_THINK_RE.search(without_blocks)
+    return (without_blocks[: unfinished.start()] if unfinished else without_blocks).strip()
+
+
 def _thinking_text(carrier: Any) -> str:
     """The thinking a local server returns next to a message or stream delta, under either common name."""
     if carrier is None:
@@ -748,8 +757,10 @@ class InterviewCopilotLLM:
         self._worker_generation: int = 0
         self._warm_spare_generation: int = 0
         self.recent_usage_events: deque[dict[str, Any]] = deque(maxlen=50)
+        # Applied to everything a Practice call sends to the model (the app sets it to contact-detail removal).
+        self.practice_text_filter: Callable[[str], str] | None = None
         # Extra output tokens per model for thinking that comes before the answer, learned from its replies.
-        self._reasoning_allowance: dict[str, int] = {}
+        self._reasoning_allowance: dict[tuple[str, str], int] = {}
 
     def _client(self) -> AsyncOpenAI:
         key = self.config.api_key.strip() or "ollama-local"
@@ -2221,6 +2232,11 @@ class InterviewCopilotLLM:
         - HTTP (Anthropic, OpenRouter, OpenAI, Gemini, DeepSeek, oMLX, Ollama): native multi-turn `messages`
           with sliding `cache_control` breakpoints or `prompt_cache_key`.
         """
+        if self.practice_text_filter is not None and operation.startswith("practice"):
+            messages = [
+                {**m, "content": self.practice_text_filter(m["content"])} if isinstance(m.get("content"), str) else m
+                for m in messages
+            ]
         t0 = time.perf_counter()
         input_chars = sum(len(str(m.get("content", ""))) for m in messages)
         sys_str = "\n\n".join(
@@ -2400,7 +2416,8 @@ class InterviewCopilotLLM:
             # A model that thinks before it answers spends its output allowance on the thinking and can
             # return nothing. Each model is given the room its own replies show it needs, and a reply that
             # was cut off for that reason is asked for again with more.
-            allowance = self._reasoning_allowance.get(model, 0)
+            allowance_key = (self.config.base_url, model)
+            allowance = self._reasoning_allowance.get(allowance_key, 0)
             for _attempt in range(3):
                 kwargs["max_tokens"] = max_tokens + allowance
                 call_timeout = timeout + allowance / REASONING_ASSUMED_TOKENS_PER_SECOND
@@ -2447,13 +2464,16 @@ class InterviewCopilotLLM:
                     already_shown = False
 
                 spent = _reasoning_tokens_spent(usage_raw, thinking, out)
-                cut_off = meta.get("finish_reason") in ("length", "max_tokens")
+                out = _visible_answer(out)
+                # Only a reply that thinking left empty is worth asking for again; an answer that ran
+                # long is the caller's limit doing its job.
+                lost_to_thinking = bool(spent) and not out and meta.get("finish_reason") in ("length", "max_tokens")
                 if spent:
-                    needed = spent + spent // 2 + 256 if cut_off else spent + spent // 4
-                    self._reasoning_allowance[model] = min(REASONING_ALLOWANCE_CAP, max(allowance, needed))
-                if not (spent and cut_off) or already_shown or allowance >= REASONING_ALLOWANCE_CAP:
+                    needed = spent + spent // 2 + 256 if lost_to_thinking else spent + spent // 4
+                    self._reasoning_allowance[allowance_key] = min(REASONING_ALLOWANCE_CAP, max(allowance, needed))
+                if not lost_to_thinking or already_shown or allowance >= REASONING_ALLOWANCE_CAP:
                     break
-                allowance = min(REASONING_ALLOWANCE_CAP, max(self._reasoning_allowance[model], allowance * 2))
+                allowance = min(REASONING_ALLOWANCE_CAP, max(self._reasoning_allowance[allowance_key], allowance * 2))
             ok = True
             return out
         finally:
@@ -3164,6 +3184,7 @@ class InterviewCopilotLLM:
                     max_tokens=360,
                     timeout=25.0,
                     expect_json=True,
+                    operation="practice_plan",
                 )
                 parsed = _extract_json_object(raw)
                 opening = str(parsed.get("opening") or "").strip() or default_opening
@@ -3214,6 +3235,7 @@ class InterviewCopilotLLM:
                 max_tokens=900,
                 timeout=35.0,
                 expect_json=True,
+                operation="practice_plan",
             )
             parsed = _extract_json_object(raw)
             opening = str(parsed.get("opening") or "").strip() or default_opening
@@ -3424,6 +3446,7 @@ class InterviewCopilotLLM:
                     expect_json=True,
                     cache_prefix_len=len(stable_prefix),
                     cache_key=cache_key,
+                    operation="practice_turn",
                 )
 
             parsed = _extract_json_object(raw)
@@ -3878,7 +3901,10 @@ class InterviewCopilotLLM:
         if not self.config.is_configured:
             return fallback
 
-        sys_p = render_prompt("practice_retry_eval", signal_schema=practice_signal_schema(rubric.signal_keys))
+        sys_p = render_prompt(
+            "practice_retry_eval",
+            signal_schema=practice_signal_schema(rubric.signal_keys, coached=rubric.coached),
+        )
         usr_p = (
             f"Role: {role_title} ({target_level})\n"
             f"Retry Drill Focus: {drill_focus}\nDrill Prompt: {drill_prompt}\n\n"
@@ -3894,6 +3920,7 @@ class InterviewCopilotLLM:
                 max_tokens=380,
                 timeout=25.0,
                 expect_json=True,
+                operation="practice_retry",
             )
             parsed = _extract_json_object(raw)
             enc = str(parsed.get("encouragement") or "").strip()

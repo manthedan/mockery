@@ -270,6 +270,8 @@ def build_practice_router(runtime: Any) -> APIRouter:
         active_jd = runtime.profiles.active_jd()
         role_title = body.role_title.strip() or (active_jd.title if active_jd else DEFAULT_PRACTICE_ROLE_TITLE)
         company = body.company.strip() or (active_jd.company if active_jd else "")
+        role_title = runtime.redactor.strip_contact_details(role_title)[0]
+        company = runtime.redactor.strip_contact_details(company)[0]
         target_level = normalize_level(body.target_level or (active_jd.target_level if active_jd else "")) or DEFAULT_LEVEL
         jd_text = f"{active_jd.title} {active_jd.company}\n{active_jd.text}" if active_jd else ""
         redacted_resume = runtime.profiles.resume_for_llm()
@@ -293,7 +295,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
         if custom_question:
             selected_qid = None
         if selected_qid:
-            picked = runtime.banks.get_question(selected_qid)
+            picked = runtime.banks.get_question(selected_qid, category=body.interview_type)
             if picked is not None and str(picked.get("category") or "").strip().lower() == body.interview_type:
                 if picked.get("mine"):
                     # A saved question of the candidate's own is asked as written, like one typed in.

@@ -40,6 +40,11 @@ def test_a_pasted_list_splits_per_line_or_per_blank_line() -> None:
         "Design a ticketing system.\nAssume a 10 minute on-sale spike.",
         "Design a URL shortener.",
     ]
+    assert split_pasted_questions("1. First?\n2. Second?\n\n3. Third?\n   Keep this line with it.\n\n-\n- \n***") == [
+        "First?",
+        "Second?",
+        "Third?\nKeep this line with it.",
+    ]
 
 
 def test_saved_questions_are_listed_by_format_and_skip_repeats(tmp_path: Path) -> None:
@@ -57,7 +62,7 @@ def test_saved_questions_are_listed_by_format_and_skip_repeats(tmp_path: Path) -
         json={
             "category": "behavioral",
             "as_list": True,
-            "text": "Describe a conflict with a peer.\n\ntell me about closing the Q3 books   two days early.\nbe specific.",
+            "text": "Describe a conflict with a peer.\n\nTell me about closing the Q3 books   two days early.\nBe specific.",
         },
     ).json()
     assert [q["prompt"] for q in pasted["added"]] == ["Describe a conflict with a peer."]
@@ -65,12 +70,20 @@ def test_saved_questions_are_listed_by_format_and_skip_repeats(tmp_path: Path) -
 
     again = client.post(
         "/api/banks/mine",
-        json={"category": "behavioral", "as_list": True, "text": "Describe a  conflict with a PEER.\nA new one?"},
+        json={
+            "category": "behavioral",
+            "as_list": True,
+            "text": "Describe a  conflict with a peer.\nA new one?\nWhat does print(\"A\") output?\nWhat does print(\"a\") output?",
+        },
     ).json()
-    assert [q["prompt"] for q in again["added"]] == ["A new one?"]
+    assert [q["prompt"] for q in again["added"]] == [
+        "A new one?",
+        'What does print("A") output?',
+        'What does print("a") output?',
+    ]
     assert again["already_saved"] == 1
 
-    assert len(_mine(client, "behavioral")) == 3
+    assert len(_mine(client, "behavioral")) == 5
     assert _mine(client, "general") == []
     bundled = [q for q in client.get("/api/banks?category=behavioral").json()["questions"] if not q["mine"]]
     assert bundled
@@ -140,10 +153,12 @@ def test_removing_a_saved_question(tmp_path: Path) -> None:
         json={"category": "coding", "as_list": True, "text": "Reverse a linked list.\nMerge two sorted arrays."},
     ).json()["added"]
 
-    assert client.delete(f"/api/banks/mine/{added[0]['id']}").json() == {"ok": True}
+    assert client.delete(f"/api/banks/mine/general/{added[0]['id']}").status_code == 404
+    assert client.delete(f"/api/banks/mine/coding/{added[0]['id']}").json() == {"ok": True}
     assert [q["prompt"] for q in _mine(client, "coding")] == ["Merge two sorted arrays."]
-    assert client.delete(f"/api/banks/mine/{added[0]['id']}").status_code == 404
-    assert client.delete("/api/banks/mine/beh_conflict_01").status_code == 404
+    assert client.delete(f"/api/banks/mine/coding/{added[0]['id']}").status_code == 404
+    assert client.delete("/api/banks/mine/behavioral/beh_conflict_01").status_code == 404
+    assert client.delete(f"/api/banks/mine/poetry/{added[1]['id']}").status_code == 422
 
 
 def test_requests_that_cannot_be_saved_change_nothing(tmp_path: Path) -> None:
