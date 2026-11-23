@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
+import secrets
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from .asr import parakeet_snapshot_is_complete
+from .downloads import (
+    DownloadCancelledError,
+    DownloadProgress,
+    format_download_error,
+    make_hf_progress_tqdm_class,
+)
 from .redactor import RAMPART_APPROX_MB, RAMPART_REPO_ID, RampartRedactor
 from .tts import KOKORO_APPROX_MB, KOKORO_REPO_ID, PHONON_APPROX_MB, PHONON_REPO_ID
 from .state_machines import (
@@ -186,9 +195,43 @@ class AddonManager:
         self._installing: dict[str, str] = {}
         self._uninstalling: dict[str, str] = {}
         self._errors: dict[str, str] = {}
+        self._progress: dict[str, dict[str, Any]] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._active_op_ids: dict[str, int] = {}
+        self._op_seq: int = 0
+        self._server_epoch: str = secrets.token_hex(6)
+        self._revision: int = 0
         self._pack_locks: dict[str, asyncio.Lock] = {}
         self._install_tasks: dict[str, asyncio.Task[Any]] = {}
         self._modules: dict[str, bool] = self._load_modules()
+        self._on_change: Callable[[str | None, str | None], Any] | None = None
+        self._post_install_hook: Callable[[str], Any] | None = None
+
+    def set_change_listener(self, listener: Callable[[str | None, str | None], Any] | None) -> None:
+        self._on_change = listener
+
+    def set_post_install_hook(self, hook: Callable[[str], Any] | None) -> None:
+        self._post_install_hook = hook
+
+    def _bump_revision(self) -> int:
+        self._revision += 1
+        return self._revision
+
+    def _emit_change(self, pack_id: str | None = None, event: str | None = None) -> None:
+        cb = self._on_change
+        if cb is None:
+            return
+        try:
+            res = cb(pack_id, event)
+            if asyncio.iscoroutine(res):
+                try:
+                    loop = asyncio.get_running_loop()
+                    task = loop.create_task(res)
+                    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                except RuntimeError:
+                    res.close()
+        except Exception:
+            pass
 
     def _get_pack_lock(self, pack_id: str) -> asyncio.Lock:
         lock = self._pack_locks.get(pack_id)
@@ -238,6 +281,7 @@ class AddonManager:
             if k in DEFAULT_MODULES:
                 self._modules[k] = bool(v)
         self._save_modules()
+        self._bump_revision()
         return dict(self._modules)
 
     def _pack_specs(self) -> list[dict[str, Any]]:
@@ -361,6 +405,9 @@ class AddonManager:
             s["blocked_reasons"] = blocked
             if pack_state == AddonPackState.INSTALLING:
                 s["status_detail"] = self._installing[pid]
+                prog = self._progress.get(pid)
+                if prog is not None:
+                    s["progress"] = dict(prog)
             elif pack_state == AddonPackState.UNINSTALLING:
                 s["status_detail"] = self._uninstalling[pid]
             elif pack_state == AddonPackState.INSTALLED:
@@ -383,6 +430,8 @@ class AddonManager:
 
     def status_dict(self) -> dict[str, Any]:
         return {
+            "server_epoch": self._server_epoch,
+            "revision": self._revision,
             "modules": [
                 {
                     "id": mod_id,
@@ -422,68 +471,258 @@ class AddonManager:
             return bool(self.extra_handlers[pack_id]["available"]())
         return False
 
+    def _is_pack_installed(self, pack_id: str) -> bool:
+        if pack_id == "rampart_pii":
+            return bool(self.redactor.is_downloaded())
+        if pack_id == "parakeet_v2":
+            return _hf_repo_cached(
+                "mlx-community/parakeet-tdt-0.6b-v2",
+                bypass_cache=True,
+                snapshot_validator=parakeet_snapshot_is_complete,
+            )
+        if pack_id == "parakeet_v3":
+            return _hf_repo_cached(
+                "mlx-community/parakeet-tdt-0.6b-v3",
+                bypass_cache=True,
+                snapshot_validator=parakeet_snapshot_is_complete,
+            )
+        if pack_id in self.extra_handlers:
+            return bool(self.extra_handlers[pack_id]["is_installed"]())
+        return False
+
     def _is_pack_known(self, pack_id: str) -> bool:
         return pack_id in ("rampart_pii", "parakeet_v2", "parakeet_v3") or pack_id in self.extra_handlers
 
-    async def _run_install_locked(self, pack_id: str) -> None:
+    @staticmethod
+    def _call_install_handler(
+        fn: Callable[..., Any],
+        *,
+        on_progress: Callable[[dict[str, Any]], None],
+        cancel_event: threading.Event,
+    ) -> Any:
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return fn()
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        kwargs: dict[str, Any] = {}
+        if has_var_kw or "on_progress" in params:
+            kwargs["on_progress"] = on_progress
+        if has_var_kw or "cancel_event" in params:
+            kwargs["cancel_event"] = cancel_event
+        return fn(**kwargs)
+
+    async def _run_install_locked(
+        self,
+        pack_id: str,
+        *,
+        op_id: int,
+        cancel_event: threading.Event,
+    ) -> None:
         if not self._is_pack_installable(pack_id):
             raise ValueError(f"Unknown or unavailable add-on pack '{pack_id}'")
-        lock = self._get_pack_lock(pack_id)
-        async with lock:
-            self._errors.pop(pack_id, None)
-            self._installing[pack_id] = "Downloading…"
+        loop = asyncio.get_running_loop()
+
+        def _on_progress_from_thread(prog: dict[str, Any]) -> None:
+            def _apply() -> None:
+                if self._active_op_ids.get(pack_id) != op_id or pack_id not in self._installing:
+                    return
+                self._progress[pack_id] = dict(prog)
+                phase = prog.get("phase")
+                retry_note = prog.get("retry_note")
+                pct = prog.get("percent")
+                if cancel_event.is_set() and prog.get("cancellable", True):
+                    self._installing[pack_id] = "Cancelling…"
+                elif phase == "retrying" and retry_note:
+                    self._installing[pack_id] = str(retry_note)
+                elif phase == "verifying":
+                    self._installing[pack_id] = "Verifying…"
+                elif phase == "loading":
+                    self._installing[pack_id] = "Initializing…"
+                elif isinstance(pct, (int, float)) and pct > 0:
+                    self._installing[pack_id] = f"Downloading {int(round(pct))}%…"
+                else:
+                    self._installing[pack_id] = "Downloading…"
+                self._bump_revision()
+                self._emit_change(pack_id, "progress")
+
             try:
+                loop.call_soon_threadsafe(_apply)
+            except RuntimeError:
+                pass
+
+        lock = self._get_pack_lock(pack_id)
+        terminal_event = "installed"
+        async with lock:
+            try:
+                if cancel_event.is_set():
+                    raise DownloadCancelledError("Download cancelled.")
+                self._errors.pop(pack_id, None)
+                self._installing[pack_id] = "Downloading…"
+                self._progress[pack_id] = DownloadProgress(phase="downloading").to_dict()
+                self._bump_revision()
+                self._emit_change(pack_id, "started")
+
                 if pack_id == "rampart_pii":
-                    await self._await_uninterruptible(asyncio.to_thread(self.redactor.ensure_downloaded))
+                    await self._await_uninterruptible(
+                        asyncio.to_thread(
+                            self.redactor.ensure_downloaded,
+                            on_progress=_on_progress_from_thread,
+                            cancel_event=cancel_event,
+                        )
+                    )
                 elif pack_id in ("parakeet_v2", "parakeet_v3"):
                     repo_id = (
                         "mlx-community/parakeet-tdt-0.6b-v2"
                         if pack_id == "parakeet_v2"
                         else "mlx-community/parakeet-tdt-0.6b-v3"
                     )
+                    approx_mb = 600 if pack_id == "parakeet_v2" else 620
                     from huggingface_hub import snapshot_download
 
-                    await self._await_uninterruptible(asyncio.to_thread(snapshot_download, repo_id))
+                    tqdm_cls = make_hf_progress_tqdm_class(
+                        _on_progress_from_thread,
+                        approx_total_bytes=approx_mb * 1024 * 1024,
+                        cancel_event=cancel_event,
+                    )
+
+                    def _dl_parakeet() -> Any:
+                        supports_tqdm = False
+                        supports_allow = False
+                        try:
+                            params = inspect.signature(snapshot_download).parameters
+                            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                            supports_tqdm = has_var_kw or "tqdm_class" in params
+                            supports_allow = has_var_kw or "allow_patterns" in params
+                        except (TypeError, ValueError):
+                            pass
+                        dl_kwargs: dict[str, Any] = {}
+                        if supports_allow:
+                            dl_kwargs["allow_patterns"] = ["config.json", "model.safetensors"]
+                        if supports_tqdm:
+                            dl_kwargs["tqdm_class"] = tqdm_cls
+                        res = snapshot_download(repo_id, **dl_kwargs)
+                        if cancel_event.is_set():
+                            raise DownloadCancelledError("Download cancelled.")
+                        _on_progress_from_thread(
+                            DownloadProgress(phase="verifying", percent=100.0, cancellable=False).to_dict()
+                        )
+                        return res
+
+                    await self._await_uninterruptible(asyncio.to_thread(_dl_parakeet))
+                    if cancel_event.is_set():
+                        raise DownloadCancelledError("Download cancelled.")
                     _invalidate_hf_repo_cache(repo_id)
                 else:
                     fn = self.extra_handlers[pack_id]["install"]
-                    res = fn()
+                    res = self._call_install_handler(
+                        fn,
+                        on_progress=_on_progress_from_thread,
+                        cancel_event=cancel_event,
+                    )
                     if asyncio.iscoroutine(res):
                         await self._await_uninterruptible(res)
+
+                hook = self._post_install_hook
+                if hook is not None:
+                    hook_res = hook(pack_id)
+                    if asyncio.iscoroutine(hook_res):
+                        await self._await_uninterruptible(hook_res)
+            except DownloadCancelledError:
+                terminal_event = "cancelled"
+                self._errors.pop(pack_id, None)
+                logger.info("Cancelled add-on pack install: %s", pack_id)
             except asyncio.CancelledError:
+                terminal_event = "cancelled"
                 raise
             except Exception as exc:
-                self._errors[pack_id] = str(exc)
-                raise
+                terminal_event = "error"
+                clean_err = format_download_error(exc)
+                self._errors[pack_id] = clean_err
+                raise RuntimeError(clean_err) from exc
             finally:
                 if pack_id in ("parakeet_v2", "parakeet_v3"):
                     _invalidate_hf_repo_cache()
-                self._installing.pop(pack_id, None)
+                if self._active_op_ids.get(pack_id) == op_id:
+                    self._active_op_ids.pop(pack_id, None)
+                    self._installing.pop(pack_id, None)
+                    self._progress.pop(pack_id, None)
+                if self._cancel_events.get(pack_id) is cancel_event:
+                    self._cancel_events.pop(pack_id, None)
+                self._bump_revision()
+                self._emit_change(pack_id, terminal_event)
+
+    def _ensure_install_task(self, pack_id: str) -> asyncio.Task[Any]:
+        existing = self._install_tasks.get(pack_id)
+        if existing is not None and not existing.done():
+            return existing
+
+        self._op_seq += 1
+        op_id = self._op_seq
+        cancel_event = threading.Event()
+        # Seed initial installing state synchronously so immediate HTTP 202 snapshots reflect it
+        self._errors.pop(pack_id, None)
+        self._active_op_ids[pack_id] = op_id
+        self._installing[pack_id] = "Downloading…"
+        self._progress[pack_id] = DownloadProgress(phase="downloading").to_dict()
+        self._cancel_events[pack_id] = cancel_event
+        self._bump_revision()
+
+        task = asyncio.create_task(
+            self._run_install_locked(pack_id, op_id=op_id, cancel_event=cancel_event)
+        )
+        self._install_tasks[pack_id] = task
+
+        def _cleanup_done(done_task: asyncio.Task[Any]) -> None:
+            if self._install_tasks.get(pack_id) is done_task:
+                self._install_tasks.pop(pack_id, None)
+            if not done_task.cancelled():
+                exc = done_task.exception()
+                if exc is not None:
+                    logger.warning("Background install for %s failed: %s", pack_id, exc)
+
+        task.add_done_callback(_cleanup_done)
+        return task
+
+    def start_install_pack(self, pack_id: str) -> dict[str, Any]:
+        """Start installing `pack_id` in the background and return immediately."""
+        if not self._is_pack_installable(pack_id):
+            raise ValueError(f"Unknown or unavailable add-on pack '{pack_id}'")
+        self._ensure_install_task(pack_id)
+        return self.status_dict()
 
     async def install_pack(self, pack_id: str) -> dict[str, Any]:
         if not self._is_pack_installable(pack_id):
             raise ValueError(f"Unknown or unavailable add-on pack '{pack_id}'")
-        existing = self._install_tasks.get(pack_id)
-        if existing is not None and not existing.done():
-            await asyncio.shield(existing)
-            return self.status_dict()
+        task = self._ensure_install_task(pack_id)
+        await asyncio.shield(task)
+        return self.status_dict()
 
-        task = asyncio.create_task(self._run_install_locked(pack_id))
-        self._install_tasks[pack_id] = task
-        try:
-            await asyncio.shield(task)
-        finally:
-            if self._install_tasks.get(pack_id) is task and task.done():
-                self._install_tasks.pop(pack_id, None)
+    def cancel_install(self, pack_id: str) -> dict[str, Any]:
+        if not self._is_pack_known(pack_id):
+            raise ValueError(f"Unknown add-on pack '{pack_id}'")
+        ev = self._cancel_events.get(pack_id)
+        if ev is not None:
+            prog = self._progress.get(pack_id)
+            if prog is not None and prog.get("cancellable") is False:
+                return self.status_dict()
+            ev.set()
+            if pack_id in self._installing:
+                self._installing[pack_id] = "Cancelling…"
+            self._bump_revision()
+            self._emit_change(pack_id, "cancelling")
         return self.status_dict()
 
     async def uninstall_pack(self, pack_id: str) -> dict[str, Any]:
         if not self._is_pack_known(pack_id):
             raise ValueError(f"Unknown add-on pack '{pack_id}'")
         lock = self._get_pack_lock(pack_id)
+        terminal_event = "uninstalled"
         async with lock:
             self._errors.pop(pack_id, None)
             self._uninstalling[pack_id] = "Removing…"
+            self._bump_revision()
+            self._emit_change(pack_id, "uninstalling")
             try:
                 if pack_id == "rampart_pii":
                     await self._await_uninterruptible(asyncio.to_thread(self.redactor.delete_cache))
@@ -499,13 +738,21 @@ class AddonManager:
                     res = fn()
                     if asyncio.iscoroutine(res):
                         await self._await_uninterruptible(res)
+                if pack_id in ("parakeet_v2", "parakeet_v3"):
+                    _invalidate_hf_repo_cache()
+                if self._is_pack_installed(pack_id):
+                    raise RuntimeError(f"Could not completely remove {pack_id} from disk.")
             except asyncio.CancelledError:
+                terminal_event = "cancelled"
                 raise
             except Exception as exc:
-                self._errors[pack_id] = str(exc)
+                terminal_event = "error"
+                self._errors[pack_id] = format_download_error(exc)
                 raise
             finally:
                 if pack_id in ("parakeet_v2", "parakeet_v3"):
                     _invalidate_hf_repo_cache()
                 self._uninstalling.pop(pack_id, None)
+                self._bump_revision()
+                self._emit_change(pack_id, terminal_event)
         return self.status_dict()

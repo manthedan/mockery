@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import inspect
 import io
 import ipaddress
 import json
@@ -15,6 +16,7 @@ import threading
 import unicodedata
 import zipfile
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -25,6 +27,7 @@ from xml.etree import ElementTree as ET
 import httpx
 import numpy as np
 
+from .downloads import DownloadProgress, make_hf_progress_tqdm_class
 from .tts import optimal_ort_threads
 
 logger = logging.getLogger("mockery.redactor")
@@ -631,11 +634,47 @@ class RampartRedactor:
             "error": self._last_error,
         }
 
-    def ensure_downloaded(self) -> dict[str, Any]:
+    def ensure_downloaded(
+        self,
+        *,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         from huggingface_hub import hf_hub_download
 
+        tqdm_cls = (
+            make_hf_progress_tqdm_class(
+                on_progress,
+                approx_total_bytes=RAMPART_APPROX_MB * 1024 * 1024,
+                cancel_event=cancel_event,
+            )
+            if (on_progress is not None or cancel_event is not None)
+            else None
+        )
+        supports_tqdm = False
+        if tqdm_cls is not None:
+            try:
+                params = inspect.signature(hf_hub_download).parameters
+                supports_tqdm = "tqdm_class" in params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                )
+            except (TypeError, ValueError):
+                supports_tqdm = False
         for rel in RAMPART_FILES:
-            hf_hub_download(RAMPART_REPO_ID, rel)
+            if cancel_event is not None and cancel_event.is_set():
+                from .downloads import DownloadCancelledError
+
+                raise DownloadCancelledError("Download cancelled.")
+            if tqdm_cls is not None and supports_tqdm:
+                hf_hub_download(RAMPART_REPO_ID, rel, tqdm_class=tqdm_cls)
+            else:
+                hf_hub_download(RAMPART_REPO_ID, rel)
+        if cancel_event is not None and cancel_event.is_set():
+            from .downloads import DownloadCancelledError
+
+            raise DownloadCancelledError("Download cancelled.")
+        if on_progress is not None:
+            on_progress(DownloadProgress(phase="loading", percent=100.0, cancellable=False).to_dict())
         with self._lock:
             self._cached_paths = None
             self._cached_paths_key = None

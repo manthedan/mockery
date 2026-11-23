@@ -15,13 +15,20 @@ import tempfile
 import threading
 import wave
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import httpx
 import numpy as np
 
+from .downloads import (
+    DEFAULT_BACKOFF_BASE_S,
+    DEFAULT_MAX_ATTEMPTS,
+    DownloadCancelledError,
+    MultiFileProgressTracker,
+    download_verified_file,
+)
 from .speech_text import speak_text
 
 logger = logging.getLogger("mockery.tts")
@@ -243,44 +250,25 @@ def _download_verified_asset(
     expected_sha256: str,
     *,
     client: httpx.Client | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    backoff_base_s: float = DEFAULT_BACKOFF_BASE_S,
+    progress_cb: Callable[[int, int | None], None] | None = None,
+    retry_cb: Callable[[int, int, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Path:
-    """Stream an HTTPS asset to a temp file, verify SHA256, and atomically move into place."""
-    if dest.is_file() and _sha256_file(dest) == expected_sha256:
-        return dest
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = dest.with_suffix(dest.suffix + ".tmp")
-    own_client = client is None
-    http = client or httpx.Client(
-        follow_redirects=True,
-        timeout=httpx.Timeout(connect=20.0, read=120.0, write=20.0, pool=20.0),
+    """Stream an HTTPS asset with retries/resume, verify SHA256, and atomically move into place."""
+    path, _size = download_verified_file(
+        url,
+        dest,
+        expected_sha256,
+        client=client,
+        max_attempts=max_attempts,
+        backoff_base_s=backoff_base_s,
+        progress_cb=progress_cb,
+        retry_cb=retry_cb,
+        cancel_event=cancel_event,
     )
-    try:
-        hasher = hashlib.sha256()
-        with http.stream("GET", url) as resp:
-            resp.raise_for_status()
-            with tmp_path.open("wb") as out:
-                for chunk in resp.iter_bytes(chunk_size=1024 * 256):
-                    if chunk:
-                        out.write(chunk)
-                        hasher.update(chunk)
-        digest = hasher.hexdigest()
-        if digest != expected_sha256:
-            raise RuntimeError(
-                f"Checksum mismatch for {dest.name}: expected {expected_sha256[:12]}…, got {digest[:12]}…"
-            )
-        os.replace(tmp_path, dest)
-        return dest
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
-    finally:
-        if own_client:
-            http.close()
+    return path
 
 
 class LocalTTSEngine:
@@ -372,7 +360,15 @@ class LocalTTSEngine:
     def is_phonon_available(self) -> bool:
         return self._has_phonon_runtime()
 
-    def install_kokoro(self, *, client: httpx.Client | None = None) -> bool:
+    def install_kokoro(
+        self,
+        *,
+        client: httpx.Client | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        backoff_base_s: float = DEFAULT_BACKOFF_BASE_S,
+    ) -> bool:
         if not self._has_kokoro_runtime():
             raise RuntimeError(
                 "Package 'kokoro-onnx' is not installed in this environment. "
@@ -380,11 +376,32 @@ class LocalTTSEngine:
             )
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        tracker = MultiFileProgressTracker(
+            file_count=len(KOKORO_ASSETS),
+            approx_total_bytes=KOKORO_APPROX_MB * 1024 * 1024,
+            on_update=on_progress,
+        )
         for filename, url, sha256_hex in KOKORO_ASSETS:
-            _download_verified_asset(url, self.models_dir / filename, sha256_hex, client=client)
+            tracker.start_file(filename)
+            dest_path = self.models_dir / filename
+            _download_verified_asset(
+                url,
+                dest_path,
+                sha256_hex,
+                client=client,
+                max_attempts=max_attempts,
+                backoff_base_s=backoff_base_s,
+                progress_cb=tracker.on_file_progress,
+                retry_cb=tracker.on_file_retry,
+                cancel_event=cancel_event,
+            )
+            tracker.finish_file(dest_path.stat().st_size if dest_path.is_file() else 0)
 
+        if cancel_event is not None and cancel_event.is_set():
+            raise DownloadCancelledError("Download cancelled.")
         if not self.is_kokoro_installed():
             raise RuntimeError("Kokoro model files failed to download.")
+        tracker.set_phase("loading", cancellable=False)
         if not self._ensure_kokoro_loaded():
             raise RuntimeError(self._kokoro_error or "Kokoro-82M failed to initialize after download.")
         return True
@@ -399,7 +416,15 @@ class LocalTTSEngine:
                 return True
             return False
 
-    def install_phonon(self, *, client: httpx.Client | None = None) -> bool:
+    def install_phonon(
+        self,
+        *,
+        client: httpx.Client | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        backoff_base_s: float = DEFAULT_BACKOFF_BASE_S,
+    ) -> bool:
         if not self._has_phonon_runtime():
             raise RuntimeError(
                 "Package 'ptts' is not installed in this environment. "
@@ -407,11 +432,32 @@ class LocalTTSEngine:
             )
 
         self.phonon_dir.mkdir(parents=True, exist_ok=True)
+        tracker = MultiFileProgressTracker(
+            file_count=len(PHONON_ASSETS),
+            approx_total_bytes=PHONON_APPROX_MB * 1024 * 1024,
+            on_update=on_progress,
+        )
         for filename, url, sha256_hex in PHONON_ASSETS:
-            _download_verified_asset(url, self.phonon_dir / filename, sha256_hex, client=client)
+            tracker.start_file(filename)
+            dest_path = self.phonon_dir / filename
+            _download_verified_asset(
+                url,
+                dest_path,
+                sha256_hex,
+                client=client,
+                max_attempts=max_attempts,
+                backoff_base_s=backoff_base_s,
+                progress_cb=tracker.on_file_progress,
+                retry_cb=tracker.on_file_retry,
+                cancel_event=cancel_event,
+            )
+            tracker.finish_file(dest_path.stat().st_size if dest_path.is_file() else 0)
 
+        if cancel_event is not None and cancel_event.is_set():
+            raise DownloadCancelledError("Download cancelled.")
         if not self.is_phonon_installed():
             raise RuntimeError("Phonon-31M model files failed to download.")
+        tracker.set_phase("loading", cancellable=False)
         if not self._ensure_phonon_loaded():
             raise RuntimeError(self._phonon_error or "Phonon-31M failed to initialize after download.")
         return True
