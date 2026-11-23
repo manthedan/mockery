@@ -113,9 +113,10 @@ def test_the_same_answer_scores_differently_under_each_rubric() -> None:
     assert star["learning"] == "strong"
     no_task = STAR_ANSWER.replace("My job was to get the error rate down before the holiday deadline. ", "")
     assert estimate_carl_heuristic(no_task, rubric=STAR)["action"] == "missing"
+    task = STAR.signal("action")
     assert build_heuristic_nudge(estimate_carl_heuristic(no_task, rubric=STAR), "behavioral", STAR)[
         "message"
-    ] == STAR.signal("action").nudge
+    ] == f"{task.earned_praise} {task.nudge}"
 
 
 def test_general_questions_use_their_own_signals(tmp_path: Path) -> None:

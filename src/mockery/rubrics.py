@@ -26,6 +26,8 @@ class Signal:
     label: str
     nudge: str = ""
     """Offline coach tip when this signal has not landed yet; empty when it is never the tip."""
+    earned_praise: str = ""
+    """Said before the tip only when the signal just before this one did land."""
     nudge_tone: Literal["tip", "encourage"] = "tip"
 
 
@@ -43,6 +45,8 @@ class Rubric:
     drill_order: tuple[str, ...]
     """Slots checked, in turn, for the one thing most worth a retry."""
     all_landed: str
+    nothing_yet: str
+    """Offline coach line when the answer was too short to coach."""
     ready_tip: str
     reframe_tip: str
     primer: str
@@ -89,6 +93,10 @@ class Rubric:
                 out[signal.slot] = level
         return out
 
+    def preceding(self, slot: str) -> Signal | None:
+        index = SIGNAL_SLOTS.index(slot)
+        return self.signals[index - 1] if index > 0 else None
+
     def drill_slot(self, signals: dict[str, str]) -> str:
         """The first signal that is not yet strong, in drill order; the first of all when every one is."""
         for slot in self.drill_order:
@@ -109,17 +117,16 @@ CARL = Rubric(
             "action",
             "A",
             "Action",
-            nudge="Good setup on the context! Now zoom into what YOU specifically decided and built.",
+            nudge="Now zoom into what YOU specifically decided and built.",
+            earned_praise="Good setup on the context!",
         ),
         Signal(
             "result",
             "result",
             "R",
             "Result",
-            nudge=(
-                "Strong ownership on the actions — next, anchor it with a concrete result or number "
-                "(time saved, revenue, adoption, quality)."
-            ),
+            nudge="Next, anchor it with a concrete result or number (time saved, revenue, adoption, quality).",
+            earned_praise="Strong ownership on the actions.",
         ),
         Signal(
             "learning",
@@ -127,9 +134,10 @@ CARL = Rubric(
             "L",
             "Learning",
             nudge=(
-                "Solid C-A-R foundation! Adding a 1-sentence Learning ('what I'd do differently or kept "
-                "doing since') makes strong answers shine."
+                "Adding a 1-sentence Learning ('what I'd do differently or kept doing since') "
+                "makes strong answers shine."
             ),
+            earned_praise="Solid C-A-R foundation!",
             nudge_tone="encourage",
         ),
     ),
@@ -137,6 +145,7 @@ CARL = Rubric(
     nudge_order=("action", "result", "learning"),
     drill_order=("result", "learning", "action", "context"),
     all_landed="Great CARL structure — clear context, personal ownership, measurable impact, and genuine reflection!",
+    nothing_yet="There isn't an answer to coach yet. Pick one real example and start with where you were and what was at stake.",
     ready_tip=(
         "Think out loud. Set the context, show what you drove, and close with a measurable result "
         "and what you learned."
@@ -165,30 +174,31 @@ STAR = Rubric(
             "task",
             "T",
             "Task",
-            nudge="Good scene-setting! Now say what was yours to do — the goal or responsibility you personally owned.",
+            nudge="Now say what was yours to do — the goal or responsibility you personally owned.",
+            earned_praise="Good scene-setting!",
         ),
         Signal(
             "result",
             "action",
             "A",
             "Action",
-            nudge="The task is clear — now walk through what YOU specifically did, step by step.",
+            nudge="Now walk through what YOU specifically did, step by step.",
+            earned_praise="The task is clear.",
         ),
         Signal(
             "learning",
             "result",
             "R",
             "Result",
-            nudge=(
-                "Strong ownership on the actions — close with a concrete result or number "
-                "(time saved, revenue, adoption, quality)."
-            ),
+            nudge="Close with a concrete result or number (time saved, revenue, adoption, quality).",
+            earned_praise="Strong ownership on the actions.",
         ),
     ),
     grader="star",
     nudge_order=("action", "result", "learning"),
     drill_order=("learning", "result", "action", "context"),
     all_landed="Great STAR structure — a clear situation, the task you owned, your own actions, and a measurable result!",
+    nothing_yet="There isn't an answer to coach yet. Pick one real example and start with the situation and what was at stake.",
     ready_tip=(
         "Think out loud. Set the situation, name the task that was yours, walk through what you did, "
         "and close with the result."
@@ -225,14 +235,16 @@ GENERAL = Rubric(
             "specific",
             "S",
             "Specific",
-            nudge="Good, clear answer — now back it with one concrete reason or a short example.",
+            nudge="Now back it with one concrete reason or a short example.",
+            earned_praise="Good, clear answer.",
         ),
         Signal(
             "result",
             "fit",
             "F",
             "Fit",
-            nudge="Nice and specific — tie it to this role or team so it is clearly about them, not any job.",
+            nudge="Tie it to this role or team so it is clearly about them, not any job.",
+            earned_praise="Nice and specific.",
         ),
         Signal(
             "learning",
@@ -246,6 +258,7 @@ GENERAL = Rubric(
     nudge_order=("context", "action", "result", "learning"),
     drill_order=("context", "action", "result", "learning"),
     all_landed="That was direct, specific, clearly about this role, and tight. Exactly what these questions call for.",
+    nothing_yet="There isn't an answer to coach yet. Say your answer in one plain sentence, then give one reason for it.",
     ready_tip="Answer the question in your first sentence, give one concrete reason, and tie it to this role.",
     reframe_tip="Try this shape: '[Your answer in one sentence]. For example, [one concrete detail]. That matters here because [link to the role].'",
     primer="Answer the question first, back it with one concrete reason or example, and tie it to this role.",
@@ -273,6 +286,7 @@ SYSTEM_DESIGN = Rubric(
     nudge_order=(),
     drill_order=("result", "learning", "action", "context"),
     all_landed="Requirements, architecture, scale and tradeoffs all came through clearly.",
+    nothing_yet="There isn't much to go on yet. Start by saying the requirements and the scale you are designing for.",
     ready_tip=(
         "Think out loud. Pin down requirements first, then sketch the architecture and name your tradeoffs."
     ),
@@ -301,6 +315,7 @@ CODING = Rubric(
     nudge_order=(),
     drill_order=("result", "learning", "action", "context"),
     all_landed="Approach, correctness, complexity and edge cases all came through clearly.",
+    nothing_yet="There isn't much to go on yet. Say your approach out loud before you write any code.",
     ready_tip="Think out loud. State your approach and its complexity before you write the first line.",
     reframe_tip="Try closing with: 'This runs in [time] and [space], and the edge case I checked was [X].'",
     primer="Approach → Correctness → Complexity → Edge cases: plan it, make it work, size it, then try to break it.",
@@ -319,6 +334,7 @@ NO_STRUCTURE = Rubric(
     nudge_order=(),
     drill_order=CARL.drill_order,
     all_landed="Good — keep going, and add one concrete detail to whatever you say next.",
+    nothing_yet="There isn't an answer to coach yet. Take a moment, then say the most concrete thing you can about it.",
     ready_tip="Think out loud, and answer the way you would in the room.",
     reframe_tip="Try saying the same point again in two sentences, with one concrete detail.",
     primer="Clear, specific answers in your own words are what land.",
