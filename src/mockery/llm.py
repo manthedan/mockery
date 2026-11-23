@@ -3216,7 +3216,7 @@ class InterviewCopilotLLM:
         (`build_practice_turn_messages` -> `_complete_messages`), giving optimal prompt caching on
         both persistent `agy`/`claude` CLI workers and direct HTTP APIs.
         """
-        from .practice import build_heuristic_nudge, estimate_carl_heuristic
+        from .practice import build_heuristic_nudge, estimate_carl_heuristic, said_too_little
 
         if session is not None:
             rubric = session.config.rubric
@@ -3224,27 +3224,40 @@ class InterviewCopilotLLM:
         follow_ups = list(current_question.get("follow_ups") or [])
         max_followups = 3 if interview_type in ("system_design", "coding") else 2
 
+        # In a conversation round a few words is not an answer, so it is neither thanked nor built on.
+        no_answer = interview_type not in ("system_design", "coding") and said_too_little(candidate_answer)
+
         def _fallback() -> dict[str, Any]:
-            if follow_up_count < len(follow_ups) and follow_up_count < max_followups:
+            if no_answer and follow_up_count < max_followups:
+                reply = (
+                    "No rush — take a moment and give me one real example. "
+                    f"I'll ask again: {current_question.get('prompt', '')}"
+                )
+                advance = False
+            elif not no_answer and follow_up_count < len(follow_ups) and follow_up_count < max_followups:
                 reply = f"Thanks for walking through that. {follow_ups[follow_up_count]}"
                 advance = False
             elif next_question is not None:
-                reply = (
-                    "That gives me a clear picture — thank you! Let's move on to our next question: "
-                    f"{next_question.get('prompt', '')}"
+                lead = (
+                    "Let's leave that one there and move on to the next question: "
+                    if no_answer
+                    else "That gives me a clear picture — thank you! Let's move on to our next question: "
                 )
+                reply = f"{lead}{next_question.get('prompt', '')}"
                 advance = True
             else:
-                reply = (
-                    "Thank you for sharing that — you covered a lot of thoughtful ground today! "
-                    "Whenever you're ready, click End & Debrief to review your coaching report."
+                lead = (
+                    "Let's stop there for today. "
+                    if no_answer
+                    else "Thank you for sharing that — you covered a lot of thoughtful ground today! "
                 )
+                reply = f"{lead}Whenever you're ready, click End & Debrief to review your coaching report."
                 advance = True
             return {
                 "interviewer_reply": reply,
                 "should_advance": advance,
                 "carl_signals": heuristic_carl,
-                "coach_nudge": build_heuristic_nudge(heuristic_carl, interview_type, rubric),
+                "coach_nudge": build_heuristic_nudge(heuristic_carl, interview_type, rubric, candidate_answer),
             }
 
         if not self.config.is_configured:
@@ -3372,7 +3385,7 @@ class InterviewCopilotLLM:
             nudge = (
                 {"tone": nudge_tone, "message": nudge_msg}
                 if nudge_msg
-                else build_heuristic_nudge(merged_carl, interview_type, rubric)
+                else build_heuristic_nudge(merged_carl, interview_type, rubric, candidate_answer)
             )
             out: dict[str, Any] = {
                 "interviewer_reply": reply,
@@ -3491,6 +3504,8 @@ class InterviewCopilotLLM:
         weakest_q: dict[str, Any] | None = None
         weakest_dim = rubric.drill_order[0]
         finish = f"your {rubric.name} finish" if rubric.named_framework else "how you land each answer"
+        earned_strengths: list[str] = []
+        anything_to_coach = False
 
         for q in questions:
             q_turns = [t for t in turns if t.get("question_id") == q.get("id") and t.get("role") == "candidate"]
@@ -3502,14 +3517,33 @@ class InterviewCopilotLLM:
             if weakest_q is None or carl.get(focus_dim) == "missing":
                 weakest_q = q
                 weakest_dim = focus_dim
+            q_title = q.get("title") or q.get("competency") or "Practice Question"
+            words_said = sum(len(str(t.get("text") or "").split()) for t in q_turns)
+            landed = [s.label for s in rubric.signals if rubric.coached and carl.get(s.slot) == "strong"]
+            touched = [s.label for s in rubric.signals if rubric.coached and carl.get(s.slot) == "partial"]
+            if landed:
+                strength = f"Your {_join_labels(landed)} came through clearly."
+                earned_strengths.append(f"{_join_labels(landed)} came through clearly in “{q_title}”.")
+            elif touched:
+                strength = f"You touched on {_join_labels(touched)}, which gives you something to build on."
+            elif not rubric.coached and words_said >= 40:
+                strength = "You gave this a full answer in your own words."
+            else:
+                strength = ""
+            answered = bool(landed or touched or words_said >= 40)
+            anything_to_coach = anything_to_coach or answered
             q_reviews_fb.append(
                 {
                     "question_id": q.get("id"),
-                    "title": q.get("title") or q.get("competency") or "Practice Question",
+                    "title": q_title,
                     "prompt": q.get("prompt") or "",
                     "carl": carl,
-                    "strength": "You engaged thoughtfully with the prompt and kept the story clear and grounded.",
-                    "coaching_tip": f"Next pass, spend 15 extra seconds sharpening your {focus_label} so a hiring panel immediately hears your {target_level} impact.",
+                    "strength": strength,
+                    "coaching_tip": (
+                        f"Next pass, spend 15 extra seconds sharpening your {focus_label} so a hiring panel immediately hears your {target_level} impact."
+                        if answered
+                        else rubric.nothing_yet
+                    ),
                     "carl_reframe": rubric.reframe_tip,
                 }
             )
@@ -3517,13 +3551,18 @@ class InterviewCopilotLLM:
         weakest_label = rubric.signal(weakest_dim).label if rubric.coached else "main point"
         fallback_debrief: dict[str, Any] = {
             "overall_encouragement": (
-                f"Great rep! Practicing out loud for {role_title} ({target_level}) builds real fluency — "
-f"you already have solid instincts, and tightening {finish} will make your answers land with even more confidence."
+                (
+                    f"Good rep. Practicing out loud for {role_title} ({target_level}) builds real fluency, "
+                    f"and tightening {finish} will make your answers land with more confidence."
+                )
+                if anything_to_coach
+                else (
+                    "These answers were too short to coach, so there is nothing to score yet. "
+                    "Pick one real example for each question and talk it through for a minute or two; "
+                    "then this debrief will have something to work with."
+                )
             ),
-            "top_strengths": [
-                "You stayed composed and communicated your reasoning clearly.",
-                "You provided concrete context rather than speaking only in abstractions.",
-            ],
+            "top_strengths": earned_strengths[:3],
             "carl_primer": rubric.primer,
             "question_reviews": q_reviews_fb,
             "retry_drill": {
@@ -3788,6 +3827,12 @@ f"you already have solid instincts, and tightening {finish} will make your answe
 
 _probe_guidance_for = probe_guidance_for
 _calibration_rubric_for = calibration_rubric_for
+
+
+def _join_labels(labels: list[str]) -> str:
+    if len(labels) <= 2:
+        return " and ".join(labels)
+    return f"{', '.join(labels[:-1])} and {labels[-1]}"
 
 
 THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)

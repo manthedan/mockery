@@ -265,7 +265,8 @@ _ROLE_FIT_CUES = (
 
 def _setting_level(low: str, wc: int) -> str:
     has_setting = any(k in low for k in _SETTING_CUES)
-    return "strong" if (has_setting and wc >= 20) else ("partial" if has_setting or wc >= 12 else "missing")
+    # Length alone earns partial credit only for a long answer; a dozen words of filler set no scene.
+    return "strong" if (has_setting and wc >= 20) else ("partial" if has_setting or wc >= 40 else "missing")
 
 
 def _own_action_level(low: str, wc: int) -> str:
@@ -355,26 +356,40 @@ def estimate_carl_heuristic(
     }
 
 
+MIN_COACHABLE_WORDS = 8
+"""Fewer words than this is not an answer: nothing is praised, and the question is asked again."""
+
+
+def said_too_little(answer_text: str | None) -> bool:
+    return len((answer_text or "").split()) < MIN_COACHABLE_WORDS
+
+
 def build_heuristic_nudge(
     carl: dict[str, str],
     interview_type: str,
     rubric: Rubric = CARL,
+    answer_text: str | None = None,
 ) -> dict[str, str]:
-    """Warm, encouraging deterministic coach nudge when LLM is unavailable."""
+    """Deterministic coach nudge when no model is connected. It praises only what the answer earned."""
+    too_little = answer_text is not None and said_too_little(answer_text)
+    # Short remarks are normal while drawing or coding, so a studio round keeps its tip and drops the praise.
     if interview_type == "system_design":
-        return {
-            "tone": "tip",
-            "message": "Good momentum — call out one concrete bottleneck (traffic, storage, or failure mode) and how you'd mitigate it.",
-        }
+        tip = "call out one concrete bottleneck (traffic, storage, or failure mode) and how you'd mitigate it."
+        return {"tone": "tip", "message": tip.capitalize() if too_little else f"Good momentum — {tip}"}
     if interview_type == "coding":
-        return {
-            "tone": "tip",
-            "message": "Nice thinking out loud — state the time/space complexity and check an edge case before finalizing.",
-        }
+        tip = "state the time/space complexity and check an edge case before finalizing."
+        return {"tone": "tip", "message": tip.capitalize() if too_little else f"Nice thinking out loud — {tip}"}
+    if too_little:
+        return {"tone": "tip", "message": rubric.nothing_yet}
     for slot in rubric.nudge_order:
         if carl.get(slot) == "missing":
             signal = rubric.signal(slot)
-            return {"tone": signal.nudge_tone, "message": signal.nudge}
+            before = rubric.preceding(slot)
+            earned = before is not None and carl.get(before.slot, "missing") != "missing"
+            message = f"{signal.earned_praise} {signal.nudge}" if earned and signal.earned_praise else signal.nudge
+            return {"tone": signal.nudge_tone if earned else "tip", "message": message}
+    if all(carl.get(slot, "missing") == "missing" for slot in SIGNAL_SLOTS):
+        return {"tone": "tip", "message": rubric.reframe_tip}
     return {"tone": "encourage", "message": rubric.all_landed}
 
 
