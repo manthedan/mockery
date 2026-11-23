@@ -103,3 +103,58 @@ def test_short_remarks_are_normal_in_a_coding_round(tmp_path: Path) -> None:
     session = _start(client, interview_type="coding")
     turn = client.post(f"/api/practice/{session['id']}/turn", json={"text": "Can I use a heap?"}).json()
     assert "I'll ask again" not in turn["interviewer_turn"]["text"]
+
+
+def _client_with_failing_model(tmp_path: Path, error: Exception) -> TestClient:
+    client = _offline_client(tmp_path)
+    llm = client.app.state.runtime.llm
+    llm.config.provider = "openai"
+    llm.config.api_key = "test-key"
+
+    async def _fail(*_: object, **__: object) -> str:
+        raise error
+
+    llm._complete_text = _fail  # type: ignore[method-assign]
+    llm._complete_messages = _fail  # type: ignore[method-assign]
+    return client
+
+
+def test_a_built_in_reply_says_the_connected_ai_failed_and_why(tmp_path: Path) -> None:
+    client = _client_with_failing_model(tmp_path, RuntimeError("Error code: 401 - Invalid API key"))
+    session = _start(client, interview_type="behavioral")
+
+    turn = client.post(f"/api/practice/{session['id']}/turn", json={"text": REAL_ANSWER}).json()
+    reason = turn["interviewer_turn"]["fallback_reason"]
+    assert reason.startswith("Your AI did not respond.") and "API key" in reason
+    assert turn["session"]["turns"][-1]["fallback_reason"] == reason  # saved with the session
+
+    debrief = client.post(f"/api/practice/{session['id']}/debrief", json={}).json()["session"]["debrief"]
+    assert "API key" in debrief["fallback_reason"]
+
+    retry = client.post(f"/api/practice/{session['id']}/retry", json={"answer_text": REAL_ANSWER}).json()
+    assert "API key" in retry["session"]["retry_history"][-1]["feedback"]["fallback_reason"]
+
+
+def test_a_garbled_model_reply_is_reported_as_unusable(tmp_path: Path) -> None:
+    client = _offline_client(tmp_path)
+    llm = client.app.state.runtime.llm
+    llm.config.provider = "openai"
+    llm.config.api_key = "test-key"
+
+    async def _garble(*_: object, **__: object) -> str:
+        return "Sure! Here is my feedback, but not as JSON."
+
+    llm._complete_text = _garble  # type: ignore[method-assign]
+    llm._complete_messages = _garble  # type: ignore[method-assign]
+    session = _start(client, interview_type="behavioral")
+    turn = client.post(f"/api/practice/{session['id']}/turn", json={"text": REAL_ANSWER}).json()
+    assert "not in a form Mockery could use" in turn["interviewer_turn"]["fallback_reason"]
+
+
+def test_no_reason_is_given_when_no_ai_is_connected(tmp_path: Path) -> None:
+    client = _offline_client(tmp_path)
+    session = _start(client, interview_type="behavioral")
+    turn = client.post(f"/api/practice/{session['id']}/turn", json={"text": REAL_ANSWER}).json()
+    assert turn["interviewer_turn"]["fallback_reason"] == ""
+    debrief = client.post(f"/api/practice/{session['id']}/debrief", json={}).json()["session"]["debrief"]
+    assert "fallback_reason" not in debrief
