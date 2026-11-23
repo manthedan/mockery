@@ -9,9 +9,10 @@ import {
 } from "./state_machines.js";
 
 const CATEGORY_LABELS = {
-  behavioral: "Behavioral & Leadership",
+  behavioral: "Behavioral",
   system_design: "System Design",
   coding: "Coding",
+  general: "General",
 };
 
 const LABEL_FRIENDLY = {
@@ -107,7 +108,7 @@ export function createProfileAddonsController({
 
   /* Practice Home opens aligned with the active target job: while the role headline is
      still the untouched stock default (or the label this function last wrote), adopt
-     the JD's role and level. A hand edit ends the auto-sync; "Use JD role" snaps back. */
+     the JD's role and level. A hand edit ends the auto-sync; "Use listing role" snaps back. */
   function autoAlignHomeToJd(jd) {
     const input = el("setupRoleInput");
     if (!jd?.title || !input || local.roleEditedByHand) return;
@@ -151,18 +152,18 @@ export function createProfileAddonsController({
             : "Resume added · kept private"
         );
       }
-      if (jd && !sum?.has_resume) parts.push("Target job saved");
+      if (jd && !sum?.has_resume) parts.push("Job listing saved");
       if (parts.length > 0) {
         homeSummary.textContent = parts.join("  ·  ");
         homeSummary.classList.add("is-populated");
       } else {
-        homeSummary.textContent = "Add your resume and a target job for tailored questions";
+        homeSummary.textContent = "Add your resume and a job listing for tailored questions";
         homeSummary.classList.remove("is-populated");
       }
     }
 
     // Target job line under the role headline: shows what the session is aimed at,
-    // and offers the one-tap "Use JD role" chip only while the role differs.
+    // and offers the one-tap "Use listing role" chip only while the role differs.
     const jdLine = el("homeJdTargetLine");
     const jdText = el("homeJdTargetText");
     autoAlignHomeToJd(jd);
@@ -174,7 +175,7 @@ export function createProfileAddonsController({
     }
     if (jdText && jd) {
       const label = jd.company ? `${jd.title} · ${jd.company}` : jd.title;
-      jdText.textContent = applied ? `From your active target job · ${jd.company || jd.title}` : `Target job: ${label}`;
+      jdText.textContent = applied ? `From your active job listing · ${jd.company || jd.title}` : `Job listing: ${label}`;
       jdText.title = label;
     }
     if (homeApplyBtn) {
@@ -599,7 +600,7 @@ export function createProfileAddonsController({
     const activeId = local.profile?.active_jd_id || listings[0]?.id || null;
 
     if (listings.length === 0) {
-      listEl.innerHTML = `<div class="profile-empty-note">No target job listings saved yet. Paste a Greenhouse, Lever, Ashby, or careers URL above — or paste the job description text.</div>`;
+      listEl.innerHTML = `<div class="profile-empty-note">No job listings saved yet. Paste a Greenhouse, Lever, Ashby, or careers URL above, or paste the listing text.</div>`;
       return;
     }
 
@@ -666,7 +667,7 @@ export function createProfileAddonsController({
     const text = local.pasteJdOpen ? textInput?.value?.trim() || "" : "";
     const title = local.pasteJdOpen ? titleInput?.value?.trim() || "" : "";
     const company = local.pasteJdOpen ? companyInput?.value?.trim() || "" : "";
-    const target_level = levelSelect?.value || "L5";
+    const target_level = levelSelect?.value || "Senior";
 
     if (!url && !text) {
       showToast("Paste a job listing URL or switch to Paste text.");
@@ -887,7 +888,7 @@ export function createProfileAddonsController({
               <span class="bank-cat-pill">${escapeHtml(catLabel)}</span>
               ${levels ? `<span class="bank-level-pill">${escapeHtml(levels)}</span>` : ""}
               ${q.difficulty ? `<span class="bank-level-pill">${escapeHtml(String(q.difficulty))}</span>` : ""}
-              ${jdScore > 0 ? `<span class="bank-jd-match">Matches your target job</span>` : ""}
+              ${jdScore > 0 ? `<span class="bank-jd-match">Matches your job listing</span>` : ""}
             </div>
             <p class="bank-item-prompt">${renderInlineCode(q.prompt)}</p>
             ${
@@ -1163,7 +1164,7 @@ export function createProfileAddonsController({
         showToast(`Role set to ${jd.title}.`, 1800);
       }
     });
-    // Keep the "Use JD role" chip honest as the role headline is edited by hand.
+    // Keep the "Use listing role" chip honest as the role headline is edited by hand.
     el("setupRoleInput")?.addEventListener("input", () => {
       local.roleEditedByHand = true;
       if (state.profileSummary) renderProfileSummaryIndicators(state.profileSummary);

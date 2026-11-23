@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -430,14 +431,20 @@ def test_ux92_interactive_ergonomics_contract():
     assert 'classList.toggle("is-debriefing", isDebriefing)' in practice_js
     assert "Finalizing your coaching debrief…" not in practice_js
 
-    # Home ↔ active target JD alignment (role + level), hand edits always win
+    # Home ↔ active job listing alignment (role + level), hand edits always win
     assert "autoAlignHomeToJd" in profile_js
     assert "roleEditedByHand" in profile_js
-    assert "From your active target job" in profile_js
+    assert "From your active job listing" in profile_js
     assert "setTargetLevel" in practice_js
     assert "levelTouched" in practice_js
     assert "onLevelApply" in app_js
     assert "isPracticeHome" in app_js
-    # Stock defaults stay intact for an empty profile
-    assert 'value="Senior Software Engineer"' in html
-    assert 'class="seg-opt active" data-practice-level="L5"' in html
+    # An empty profile starts role-neutral: no prefilled job title, no company-ladder codes
+    assert "Senior Software Engineer" not in html
+    assert 'placeholder="What role is this for?"' in html
+    assert 'class="seg-opt active" data-practice-level="Senior"' in html
+    assert not re.search(r'data-practice-level="(L\d|EM)"', html)
+    # One name for the thing a candidate saves: "job listing", never the "JD" abbreviation
+    for visible in (html, practice_js, profile_js):
+        assert "Resume + JD" not in visible and "Use JD role" not in visible and "JD match" not in visible
+    assert ">Resume + job listing</button>" in html

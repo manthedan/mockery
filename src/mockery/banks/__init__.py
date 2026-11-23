@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..levels import normalize_level
+
 logger = logging.getLogger("mockery.banks")
 
 BUNDLED_BANKS_DIR = Path(__file__).resolve().parent
@@ -20,7 +22,8 @@ _Q_WORD_RE = re.compile(r"[a-z0-9]{4,20}")
 class _IndexedQuestion:
     question_id: str
     raw: dict[str, Any]
-    levels_upper: frozenset[str]
+    levels: tuple[str, ...]
+    levels_lower: frozenset[str]
     competency_lower: str
     jd_tags_lower: tuple[str, ...]
     text_tokens: tuple[str, ...]
@@ -38,7 +41,7 @@ class _CachedPack:
 
 class QuestionBankStore:
     """
-    Loads bundled JSON question bank packs (`behavioral`, `system_design`, `coding`) plus
+    Loads bundled JSON question bank packs (`behavioral`, `general`, `system_design`, `coding`) plus
     any user-contributed `*.json` packs dropped into `<data_root>/banks/`.
     Caches parsed packs and pre-tokenized JD indices keyed by `(mtime_ns, size)`.
     """
@@ -102,7 +105,7 @@ class QuestionBankStore:
                         if not isinstance(q, dict) or not q.get("id"):
                             continue
                         qid = str(q["id"])
-                        levels_upper = frozenset(str(lvl).upper() for lvl in (q.get("levels") or []))
+                        levels = tuple(dict.fromkeys(normalize_level(lvl) for lvl in (q.get("levels") or [])))
                         comp_lower = str(q.get("competency") or "").lower()
                         jd_tags_lower = tuple(str(tag).lower() for tag in (q.get("jd_tags") or []))
                         text_blob = f"{q.get('title', '')} {q.get('competency', '')} {q.get('prompt', '')}".lower()
@@ -110,7 +113,8 @@ class QuestionBankStore:
                         iq = _IndexedQuestion(
                             question_id=qid,
                             raw=q,
-                            levels_upper=levels_upper,
+                            levels=levels,
+                            levels_lower=frozenset(lvl.lower() for lvl in levels),
                             competency_lower=comp_lower,
                             jd_tags_lower=jd_tags_lower,
                             text_tokens=text_tokens,
@@ -156,7 +160,7 @@ class QuestionBankStore:
         jd_text: str | None = None,
     ) -> list[dict[str, Any]]:
         cat_norm = (category or "").strip().lower()
-        lvl_norm = (level or "").strip().upper()
+        lvl_norm = normalize_level(level).lower()
         comp_norm = (competency or "").strip().lower()
         has_jd = bool(jd_text and jd_text.strip())
         jd_lower = jd_text.lower() if has_jd and jd_text is not None else ""
@@ -169,11 +173,12 @@ class QuestionBankStore:
             pack_id = cp.meta["pack_id"]
             pack_cat = cp.meta["category"]
             for iq in cp.indexed_questions:
-                if lvl_norm and iq.levels_upper and lvl_norm not in iq.levels_upper:
+                if lvl_norm and iq.levels_lower and lvl_norm not in iq.levels_lower:
                     continue
                 if comp_norm and comp_norm not in iq.competency_lower:
                     continue
                 item = dict(iq.raw)
+                item["levels"] = list(iq.levels)
                 item["pack_id"] = pack_id
                 item["category"] = pack_cat
                 if has_jd:
@@ -196,6 +201,7 @@ class QuestionBankStore:
             iq = cp.by_id.get(question_id)
             if iq is not None:
                 item = dict(iq.raw)
+                item["levels"] = list(iq.levels)
                 item["pack_id"] = cp.meta["pack_id"]
                 item["category"] = cp.meta["category"]
                 return item

@@ -135,6 +135,8 @@ def _format_question_plan(session: PracticeSession) -> str:
         lines.append(f"  Prompt: {q.prompt}")
         if focus:
             lines.append(f"  CARL / Rubric Focus: {focus}")
+        if q.level_bar:
+            lines.append(f"  Depth expected at {session.config.target_level} level: {q.level_bar}")
         if q.follow_ups:
             lines.append(f"  Suggested follow-up angles: {q.follow_ups}")
     return "\n".join(lines)

@@ -13,7 +13,8 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from ..addons import AddonManager
-from ..models import short_id
+from ..levels import DEFAULT_LEVEL, normalize_level
+from ..models import DEFAULT_PRACTICE_ROLE_TITLE, short_id
 from ..practice import (
     PracticeConfig,
     PracticeQuestionItem,
@@ -36,6 +37,7 @@ from ..state_machines import (
 
 MAX_PRACTICE_TURN_CHARS = 16_000
 MAX_WORKSPACE_CONTEXT_BYTES = 200_000
+MAX_CUSTOM_QUESTION_CHARS = 6_000
 PRACTICE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{3,80}$")
 
 
@@ -44,12 +46,13 @@ class PracticeStartRequest(BaseModel):
     company: str = ""
     interview_type: Literal["behavioral", "system_design", "coding", "general"] = "behavioral"
     question_source: Literal["bank_only", "resume_jd_tailored", "mixed"] = "mixed"
-    target_level: str = "L5"
+    target_level: str = DEFAULT_LEVEL
     coach_style: Literal["supportive", "balanced"] = "supportive"
     live_coach_nudges: bool = True
     voice_enabled: bool = True
     question_count: int = Field(default=4, ge=1, le=8)
     selected_question_id: str | None = None
+    custom_question: str = Field(default="", max_length=MAX_CUSTOM_QUESTION_CHARS)
 
 
 class PracticeTurnRequest(BaseModel):
@@ -262,27 +265,27 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 detail="AI Mock Practice is switched off in Settings → Add-Ons.",
             )
         active_jd = runtime.profiles.active_jd()
-        role_title = body.role_title.strip() or (active_jd.title if active_jd else "Senior Software Engineer")
+        role_title = body.role_title.strip() or (active_jd.title if active_jd else DEFAULT_PRACTICE_ROLE_TITLE)
         company = body.company.strip() or (active_jd.company if active_jd else "")
-        target_level = (body.target_level or (active_jd.target_level if active_jd else "L5")).strip() or "L5"
+        target_level = normalize_level(body.target_level or (active_jd.target_level if active_jd else "")) or DEFAULT_LEVEL
         jd_text = f"{active_jd.title} {active_jd.company}\n{active_jd.text}" if active_jd else ""
         redacted_resume = runtime.profiles.resume_for_llm()
 
-        bank_category = None if body.interview_type == "general" else body.interview_type
         bank_candidates = runtime.banks.list_questions(
-            category=bank_category,
+            category=body.interview_type,
             level=target_level,
             jd_text=jd_text or None,
         )
-        if not bank_candidates and bank_category:
+        if not bank_candidates:
             bank_candidates = runtime.banks.list_questions(
-                category=bank_category,
+                category=body.interview_type,
                 jd_text=jd_text or None,
             )
-        if not bank_candidates:
-            bank_candidates = runtime.banks.list_questions(jd_text=jd_text or None)
 
+        custom_question = body.custom_question.strip()
         selected_qid = body.selected_question_id.strip() if body.selected_question_id else None
+        if custom_question:
+            selected_qid = None
         if selected_qid:
             picked = runtime.banks.get_question(selected_qid)
             if picked is not None:
@@ -311,6 +314,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 redacted_resume=redacted_resume,
                 jd_text=jd_text,
                 selected_question_id=cfg.selected_question_id,
+                custom_question=custom_question,
             )
         except Exception as exc:
             raise HTTPException(

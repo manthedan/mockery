@@ -9,8 +9,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from .levels import DEFAULT_LEVEL, normalize_level
 from .models import short_id
 from .redactor import RampartRedactor, RedactionResult
 
@@ -69,8 +70,13 @@ class JobListingProfile(BaseModel):
     company: str = ""
     url: str = ""
     text: str = ""
-    target_level: str = "L5"
+    target_level: str = DEFAULT_LEVEL
     created_at_ms: int = Field(default_factory=lambda: int(time.time() * 1000))
+
+    @field_validator("target_level", mode="before")
+    @classmethod
+    def _fold_ladder_codes(cls, value: object) -> str:
+        return normalize_level(value) or DEFAULT_LEVEL
 
 
 class CandidateProfileState(BaseModel):
@@ -319,7 +325,7 @@ class CandidateProfileStore:
         company: str = "",
         url: str = "",
         text: str,
-        target_level: str = "L5",
+        target_level: str = DEFAULT_LEVEL,
     ) -> JobListingProfile:
         clean_url = url.strip()
         with self._lock:
@@ -346,7 +352,7 @@ class CandidateProfileStore:
                 company=company.strip(),
                 url=clean_url,
                 text=text.strip()[:20_000],
-                target_level=target_level or "L5",
+                target_level=target_level or DEFAULT_LEVEL,
             )
             self._state.job_listings.insert(0, jd)
             self._state.job_listings = self._state.job_listings[:20]

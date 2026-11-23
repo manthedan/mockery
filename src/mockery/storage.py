@@ -384,7 +384,7 @@ class SessionStore:
                 entry: dict[str, Any] = {
                     "id": str(data["id"]),
                     "created_at_iso": str(data.get("created_at_iso", "")),
-                    "role_title": str(cfg.get("role_title", "Senior Software Engineer")),
+                    "role_title": str(cfg.get("role_title", "")),
                     "interview_type": str(cfg.get("interview_type", "behavioral")),
                     "mode": str(cfg.get("mode", "remote_meet")),
                     "qa_count": len(data.get("qa_groups") or []),
