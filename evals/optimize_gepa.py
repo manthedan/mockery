@@ -69,7 +69,8 @@ TARGET_OBJECTIVES: dict[str, str] = {
         "Optimize the system prompt for a live supportive AI mock interviewer. "
         "Maximize strict raw-JSON output, natural concise spoken replies (1-3 sentences) grounded in "
         "the candidate's answer and workspace context, accurate `should_advance` timing, accurate and "
-        "strictly monotonic `carl_signals`, supportive encouraging coaching tone, and zero code/algorithm spoilers. "
+        "strictly monotonic `carl_signals`, supportive encouraging coaching tone, zero thanks or praise for an "
+        "answer that said nothing (re-ask it kindly instead), and zero code/algorithm spoilers. "
         "MUST keep `{interview_type_label}`, `{role_title}`, `{target_level}`, `{tone_instruction}`, "
         "`{signal_schema}`, `{signal_definitions}`, `{carry_forward_note}`, and `{nudge_examples}` verbatim: "
         "the last four carry the session's answer framework (CARL, STAR, or a general-question rubric)."
@@ -97,6 +98,7 @@ TARGET_OBJECTIVES: dict[str, str] = {
         "Optimize the system prompt for the end-of-practice supportive CARL coaching debrief. "
         "Maximize strict raw-JSON output, verbatim `question_id` preservation for every answered question, "
         "honest evidence-based CARL grading (zero sycophantic inflation of missing Results or Learnings), "
+        "zero invented strengths when an answer said nothing (`top_strengths: []`, empty `strength`), "
         "accurate selection of the weakest question for `retry_drill.question_id`, concrete transcript/workspace grounding, "
         "UI-scannable conciseness (2-3 sentence hero, 1-2 sentence strength/tip, 2-3 sentence CARL reframe), and warm tone."
     ),

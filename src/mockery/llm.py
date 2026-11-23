@@ -3704,9 +3704,10 @@ class InterviewCopilotLLM:
             if not clean_reviews:
                 return {**fallback_debrief, "fallback_reason": built_in_reason(self.config, None)}
 
-            raw_strengths = parsed.get("top_strengths") if isinstance(parsed.get("top_strengths"), list) else []
-            clean_strengths = [str(s).strip() for s in raw_strengths if isinstance(s, str) and s.strip()][:5]
-            if not clean_strengths:
+            # An empty list is the model saying nothing earned praise; only a missing list is filled in.
+            if isinstance(parsed.get("top_strengths"), list):
+                clean_strengths = [str(s).strip() for s in parsed["top_strengths"] if isinstance(s, str) and s.strip()][:5]
+            else:
                 clean_strengths = list(fallback_debrief["top_strengths"])
 
             raw_drill = parsed.get("retry_drill") if isinstance(parsed.get("retry_drill"), dict) else {}

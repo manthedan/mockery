@@ -158,3 +158,79 @@ def test_no_reason_is_given_when_no_ai_is_connected(tmp_path: Path) -> None:
     assert turn["interviewer_turn"]["fallback_reason"] == ""
     debrief = client.post(f"/api/practice/{session['id']}/debrief", json={}).json()["session"]["debrief"]
     assert "fallback_reason" not in debrief
+
+
+def test_the_eval_scores_invented_praise_below_an_honest_reply() -> None:
+    import json
+
+    from evals import metrics
+
+    datasets = Path(__file__).resolve().parents[1] / "evals" / "datasets"
+    debriefs = {row["id"]: row for row in metrics.load_jsonl_dataset(datasets / "practice_debrief.jsonl")}
+    example = debriefs["pd_train_07_non_answer"]
+    honest, _ = metrics.score_example("practice_debrief", example["reference_response"], example)
+    flattering = json.loads(example["reference_response"])
+    flattering["top_strengths"] = ["You showed up and engaged with the question.", "You sounded confident."]
+    flattering["question_reviews"][0]["strength"] = "You engaged with the prompt."
+    inflated, info = metrics.score_example("practice_debrief", json.dumps(flattering), example)
+    assert honest == 1.0 and inflated < 0.8
+    assert any("Invented strengths" in failure for failure in info["failures"])
+
+    replies = {row["id"]: row for row in metrics.load_jsonl_dataset(datasets / "practice_interviewer.jsonl")}
+    example = replies["pi_13_behavioral_filler_non_answer"]
+    honest, _ = metrics.score_example("practice_interviewer", example["reference_response"], example)
+    thanking = json.loads(example["reference_response"])
+    thanking["interviewer_reply"] = "Thanks for engaging with that. Could you name one specific project?"
+    thanked, info = metrics.score_example("practice_interviewer", json.dumps(thanking), example)
+    assert honest == 1.0 and thanked < honest
+    assert any("said nothing" in failure for failure in info["failures"])
+
+
+def test_a_model_that_lists_no_strengths_is_taken_at_its_word(tmp_path: Path) -> None:
+    import json
+
+    client = _offline_client(tmp_path)
+    llm = client.app.state.runtime.llm
+    llm.config.provider = "openai"
+    llm.config.api_key = "test-key"
+    session = _start(client, interview_type="behavioral")
+    question = session["questions"][0]
+
+    async def _reply(*_: object, **__: object) -> str:
+        return json.dumps(
+            {
+                "interviewer_reply": "I have not heard an answer yet. Could you pick one real example?",
+                "should_advance": False,
+                "carl_signals": {"context": "missing", "action": "missing", "result": "missing", "learning": "missing"},
+                "coach_nudge": {"tone": "tip", "message": "Pick one real example and start with the situation."},
+            }
+        )
+
+    async def _debrief(*_: object, **__: object) -> str:
+        return json.dumps(
+            {
+                "overall_encouragement": "There was not enough here to coach yet. Pick one real example next time.",
+                "top_strengths": [],
+                "carl_primer": "CARL gives an answer its shape.",
+                "question_reviews": [
+                    {
+                        "question_id": question["id"],
+                        "title": question["title"],
+                        "prompt": question["prompt"],
+                        "carl": {"context": "missing", "action": "missing", "result": "missing", "learning": "missing"},
+                        "strength": "",
+                        "coaching_tip": "Choose one real project before you start speaking.",
+                        "carl_reframe": "Nobody owned it, so I did X, and Y changed.",
+                    }
+                ],
+                "retry_drill": {"question_id": question["id"], "focus": "One real story", "prompt": "Tell one real story."},
+            }
+        )
+
+    llm._complete_messages = _reply  # type: ignore[method-assign]
+    llm._complete_text = _debrief  # type: ignore[method-assign]
+    client.post(f"/api/practice/{session['id']}/turn", json={"text": "uh oh"})
+    debrief = client.post(f"/api/practice/{session['id']}/debrief", json={}).json()["session"]["debrief"]
+    assert debrief["top_strengths"] == []
+    assert debrief["question_reviews"][0]["strength"] == ""
+    assert "fallback_reason" not in debrief

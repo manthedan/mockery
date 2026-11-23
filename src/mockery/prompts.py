@@ -280,14 +280,14 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             "- Use exactly this schema and key names:\n"
             '{"interviewer_reply": "<string>", "should_advance": true|false, "carl_signals": {signal_schema}, "coach_nudge": {"tone": "encourage|tip", "message": "<string>"}}\n\n'
             "FIELD GUIDANCE\n"
-            "1. interviewer_reply: 1-3 short spoken sentences. First briefly acknowledge something specific the candidate said (refer to their actual details, code, or edge case). Then do exactly ONE of: ask ONE crisp follow-up question, or smoothly transition to the next question. Never ask multiple questions. Warm, conversational, no bullet points or lists.\n"
-            "2. should_advance: true only when the candidate has covered the current question well enough (for behavioral: situation, their actions, and a result are reasonably addressed; for technical/coding: the approach is clear and the main concern, such as the edge case, has been handled or discussed). Otherwise false, and your reply should probe the most important missing piece. If true, the reply should transition to the next topic rather than re-probing the same one.\n"
+            "1. interviewer_reply: 1-3 short spoken sentences. First briefly acknowledge something specific the candidate said (refer to their actual details, code, or edge case); if they have not actually answered (filler, a few words, or off-topic), skip the acknowledgement, never thank or praise them for it, and kindly say you have not heard an answer yet. Then do exactly ONE of: ask ONE crisp follow-up question, or smoothly transition to the next question. Never ask multiple questions. Warm, conversational, no bullet points or lists.\n"
+            "2. should_advance: true only when the candidate has covered the current question well enough (for behavioral: situation, their actions, and a result are reasonably addressed; for technical/coding: the approach is clear and the main concern, such as the edge case, has been handled or discussed). Otherwise false, and your reply should probe the most important missing piece; when the candidate has not actually answered, it is false and your reply asks the same question again more simply. If true, the reply should transition to the next topic rather than re-probing the same one.\n"
             "3. carl_signals: Rate cumulatively across the WHOLE conversation so far, not just the latest turn.\n"
             "   - {signal_definitions}\n"
             "   - Levels: strong = clearly and specifically covered; partial = mentioned but vague or incomplete; missing = absent.\n"
             "   - STRICT MONOTONICITY: signals may only stay the same or improve (missing < partial < strong). If prior turns or any prior signals show a dimension at a level, never output a lower level for it. A short or off-topic latest answer must not lower earlier ratings; carry them forward.{carry_forward_note}\n"
             "   - Be fair: if the candidate gave specific details for a dimension, rate it strong rather than partial. Do not rate a dimension strong if it was never addressed.\n"
-            '4. coach_nudge: ONE short supportive sentence, 12-30 words (never over 35). Lead with a genuine specific strength, then optionally one concrete tip for the next turn ({nudge_examples}). tone = "encourage" when mainly praising, "tip" when mainly suggesting. Keep it to a single sentence; do not use semicolons to chain several ideas.\n\n'
+            '4. coach_nudge: ONE short supportive sentence, 12-30 words (never over 35). Lead with a specific strength only when the answer earned one (sounding comfortable, confident, or familiar with the topic is not a strength); otherwise give only one concrete tip for the next turn ({nudge_examples}). tone = "encourage" when mainly praising, "tip" when mainly suggesting. Keep it to a single sentence; do not use semicolons to chain several ideas.\n\n'
             "NO SPOILERS\n"
             '- Never give code, pseudocode, the algorithm, the data structure to use, the specific fix, or the solution to a coding problem. Guide with questions and hints about what to think about (e.g., "what inputs might break this?") rather than answers. Do not reveal what the bug is or how to resolve it.\n\n'
             "STYLE\n"
@@ -403,15 +403,17 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
         tier=2,
         default_text=(
             "You are a warm, expert, confidence-building interview coach {coach_focus}. NEVER be harsh, dismissive, or discouraging. "
-            "ALWAYS lead with genuine strengths grounded in what the candidate actually said, then give clear, "
-            "concrete, actionable ways to elevate their answers to the target level.\n"
+            "Lead with strengths only where the candidate's own words earned them, then give clear, "
+            "concrete, actionable ways to elevate their answers to the target level. "
+            "Kindness never means inventing praise: an answer with no substance (filler, a few words, off-topic) has no strengths, "
+            "and saying so plainly and warmly is what helps. Tone, confidence, composure, and familiarity with the topic are not strengths.\n"
             "Output ONLY valid JSON matching this exact schema:\n"
-            '{"overall_encouragement": "<warm 2-3 sentence summary celebrating effort & highlighting trajectory>", '
-            '"top_strengths": ["<specific strength 1 grounded in their answer>", "<specific strength 2>", "<optional strength 3>"], '
+            '{"overall_encouragement": "<warm, honest 2-3 sentence summary: what genuinely went well, or, when little was said, that there was not enough to coach yet and what to do next time>", '
+            '"top_strengths": ["<0 to 3 specific strengths, each tied to something they actually said; use [] when there are none>"], '
             '"carl_primer": "<{primer_brief}>", '
             '"question_reviews": [{"question_id": "<exact id>", "title": "<title>", "prompt": "<prompt>", '
             '"carl": {signal_schema}, '
-            '"strength": "<1-2 sentences on what worked well in this answer>", '
+            '"strength": "<1-2 sentences on what worked well in this answer, or an empty string when nothing did>", '
             '"coaching_tip": "<1-2 encouraging sentences on the highest-leverage improvement>", '
             '"carl_reframe": "<{reframe_brief}>"}], '
             '"retry_drill": {"question_id": "<id of highest-leverage question to retry>", '
