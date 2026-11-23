@@ -1,4 +1,9 @@
-import { createProfileAddonsController } from "./profile_addons.js";
+import {
+  createProfileAddonsController,
+  patchDownloadProgressBarEl,
+  reconcileKeyedRows,
+  renderDownloadProgressBarHtml,
+} from "./profile_addons.js";
 import { createPracticeStudioController } from "./practice_studio.js";
 import { createSystemDesignStudioPlugin } from "./design_studio.js";
 import { createCodingStudioPlugin } from "./coding_studio.js";
@@ -335,10 +340,356 @@ function setModalState(next, opts = {}) {
 function closeAllPopovers() {
   const setupPop = el("sessionSetupPopover");
   const menuPop = el("transcriptMenuPopover");
+  const dlPop = el("downloadsPopover");
   if (setupPop) setupPop.classList.add("hidden");
   if (menuPop) menuPop.classList.add("hidden");
+  if (dlPop) dlPop.classList.add("hidden");
   el("sessionContextBtn")?.setAttribute("aria-expanded", "false");
   el("transcriptMenuBtn")?.setAttribute("aria-expanded", "false");
+  el("downloadsBtn")?.setAttribute("aria-expanded", "false");
+}
+
+/* ---------------- Browser-Style Background Downloads Tray ---------------- */
+
+const DL_RING_CIRCUMFERENCE = 2 * Math.PI * 7.5;
+const recentDownloads = new Map(); // id -> { id, name, status: "installed"|"error", error, updatedAt }
+const prevInstallingPackIds = new Set();
+let addonsPollTimer = null;
+let addonsPollInFlight = false;
+
+function isParakeetAsrDownloading() {
+  const asr = state.asr;
+  if (!asr || !asr.download_progress) return false;
+  return asr.state === "loading" || asr.state === "switching";
+}
+
+function syncAddonsFallbackPoll() {
+  const packs = state.addons?.packs || [];
+  const anyPackInstalling = packs.some((p) => p.state === "installing");
+  const asrDownloading = isParakeetAsrDownloading();
+  const wsOpen = Boolean(state.ws && state.ws.readyState === WebSocket.OPEN);
+  if ((anyPackInstalling || asrDownloading) && !wsOpen) {
+    if (!addonsPollTimer) {
+      addonsPollTimer = setInterval(async () => {
+        if (addonsPollInFlight) return;
+        addonsPollInFlight = true;
+        try {
+          const hadInstalling = (state.addons?.packs || []).some((p) => p.state === "installing");
+          const hadRampartInstalling = (state.addons?.packs || []).some(
+            (p) => p.id === "rampart_pii" && p.state === "installing"
+          );
+          if (isParakeetAsrDownloading()) {
+            const stRes = await fetch("/api/status");
+            if (stRes.ok) {
+              const st = await stRes.json();
+              if (st.asr) {
+                state.asr = st.asr;
+                renderAsrBadge();
+              }
+              if (st.addons) {
+                applyAddonsLiveUpdate(st.addons, st.tts || null, null, {});
+              } else {
+                renderDownloadsTray();
+              }
+              if (st.profile_summary) {
+                profileAddons?.applyStatusSnapshot({ profile_summary: st.profile_summary });
+              }
+            }
+            return;
+          }
+          const res = await fetch("/api/addons");
+          if (res.ok) {
+            const addons = await res.json();
+            const stillInstalling = (addons?.packs || []).some((p) => p.state === "installing");
+            const rampartNowInstalled = (addons?.packs || []).some(
+              (p) => p.id === "rampart_pii" && p.state === "installed"
+            );
+            if (hadInstalling && !stillInstalling) {
+              const stRes = await fetch("/api/status").catch(() => null);
+              if (stRes && stRes.ok) {
+                const st = await stRes.json();
+                if (st.asr) {
+                  state.asr = st.asr;
+                  renderAsrBadge();
+                }
+                applyAddonsLiveUpdate(st.addons || addons, st.tts || null, null, {});
+                if (st.profile_summary) {
+                  profileAddons?.applyStatusSnapshot({ profile_summary: st.profile_summary });
+                }
+                if (hadRampartInstalling && rampartNowInstalled) {
+                  profileAddons?.refreshProfile();
+                }
+                return;
+              }
+            }
+            applyAddonsLiveUpdate(addons, null, null, {});
+            if (hadRampartInstalling && rampartNowInstalled) {
+              profileAddons?.refreshProfile();
+            }
+          }
+        } catch {
+          /* ignore */
+        } finally {
+          addonsPollInFlight = false;
+        }
+      }, 1200);
+    }
+  } else if (addonsPollTimer) {
+    clearInterval(addonsPollTimer);
+    addonsPollTimer = null;
+  }
+}
+
+function collectDownloadTrayItems() {
+  const items = [];
+  const packs = state.addons?.packs || [];
+  const activeIds = new Set();
+
+  for (const pk of packs) {
+    if (pk.state === "installing") {
+      activeIds.add(pk.id);
+      items.push({
+        id: pk.id,
+        name: pk.name || pk.id,
+        kind: "active",
+        progress: pk.progress || null,
+        detail: pk.status_detail || "Downloading…",
+        canCancel: pk.progress?.cancellable !== false,
+      });
+    }
+  }
+
+  if (isParakeetAsrDownloading()) {
+    const modelId = String(state.asr?.model_id || "");
+    const mappedId = modelId.includes("v3") ? "parakeet_v3" : "parakeet_v2";
+    if (!activeIds.has(mappedId)) {
+      const label = modelId.includes("v3")
+        ? "Multilingual Speech Recognition"
+        : "English Speech Recognition";
+      items.push({
+        id: "__asr_startup__",
+        name: label,
+        kind: "active",
+        progress: state.asr.download_progress,
+        detail: "Downloading speech model…",
+        canCancel: false,
+      });
+    }
+  }
+
+  for (const rec of recentDownloads.values()) {
+    if (!activeIds.has(rec.id)) {
+      items.push({
+        id: rec.id,
+        name: rec.name,
+        kind: rec.status === "error" ? "error" : "done",
+        error: rec.error || "",
+      });
+    }
+  }
+  return items;
+}
+
+function renderDownloadsTray() {
+  const anchor = el("downloadsAnchor");
+  const btn = el("downloadsBtn");
+  const ring = el("downloadsRingFill");
+  const label = el("downloadsBtnLabel");
+  const popStatus = el("downloadsPopoverStatus");
+  const popList = el("downloadsPopoverList");
+  const pop = el("downloadsPopover");
+  if (!anchor || !btn || !popList) return;
+
+  const items = collectDownloadTrayItems();
+  const activeItems = items.filter((i) => i.kind === "active");
+  const errorItems = items.filter((i) => i.kind === "error");
+  const doneItems = items.filter((i) => i.kind === "done");
+  const popOpen = pop && !pop.classList.contains("hidden");
+
+  if (items.length === 0 && !popOpen) {
+    anchor.classList.add("hidden");
+    return;
+  }
+  anchor.classList.remove("hidden");
+
+  btn.classList.toggle("is-active", activeItems.length > 0);
+  btn.classList.toggle("is-error", activeItems.length === 0 && errorItems.length > 0);
+  btn.classList.toggle("is-done", activeItems.length === 0 && errorItems.length === 0 && doneItems.length > 0);
+
+  let ringFraction = 0;
+  let triggerText = "";
+  if (activeItems.length > 0) {
+    let totalBytes = 0;
+    let doneBytes = 0;
+    let pctSum = 0;
+    let pctCount = 0;
+    for (const it of activeItems) {
+      const p = it.progress;
+      if (p && p.bytes_total > 0) {
+        totalBytes += p.bytes_total;
+        doneBytes += Math.min(p.bytes_total, p.bytes_done || 0);
+      }
+      if (p && typeof p.percent === "number") {
+        pctSum += p.percent;
+        pctCount += 1;
+      }
+    }
+    const aggPct =
+      totalBytes > 0
+        ? Math.min(99, (doneBytes / totalBytes) * 100)
+        : pctCount > 0
+          ? pctSum / pctCount
+          : 12;
+    ringFraction = Math.max(0.08, Math.min(1, aggPct / 100));
+    triggerText =
+      totalBytes > 0 || pctCount > 0
+        ? activeItems.length > 1
+          ? `${activeItems.length} · ${Math.round(aggPct)}%`
+          : `${Math.round(aggPct)}%`
+        : activeItems.length > 1
+          ? `${activeItems.length} downloading`
+          : "Downloading";
+  } else if (errorItems.length > 0) {
+    ringFraction = 1;
+    triggerText = "Failed";
+  } else if (doneItems.length > 0) {
+    ringFraction = 1;
+    triggerText = "Ready";
+  }
+
+  if (ring) {
+    const offset = DL_RING_CIRCUMFERENCE * (1 - ringFraction);
+    ring.style.strokeDasharray = `${DL_RING_CIRCUMFERENCE.toFixed(2)}`;
+    ring.style.strokeDashoffset = `${offset.toFixed(2)}`;
+  }
+  if (label) {
+    label.textContent = triggerText;
+  }
+
+  if (popStatus) {
+    if (activeItems.length > 0) {
+      popStatus.textContent = `${activeItems.length} active`;
+    } else if (items.length > 0) {
+      popStatus.textContent = "Finished";
+    } else {
+      popStatus.textContent = "Idle";
+    }
+  }
+
+  if (items.length === 0) {
+    popList.innerHTML = `<div class="profile-empty-note">No active downloads.</div>`;
+    return;
+  }
+
+  reconcileKeyedRows(popList, items, {
+    idAttr: "data-dl-row-id",
+    sigAttr: "data-dl-row-sig",
+    getId: (it) => it.id,
+    getSig: (it) => `${it.id}|${it.kind}|${Boolean(it.canCancel)}|${it.error || ""}`,
+    patchRow: (rowEl, it) => {
+      if (it.kind === "active") {
+        const progWrap = rowEl.querySelector(".dl-item-progress");
+        patchDownloadProgressBarEl(progWrap, it.progress, it.detail);
+      }
+    },
+    renderRowHtml: (it, sig) => {
+      if (it.kind === "active") {
+        const barHtml = renderDownloadProgressBarHtml(it.progress, it.detail);
+        const cancelHtml = it.canCancel
+          ? `<button type="button" class="btn-inline-cancel" data-dl-cancel="${escapeHtml(it.id)}">Cancel</button>`
+          : `<span class="dl-item-state">${it.id === "__asr_startup__" ? "Automatic" : "Finalizing…"}</span>`;
+        return `
+          <div class="dl-item" data-dl-row-id="${escapeHtml(it.id)}" data-dl-row-sig="${escapeHtml(sig)}">
+            <div class="dl-item-head">
+              <span class="dl-item-title">${escapeHtml(it.name)}</span>
+              <span class="dl-item-actions">${cancelHtml}</span>
+            </div>
+            <div class="dl-item-progress">${barHtml}</div>
+          </div>
+        `;
+      }
+      if (it.kind === "error") {
+        return `
+          <div class="dl-item" data-dl-row-id="${escapeHtml(it.id)}" data-dl-row-sig="${escapeHtml(sig)}">
+            <div class="dl-item-head">
+              <span class="dl-item-title">${escapeHtml(it.name)}</span>
+              <span class="dl-item-actions">
+                <button type="button" class="btn-inline-retry" data-dl-retry="${escapeHtml(it.id)}">Retry</button>
+                <button type="button" class="btn-inline-cancel" data-dl-dismiss="${escapeHtml(it.id)}">Dismiss</button>
+              </span>
+            </div>
+            <div class="dl-item-err">${escapeHtml(it.error || "Download failed — please retry.")}</div>
+          </div>
+        `;
+      }
+      return `
+        <div class="dl-item" data-dl-row-id="${escapeHtml(it.id)}" data-dl-row-sig="${escapeHtml(sig)}">
+          <div class="dl-item-head">
+            <span class="dl-item-title">${escapeHtml(it.name)}</span>
+            <span class="dl-item-actions">
+              <span class="dl-item-state is-ok">Ready</span>
+              <button type="button" class="btn-inline-cancel" data-dl-dismiss="${escapeHtml(it.id)}">Clear</button>
+            </span>
+          </div>
+        </div>
+      `;
+    },
+  });
+}
+
+function applyAddonsLiveUpdate(addons, tts = null, profile = null, { packId = null, event = null } = {}) {
+  if (!addons) return;
+  // Single monotonic revision gate lives in profileAddons.applyStatusSnapshot
+  const accepted = profileAddons
+    ? profileAddons.applyStatusSnapshot(
+        profile ? { addons, tts, profile } : tts ? { addons, tts } : { addons }
+      )
+    : true;
+  if (accepted === false) {
+    return;
+  }
+
+  const packs = addons.packs || [];
+  const nextInstalling = new Set();
+
+  for (const pk of packs) {
+    if (pk.state === "installing") {
+      nextInstalling.add(pk.id);
+      recentDownloads.delete(pk.id);
+    } else if (prevInstallingPackIds.has(pk.id) || (packId === pk.id && (event === "installed" || event === "error" || event === "cancelled"))) {
+      if (pk.state === "installed") {
+        recentDownloads.set(pk.id, {
+          id: pk.id,
+          name: pk.name || pk.id,
+          status: "installed",
+          error: "",
+          updatedAt: Date.now(),
+        });
+        showToast(`${pk.name || pk.id} is ready.`, 3200);
+        if (pk.id === "rampart_pii" && !profile && state.modalState === "profile") {
+          profileAddons?.refreshProfile();
+        }
+      } else if (pk.state === "error") {
+        recentDownloads.set(pk.id, {
+          id: pk.id,
+          name: pk.name || pk.id,
+          status: "error",
+          error: pk.error || "Download failed — please retry.",
+          updatedAt: Date.now(),
+        });
+        showToast(pk.error || `${pk.name || pk.id} failed to download.`, 4500);
+      } else if (event === "cancelled") {
+        recentDownloads.delete(pk.id);
+        showToast(`${pk.name || pk.id} download cancelled.`, 2400);
+      }
+    }
+  }
+
+  prevInstallingPackIds.clear();
+  for (const id of nextInstalling) prevInstallingPackIds.add(id);
+
+  renderDownloadsTray();
+  syncAddonsFallbackPoll();
 }
 
 function showToast(message, durationMs = 4000) {
@@ -445,6 +796,10 @@ function connectWS() {
     if (state.captureState === "streaming" && !flushedStart) {
       sendCmd({ type: "start_capture" });
     }
+    if (state.modalState === "profile") {
+      profileAddons?.refreshProfile();
+    }
+    syncAddonsFallbackPoll();
   };
 
   ws.onmessage = (ev) => {
@@ -458,6 +813,7 @@ function connectWS() {
     state.pendingNewSession = false;
     rollbackOptimisticState();
     setWsState("reconnecting", "ws_close");
+    syncAddonsFallbackPoll();
     if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
     state.wsReconnectTimer = setTimeout(() => {
       state.wsReconnectTimer = null;
@@ -490,9 +846,21 @@ function handleServerMessage(msg) {
   if (msg.asr) {
     state.asr = msg.asr;
     renderAsrBadge();
+    renderDownloadsTray();
   }
   if (msg.diarizer) {
     state.diarizer = msg.diarizer;
+  }
+
+  if (msg.type === "addons_status") {
+    applyAddonsLiveUpdate(msg.addons, msg.tts || null, msg.profile || null, {
+      packId: msg.pack_id || null,
+      event: msg.event || null,
+    });
+    return;
+  }
+  if (msg.addons) {
+    applyAddonsLiveUpdate(msg.addons, msg.tts || null, msg.profile || null, {});
   }
 
   if (msg.type === "transition_rejected") {
@@ -3291,6 +3659,8 @@ function renderOnboardingPacksStep() {
     badgeId,
     previewBtnId,
     installBtnId,
+    cancelBtnId,
+    progressId,
     errId,
     shortName,
     defaultSize,
@@ -3301,6 +3671,8 @@ function renderOnboardingPacksStep() {
     const pack = packs.find((p) => p.id === packId) || null;
     const op = packOps.get(packId);
     const installed = Boolean(ttsInstalled || pack?.installed);
+    const installing = op === "installing" || pack?.state === "installing";
+    const uninstalling = op === "uninstalling" || pack?.state === "uninstalling";
     const available =
       ttsAvailable !== undefined ? Boolean(ttsAvailable) : pack?.available !== false;
     const size = pack?.size_mb || defaultSize;
@@ -3309,6 +3681,8 @@ function renderOnboardingPacksStep() {
     const badgeEl = el(badgeId);
     const previewBtn = el(previewBtnId);
     const installBtn = el(installBtnId);
+    const cancelBtn = el(cancelBtnId);
+    const progressEl = el(progressId);
     const errEl = el(errId);
 
     if (cardEl) {
@@ -3320,22 +3694,40 @@ function renderOnboardingPacksStep() {
     }
     if (installBtn) {
       installBtn.classList.toggle("hidden", installed || !available);
-      const busy = op === "installing" || op === "uninstalling";
+      const busy = installing || uninstalling;
       installBtn.disabled = busy;
+      const pct = pack?.progress?.percent;
       // Size lives once, in the card's description line — never repeated on the button.
       installBtn.textContent =
-        op === "installing"
-          ? "Downloading…"
-          : op === "uninstalling"
+        installing
+          ? (typeof pct === "number" && pct > 0 ? `Downloading ${Math.round(pct)}%…` : "Downloading…")
+          : uninstalling
             ? "Removing…"
             : pack?.state === "error"
               ? `Retry ${shortName}`
               : `Install ${shortName}`;
-      installBtn.classList.toggle("is-loading", op === "installing");
+      installBtn.classList.toggle("is-loading", installing);
       installBtn.title = `${shortName} · ${size} MB download, then fully offline`;
     }
+    const cancellable = pack?.progress?.cancellable !== false;
+    if (cancelBtn) {
+      cancelBtn.classList.toggle("hidden", !installing || !cancellable);
+    }
+    if (progressEl) {
+      if (installing) {
+        patchDownloadProgressBarEl(
+          progressEl,
+          pack?.progress || null,
+          pack?.status_detail || "Downloading…"
+        );
+        progressEl.classList.remove("hidden");
+      } else {
+        progressEl.innerHTML = "";
+        progressEl.classList.add("hidden");
+      }
+    }
     if (errEl) {
-      const errMsg = pack?.error || ttsError || "";
+      const errMsg = !installing ? pack?.error || ttsError || "" : "";
       errEl.textContent = errMsg;
       errEl.classList.toggle("hidden", !errMsg);
     }
@@ -3348,6 +3740,8 @@ function renderOnboardingPacksStep() {
     badgeId: "onboardPhononBadge",
     previewBtnId: "onboardPhononPreviewBtn",
     installBtnId: "onboardPhononInstallBtn",
+    cancelBtnId: "onboardPhononCancelBtn",
+    progressId: "onboardPhononProgress",
     errId: "onboardPhononError",
     shortName: "Phonon",
     defaultSize: 62,
@@ -3362,6 +3756,8 @@ function renderOnboardingPacksStep() {
     badgeId: "onboardKokoroBadge",
     previewBtnId: "onboardKokoroPreviewBtn",
     installBtnId: "onboardKokoroInstallBtn",
+    cancelBtnId: "onboardKokoroCancelBtn",
+    progressId: "onboardKokoroProgress",
     errId: "onboardKokoroError",
     shortName: "Kokoro",
     defaultSize: 183,
@@ -3371,12 +3767,28 @@ function renderOnboardingPacksStep() {
   });
 
   const anyVoiceInstalled = phononInstalled || kokoroInstalled;
+  const anyPackInstalling = packs.some(
+    (p) => p.state === "installing" || packOps.isInstalling(p.id)
+  );
   const doneBtn = el("onboardDoneBtn");
+  const bgNote = el("onboardBgDownloadNote");
   if (doneBtn) {
-    doneBtn.textContent = anyVoiceInstalled ? "Start using Mockery" : "Continue with macOS voice";
-    // One filled CTA per step: until a neural voice is in, that is "Install Phonon".
-    doneBtn.classList.toggle("btn-primary", anyVoiceInstalled);
-    doneBtn.classList.toggle("btn-outline", !anyVoiceInstalled);
+    if (anyVoiceInstalled) {
+      doneBtn.textContent = "Start using Mockery";
+      doneBtn.classList.add("btn-primary");
+      doneBtn.classList.remove("btn-outline");
+    } else if (anyPackInstalling) {
+      doneBtn.textContent = "Continue while downloading";
+      doneBtn.classList.add("btn-primary");
+      doneBtn.classList.remove("btn-outline");
+    } else {
+      doneBtn.textContent = "Continue with macOS voice";
+      doneBtn.classList.remove("btn-primary");
+      doneBtn.classList.add("btn-outline");
+    }
+  }
+  if (bgNote) {
+    bgNote.classList.toggle("hidden", !anyPackInstalling);
   }
 
   const optList = el("onboardOptionalPacksList");
@@ -3394,21 +3806,49 @@ function renderOnboardingPacksStep() {
       pyodide_python: "Runs your Python tests on this Mac",
     };
 
-    optList.innerHTML = optionalPacks
-      .map((pk) => {
+    reconcileKeyedRows(optList, optionalPacks, {
+      idAttr: "data-onboard-row-id",
+      sigAttr: "data-onboard-row-sig",
+      getId: (pk) => pk.id,
+      getSig: (pk) => {
+        const op = packOps.get(pk.id);
+        const isInstalling = op === "installing" || pk.state === "installing";
+        const isUninstalling = op === "uninstalling" || pk.state === "uninstalling";
+        const cancellable = pk.progress?.cancellable !== false;
+        return `${pk.id}|${pk.state}|${isInstalling}|${isUninstalling}|${cancellable}|${Boolean(pk.installed)}|${pk.error || ""}|${cloudActive}`;
+      },
+      patchRow: (rowEl, pk) => {
+        const op = packOps.get(pk.id);
+        const isInstalling = op === "installing" || pk.state === "installing";
+        if (isInstalling) {
+          const progEl = rowEl.querySelector(".onboard-pack-progress");
+          patchDownloadProgressBarEl(progEl, pk.progress, pk.status_detail || "Downloading…");
+        }
+      },
+      renderRowHtml: (pk, sig) => {
         const desc = [shortDesc[pk.id] || pk.description, pk.size_mb ? `${pk.size_mb} MB` : ""]
           .filter(Boolean)
           .join(" · ");
         const op = packOps.get(pk.id);
         const isInstalling = op === "installing" || pk.state === "installing";
         const isUninstalling = op === "uninstalling" || pk.state === "uninstalling";
+        const cancellable = pk.progress?.cancellable !== false;
         const recTag =
           pk.id === "rampart_pii" && cloudActive
             ? `<span class="addon-size-pill is-rec">Recommended with cloud AI</span>`
             : "";
         let actionHtml = "";
+        let progressHtml = "";
         if (isInstalling) {
-          actionHtml = `<span class="addon-state-badge is-busy">Downloading…</span>`;
+          progressHtml = `<div class="onboard-pack-progress">${renderDownloadProgressBarHtml(
+            pk.progress,
+            pk.status_detail || "Downloading…"
+          )}</div>`;
+          actionHtml = cancellable
+            ? `<button type="button" class="btn btn-ghost btn-sm" data-onboard-cancel="${escapeHtml(
+                pk.id
+              )}">Cancel</button>`
+            : `<span class="addon-state-badge">Finalizing…</span>`;
         } else if (isUninstalling) {
           actionHtml = `<span class="addon-state-badge is-busy">Removing…</span>`;
         } else if (pk.installed) {
@@ -3416,23 +3856,26 @@ function renderOnboardingPacksStep() {
         } else {
           actionHtml = `<button type="button" class="btn btn-outline btn-sm" data-onboard-install="${escapeHtml(
             pk.id
-          )}">Install</button>`;
+          )}">${pk.state === "error" ? "Retry" : "Install"}</button>`;
         }
         return `
-          <div class="onboard-pack-row">
+          <div class="onboard-pack-row" data-onboard-row-id="${escapeHtml(pk.id)}" data-onboard-row-sig="${escapeHtml(
+            sig
+          )}">
             <div class="onboard-pack-main">
               <div class="onboard-pack-title">
                 ${escapeHtml(pk.name)}
                 ${recTag}
               </div>
               <div class="onboard-pack-desc">${escapeHtml(desc)}</div>
-              ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
+              ${progressHtml}
+              ${!isInstalling && pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
             </div>
             <div class="onboard-pack-actions">${actionHtml}</div>
           </div>
         `;
-      })
-      .join("");
+      },
+    });
   }
 }
 
@@ -3482,10 +3925,8 @@ async function openOnboardingModal(statusData = null, { initialStep = null } = {
   if (!modalCtrl.isCurrent(reqToken)) return;
   state.llm = data.llm;
   if (data.addons) {
-    state.addons = data.addons;
-    profileAddons?.applyStatusSnapshot({ addons: data.addons });
-  }
-  if (data.tts) {
+    applyAddonsLiveUpdate(data.addons, data.tts || null, null, {});
+  } else if (data.tts) {
     state.tts = data.tts;
     practiceStudio?.applyStatusSnapshot({ tts: data.tts });
   }
@@ -4104,6 +4545,40 @@ function initEvents() {
     }
   };
 
+  el("downloadsBtn")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const pop = el("downloadsPopover");
+    if (!pop) return;
+    const willOpen = pop.classList.contains("hidden");
+    closeAllPopovers();
+    if (willOpen) {
+      pop.classList.remove("hidden");
+      el("downloadsBtn")?.setAttribute("aria-expanded", "true");
+      renderDownloadsTray();
+    }
+  });
+
+  el("downloadsPopoverList")?.addEventListener("click", (ev) => {
+    const cancelBtn = ev.target.closest("[data-dl-cancel]");
+    if (cancelBtn) {
+      profileAddons?.cancelPack(cancelBtn.getAttribute("data-dl-cancel"));
+      return;
+    }
+    const retryBtn = ev.target.closest("[data-dl-retry]");
+    if (retryBtn) {
+      const pid = retryBtn.getAttribute("data-dl-retry");
+      recentDownloads.delete(pid);
+      profileAddons?.installPack(pid);
+      return;
+    }
+    const dismissBtn = ev.target.closest("[data-dl-dismiss]");
+    if (dismissBtn) {
+      const pid = dismissBtn.getAttribute("data-dl-dismiss");
+      recentDownloads.delete(pid);
+      renderDownloadsTray();
+    }
+  });
+
   document.addEventListener("click", (ev) => {
     if (!ev.target.closest(".popover-anchor")) {
       closeAllPopovers();
@@ -4414,16 +4889,27 @@ function initEvents() {
   el("onboardPhononInstallBtn")?.addEventListener("click", () => {
     profileAddons?.installPack("phonon_tts");
   });
+  el("onboardPhononCancelBtn")?.addEventListener("click", () => {
+    profileAddons?.cancelPack("phonon_tts");
+  });
   el("onboardPhononPreviewBtn")?.addEventListener("click", () => {
     practiceStudio?.previewVoice?.({ engine: "phonon" });
   });
   el("onboardKokoroInstallBtn")?.addEventListener("click", () => {
     profileAddons?.installPack("kokoro_tts");
   });
+  el("onboardKokoroCancelBtn")?.addEventListener("click", () => {
+    profileAddons?.cancelPack("kokoro_tts");
+  });
   el("onboardKokoroPreviewBtn")?.addEventListener("click", () => {
     practiceStudio?.previewVoice?.({ engine: "kokoro" });
   });
   el("onboardOptionalPacksList")?.addEventListener("click", (ev) => {
+    const cancelBtn = ev.target.closest("[data-onboard-cancel]");
+    if (cancelBtn) {
+      profileAddons?.cancelPack(cancelBtn.getAttribute("data-onboard-cancel"));
+      return;
+    }
     const btn = ev.target.closest("[data-onboard-install]");
     if (btn) {
       profileAddons?.installPack(btn.getAttribute("data-onboard-install"));
@@ -4708,7 +5194,12 @@ profileAddons = createProfileAddonsController({
   onAddonsChange: (addons, tts = null) => {
     state.addons = addons;
     if (tts) state.tts = tts;
+    for (const pk of addons?.packs || []) {
+      if (pk.state === "installing") prevInstallingPackIds.add(pk.id);
+    }
     practiceStudio?.applyStatusSnapshot(tts ? { addons, tts } : { addons });
+    renderDownloadsTray();
+    syncAddonsFallbackPoll();
     if (state.modalState === "onboarding" && state.onboardStep === "packs") {
       renderOnboardingPacksStep();
     }
@@ -4745,9 +5236,7 @@ practiceStudio.registerStudioPlugin(
     packOps,
     getAddons: () => state.addons || profileAddons.getAddons(),
     onAddonsUpdated: (addons) => {
-      state.addons = addons;
-      profileAddons.applyStatusSnapshot({ addons });
-      practiceStudio.applyStatusSnapshot({ addons });
+      applyAddonsLiveUpdate(addons, null, null, {});
     },
   })
 );

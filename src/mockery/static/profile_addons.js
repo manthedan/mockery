@@ -48,6 +48,147 @@ function fmtPackSize(mb) {
   return `${n >= 10 ? Math.round(n) : Math.round(n * 10) / 10} MB`;
 }
 
+function fmtBytesMb(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "0 MB";
+  const mb = n / (1024 * 1024);
+  if (mb >= 100) return `${Math.round(mb)} MB`;
+  if (mb >= 10) return `${mb.toFixed(1)} MB`;
+  return `${mb.toFixed(1)} MB`;
+}
+
+function fmtEta(secs) {
+  const s = Number(secs);
+  if (!Number.isFinite(s) || s < 1) return "";
+  if (s < 60) return `~${Math.round(s)}s left`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return rem > 0 ? `~${m}m ${rem}s left` : `~${m}m left`;
+}
+
+export function formatDownloadMeta(progress, fallbackDetail = "Downloading…") {
+  if (!progress || typeof progress !== "object") {
+    return fallbackDetail || "Downloading…";
+  }
+  if (progress.phase === "retrying" && progress.retry_note) {
+    return progress.retry_note;
+  }
+  if (progress.phase === "verifying") return "Verifying checksum…";
+  if (progress.phase === "loading") return "Initializing on Mac…";
+  const parts = [];
+  if (progress.bytes_done > 0 && progress.bytes_total > 0) {
+    parts.push(`${fmtBytesMb(progress.bytes_done)} / ${fmtBytesMb(progress.bytes_total)}`);
+  } else if (progress.bytes_done > 0) {
+    parts.push(fmtBytesMb(progress.bytes_done));
+  }
+  if (progress.speed_bps > 1024) {
+    const mbps = progress.speed_bps / (1024 * 1024);
+    parts.push(mbps >= 1 ? `${mbps.toFixed(1)} MB/s` : `${Math.round(progress.speed_bps / 1024)} KB/s`);
+  }
+  const eta = fmtEta(progress.eta_seconds);
+  if (eta) parts.push(eta);
+  return parts.length > 0 ? parts.join(" · ") : fallbackDetail || "Downloading…";
+}
+
+function _escapeHtmlIntrinsic(val) {
+  return String(val ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+export function renderDownloadProgressBarHtml(progress, fallbackDetail = "Downloading…") {
+  const pct =
+    progress && typeof progress.percent === "number" && Number.isFinite(progress.percent)
+      ? Math.max(0, Math.min(100, progress.percent))
+      : null;
+  const indeterminate =
+    pct === null || progress?.phase === "retrying" || progress?.phase === "verifying" || progress?.phase === "loading";
+  const widthStyle = indeterminate ? "" : `style="width:${pct.toFixed(1)}%"`;
+  const metaText = formatDownloadMeta(progress, fallbackDetail);
+  const pctText = pct !== null && progress?.phase === "downloading" ? `${Math.round(pct)}%` : "";
+  return `
+    <div class="dl-bar-wrap">
+      <div class="dl-bar"><div class="dl-bar-fill${indeterminate ? " is-indeterminate" : ""}" ${widthStyle}></div></div>
+      <div class="dl-bar-meta">
+        <span class="dl-bar-meta-text">${_escapeHtmlIntrinsic(metaText)}</span>
+        <span class="dl-bar-meta-pct">${_escapeHtmlIntrinsic(pctText)}</span>
+      </div>
+    </div>
+  `;
+}
+
+export function patchDownloadProgressBarEl(containerEl, progress, fallbackDetail = "Downloading…") {
+  if (!containerEl) return;
+  const fill = containerEl.querySelector(".dl-bar-fill");
+  const metaEl = containerEl.querySelector(".dl-bar-meta-text");
+  const pctEl = containerEl.querySelector(".dl-bar-meta-pct");
+  if (!fill || !metaEl || !pctEl) {
+    const barHtml = renderDownloadProgressBarHtml(progress, fallbackDetail);
+    containerEl.innerHTML = `${barHtml}`;
+    return;
+  }
+  const pct =
+    progress && typeof progress.percent === "number" && Number.isFinite(progress.percent)
+      ? Math.max(0, Math.min(100, progress.percent))
+      : null;
+  const indeterminate =
+    pct === null || progress?.phase === "retrying" || progress?.phase === "verifying" || progress?.phase === "loading";
+  fill.classList.toggle("is-indeterminate", indeterminate);
+  fill.style.width = indeterminate ? "" : `${pct.toFixed(1)}%`;
+  metaEl.textContent = formatDownloadMeta(progress, fallbackDetail);
+  pctEl.textContent = pct !== null && progress?.phase === "downloading" ? `${Math.round(pct)}%` : "";
+}
+
+export function reconcileKeyedRows(container, items, { idAttr, sigAttr, getId, getSig, renderRowHtml, patchRow }) {
+  if (!container) return;
+  if (!items || items.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+  const existingById = new Map();
+  for (const child of Array.from(container.children)) {
+    const id = child.getAttribute?.(idAttr);
+    if (id) existingById.set(id, child);
+  }
+  const desiredNodes = [];
+  for (const item of items) {
+    const id = String(getId(item));
+    const sig = String(getSig(item));
+    const prev = existingById.get(id);
+    if (prev && prev.getAttribute(sigAttr) === sig) {
+      if (typeof patchRow === "function") patchRow(prev, item);
+      desiredNodes.push(prev);
+      existingById.delete(id);
+    } else {
+      const tpl = document.createElement("template");
+      tpl.innerHTML = renderRowHtml(item, sig).trim();
+      const nextNode = tpl.content.firstElementChild;
+      if (nextNode) {
+        desiredNodes.push(nextNode);
+      }
+    }
+  }
+  for (const stale of existingById.values()) {
+    stale.remove();
+  }
+  // Remove any non-keyed placeholder children (e.g. empty notes)
+  const desiredSet = new Set(desiredNodes);
+  for (const child of Array.from(container.children)) {
+    if (!desiredSet.has(child)) child.remove();
+  }
+  // Reconcile order without moving nodes that are already in place (preserves focus)
+  for (let i = 0; i < desiredNodes.length; i += 1) {
+    const node = desiredNodes[i];
+    const currentAtIdx = container.children[i];
+    if (currentAtIdx !== node) {
+      container.insertBefore(node, currentAtIdx || null);
+    }
+  }
+}
+
 export function createProfileAddonsController({
   state,
   el,
@@ -68,6 +209,8 @@ export function createProfileAddonsController({
   const local = {
     profile: null,
     addons: null,
+    latestServerEpoch: null,
+    latestAddonsRevision: -1,
     activeTab: "resume",
     banksData: null,
     banksState: "idle", // "idle" | "loading" | "ready" | "error"
@@ -203,17 +346,75 @@ export function createProfileAddonsController({
     };
   }
 
+  function syncPackOpsFromAddons(addons) {
+    const packs = addons?.packs || [];
+    const activeById = new Map();
+    for (const pk of packs) {
+      if (pk.state === "installing") activeById.set(pk.id, "installing");
+      else if (pk.state === "uninstalling") activeById.set(pk.id, "uninstalling");
+    }
+    const snap = sharedPackOps.snapshot();
+    for (const [pid, op] of Object.entries(snap)) {
+      if (!activeById.has(pid)) {
+        sharedPackOps.end(pid);
+      } else if (activeById.get(pid) !== op) {
+        sharedPackOps.end(pid);
+        sharedPackOps.begin(pid, activeById.get(pid));
+      }
+    }
+    for (const [pid, op] of activeById.entries()) {
+      if (!sharedPackOps.isBusy(pid)) {
+        sharedPackOps.begin(pid, op);
+      }
+    }
+  }
+
+  function acceptAddonsSnapshot(addons) {
+    if (!addons) return false;
+    const epoch = typeof addons.server_epoch === "string" && addons.server_epoch ? addons.server_epoch : null;
+    if (epoch && local.latestServerEpoch && epoch !== local.latestServerEpoch) {
+      // Server restarted with a new epoch: reset revision tracking so fresh snapshots are accepted.
+      local.latestAddonsRevision = -1;
+    }
+    if (epoch) {
+      local.latestServerEpoch = epoch;
+    }
+    const rev = Number(addons.revision);
+    if (Number.isFinite(rev)) {
+      if (rev < local.latestAddonsRevision) {
+        return false;
+      }
+      local.latestAddonsRevision = rev;
+    }
+    local.addons = addons;
+    state.addons = addons;
+    syncPackOpsFromAddons(addons);
+    return true;
+  }
+
   function applyStatusSnapshot(statusData) {
+    if (statusData?.addons) {
+      if (!acceptAddonsSnapshot(statusData.addons)) {
+        return false;
+      }
+    }
     if (statusData?.profile_summary) {
       renderProfileSummaryIndicators(statusData.profile_summary);
     }
-    if (statusData?.addons) {
-      local.addons = statusData.addons;
-      state.addons = statusData.addons;
-      if (typeof onAddonsChange === "function") {
-        onAddonsChange(statusData.addons);
+    if (statusData?.profile) {
+      local.profile = statusData.profile;
+      renderProfileSummaryIndicators();
+      if (state.modalState === "profile") {
+        renderProfileModal();
       }
     }
+    if (statusData?.addons) {
+      renderAddonsSection();
+      if (typeof onAddonsChange === "function") {
+        onAddonsChange(statusData.addons, statusData.tts || null);
+      }
+    }
+    return true;
   }
 
   /* ---------------- Profile Modal Tabs ---------------- */
@@ -926,12 +1127,8 @@ export function createProfileAddonsController({
     try {
       const res = await fetch("/api/addons");
       if (!res.ok) return;
-      local.addons = await res.json();
-      state.addons = local.addons;
-      renderAddonsSection();
-      if (typeof onAddonsChange === "function") {
-        onAddonsChange(local.addons);
-      }
+      const fresh = await res.json();
+      applyStatusSnapshot({ addons: fresh });
     } catch {
       /* ignore */
     }
@@ -980,14 +1177,41 @@ export function createProfileAddonsController({
     }
 
     if (packList) {
-      packList.innerHTML = (local.addons.packs || [])
-        .map((pk) => {
+      const packs = local.addons.packs || [];
+      reconcileKeyedRows(packList, packs, {
+        idAttr: "data-addon-row-id",
+        sigAttr: "data-addon-row-sig",
+        getId: (pk) => pk.id,
+        getSig: (pk) => {
           const installing = sharedPackOps.isInstalling(pk.id) || pk.state === "installing";
           const uninstalling = sharedPackOps.isUninstalling(pk.id) || pk.state === "uninstalling";
+          const cancellable = pk.progress?.cancellable !== false;
+          return `${pk.id}|${pk.state}|${installing}|${uninstalling}|${cancellable}|${Boolean(pk.installed)}|${pk.error || ""}`;
+        },
+        patchRow: (rowEl, pk) => {
+          const installing = sharedPackOps.isInstalling(pk.id) || pk.state === "installing";
+          if (installing) {
+            const progEl = rowEl.querySelector(".addon-pack-progress");
+            patchDownloadProgressBarEl(progEl, pk.progress, pk.status_detail || "Downloading…");
+          }
+        },
+        renderRowHtml: (pk, sig) => {
+          const installing = sharedPackOps.isInstalling(pk.id) || pk.state === "installing";
+          const uninstalling = sharedPackOps.isUninstalling(pk.id) || pk.state === "uninstalling";
+          const cancellable = pk.progress?.cancellable !== false;
           const sizeLabel = fmtPackSize(pk.size_mb);
           let actionHtml = "";
+          let progressHtml = "";
           if (installing) {
-            actionHtml = `<button type="button" class="btn btn-outline btn-sm is-loading" disabled>Downloading…</button>`;
+            progressHtml = `<div class="addon-pack-progress">${renderDownloadProgressBarHtml(
+              pk.progress,
+              pk.status_detail || "Downloading…"
+            )}</div>`;
+            actionHtml = cancellable
+              ? `<button type="button" class="btn btn-ghost btn-sm" data-addon-cancel="${escapeHtml(
+                  pk.id
+                )}">Cancel</button>`
+              : `<span class="addon-state-badge">Finalizing…</span>`;
           } else if (uninstalling) {
             actionHtml = `<button type="button" class="btn btn-outline btn-sm" disabled>Removing…</button>`;
           } else if (pk.state === "installed") {
@@ -1018,20 +1242,21 @@ export function createProfileAddonsController({
             )}">Install${sizeLabel ? ` · ${sizeLabel}` : ""}</button>`;
           }
           return `
-            <div class="addon-row">
+            <div class="addon-row" data-addon-row-id="${escapeHtml(pk.id)}" data-addon-row-sig="${escapeHtml(sig)}">
               <div class="addon-row-main">
                 <div class="addon-row-title">
                   <span>${escapeHtml(pk.name)}</span>
                   ${pk.model ? `<span class="addon-model-id">${escapeHtml(pk.model)}</span>` : ""}
                 </div>
                 <div class="addon-row-desc">${escapeHtml(pk.description)}</div>
+                ${progressHtml}
                 ${pk.error ? `<div class="addon-row-err">${escapeHtml(pk.error)}</div>` : ""}
               </div>
               <div class="addon-row-actions">${actionHtml}</div>
             </div>
           `;
-        })
-        .join("");
+        },
+      });
     }
   }
 
@@ -1059,11 +1284,8 @@ export function createProfileAddonsController({
         showToast(formatApiDetail(data.detail, "Could not update add-on module."));
         return;
       }
-      local.addons = await res.json();
-      state.addons = local.addons;
-      if (typeof onAddonsChange === "function") {
-        onAddonsChange(local.addons);
-      }
+      const updatedAddons = await res.json();
+      applyStatusSnapshot({ addons: updatedAddons });
     } catch (err) {
       showToast(`Could not update add-on module: ${err.message || "network error"}`);
     } finally {
@@ -1078,34 +1300,45 @@ export function createProfileAddonsController({
     }
   }
 
-  async function runPackOp(packId, { op, url, method, startToast, okToast, okMs, failFallback, errPrefix }) {
+  async function runPackOp(packId, { op, url, method, startToast, okToast, okMs, failFallback, errPrefix, background = false }) {
     if (!packId || !sharedPackOps.begin(packId, op)) return false;
     if (startToast) showToast(startToast, 3000);
     let refreshedFromResponse = false;
+    let runningInBackground = false;
     try {
       const res = await fetch(url, { method });
       const data = await res.json().catch(() => ({}));
-      if (data.addons) {
-        local.addons = data.addons;
-        state.addons = data.addons;
+      if (data.addons || data.profile) {
         refreshedFromResponse = true;
-        if (typeof onAddonsChange === "function") onAddonsChange(data.addons, data.tts || null);
-      }
-      if (data.profile) {
-        local.profile = data.profile;
-        renderProfileSummaryIndicators();
+        applyStatusSnapshot({
+          addons: data.addons || null,
+          tts: data.tts || null,
+          profile: data.profile || null,
+        });
       }
       if (!res.ok) {
         showToast(formatApiDetail(data.detail, failFallback(res.status)), 4000);
         return false;
       }
-      showToast(okToast, okMs);
+      // Check authoritative post-merge pack state so a late 202 never revives a completed pack.
+      const authoritativePk = (local.addons?.packs || []).find((p) => p.id === packId);
+      if (background && authoritativePk?.state === "installing") {
+        runningInBackground = true;
+        renderAddonsSection();
+        return true;
+      }
+      if (!background && okToast) showToast(okToast, okMs);
       return true;
     } catch (err) {
       showToast(`${errPrefix}: ${err.message || "network error"}`);
       return false;
     } finally {
-      sharedPackOps.end(packId);
+      if (!runningInBackground) {
+        const authoritativePk = (local.addons?.packs || []).find((p) => p.id === packId);
+        if (authoritativePk?.state !== "installing" && authoritativePk?.state !== "uninstalling") {
+          sharedPackOps.end(packId);
+        }
+      }
       if (!refreshedFromResponse) {
         await refreshAddons();
       }
@@ -1113,16 +1346,46 @@ export function createProfileAddonsController({
   }
 
   function installPack(packId) {
+    const label =
+      (local.addons?.packs || []).find((p) => p.id === packId)?.name ||
+      String(packId || "").replace(/_/g, " ");
     return runPackOp(packId, {
       op: "installing",
-      url: `/api/addons/${encodeURIComponent(packId)}/install`,
+      url: `/api/addons/${encodeURIComponent(packId)}/install?background=true`,
       method: "POST",
-      startToast: `Downloading ${String(packId || "").replace(/_/g, " ")}…`,
-      okToast: "Add-on installed and ready.",
+      startToast: `Downloading ${label} in the background…`,
+      okToast: `${label} installed and ready.`,
       okMs: 2400,
       failFallback: (status) => `Install failed (${status})`,
       errPrefix: "Install failed",
+      background: true,
     });
+  }
+
+  async function cancelPack(packId) {
+    if (!packId) return false;
+    try {
+      const res = await fetch(`/api/addons/${encodeURIComponent(packId)}/cancel`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.addons || data.profile) {
+        applyStatusSnapshot({
+          addons: data.addons || null,
+          tts: data.tts || null,
+          profile: data.profile || null,
+        });
+      }
+      if (!res.ok) {
+        showToast(formatApiDetail(data.detail, "Could not cancel download."), 3200);
+        return false;
+      }
+      showToast("Cancelling download…", 2000);
+      return true;
+    } catch (err) {
+      showToast(`Cancel failed: ${err.message || "network error"}`);
+      return false;
+    }
   }
 
   function uninstallPack(packId) {
@@ -1324,6 +1587,11 @@ export function createProfileAddonsController({
         installPack(inst.getAttribute("data-addon-install"));
         return;
       }
+      const cancelBtn = ev.target.closest("[data-addon-cancel]");
+      if (cancelBtn) {
+        cancelPack(cancelBtn.getAttribute("data-addon-cancel"));
+        return;
+      }
       const uninst = ev.target.closest("[data-addon-uninstall]");
       if (uninst) {
         uninstallPack(uninst.getAttribute("data-addon-uninstall"));
@@ -1335,6 +1603,7 @@ export function createProfileAddonsController({
 
   return {
     applyStatusSnapshot,
+    syncPackOpsFromAddons,
     // Re-evaluate the Home target-job line (e.g. after switching Home to practice mode).
     syncHomeJdTarget: () => {
       if (state.profileSummary) renderProfileSummaryIndicators(state.profileSummary);
@@ -1344,6 +1613,7 @@ export function createProfileAddonsController({
     refreshAddons,
     renderAddonsSection,
     installPack,
+    cancelPack,
     getStateSnapshot,
     getProfile: () => local.profile,
     getAddons: () => local.addons,

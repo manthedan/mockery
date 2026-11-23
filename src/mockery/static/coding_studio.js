@@ -1282,21 +1282,29 @@ export function createCodingStudioPlugin({
       renderStatusPill();
       renderConsole();
       let refreshedFromResponse = false;
+      let startedInBackground = false;
       try {
-        const res = await fetch("/api/addons/pyodide_python/install", { method: "POST" });
+        const res = await fetch("/api/addons/pyodide_python/install?background=true", { method: "POST" });
         const data = await res.json().catch(() => ({}));
         if (data?.addons) {
           refreshedFromResponse = true;
           onAddonsUpdated?.(data.addons);
           if (!state.destroyed) {
-            state.addons = data.addons;
+            state.addons = getAddons?.() || data.addons;
           }
         }
         if (!res.ok) {
           throw new Error(formatApiDetail(data.detail, "Pyodide installation failed."));
         }
         if (state.destroyed) return;
-        if (isPyodidePackInstalled(data?.addons || state.addons)) {
+        const authoritativeAddons = getAddons?.() || data?.addons || state.addons;
+        const pk = (authoritativeAddons?.packs || []).find((p) => p.id === "pyodide_python");
+        if (pk?.state === "installing") {
+          startedInBackground = true;
+          showToast("Downloading offline Python runner in the background…", 2800);
+          return;
+        }
+        if (isPyodidePackInstalled(authoritativeAddons)) {
           showToast(
             "Offline Python runner (Pyodide) installed! You can now run Python tests offline.",
             3200
@@ -1309,14 +1317,18 @@ export function createCodingStudioPlugin({
           showToast(String(err.message || err), 3600);
         }
       } finally {
-        sharedPackOps.end("pyodide_python");
+        const curAddons = getAddons?.() || state.addons;
+        const curPk = (curAddons?.packs || []).find((p) => p.id === "pyodide_python");
+        if (!startedInBackground && curPk?.state !== "installing") {
+          sharedPackOps.end("pyodide_python");
+        }
         if (!refreshedFromResponse) {
           try {
             const freshRes = await fetch("/api/addons");
             if (freshRes.ok) {
               const freshAddons = await freshRes.json();
               onAddonsUpdated?.(freshAddons);
-              if (!state.destroyed) state.addons = freshAddons;
+              if (!state.destroyed) state.addons = getAddons?.() || state.addons;
             }
           } catch {
             /* ignore */
