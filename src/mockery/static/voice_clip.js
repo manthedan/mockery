@@ -44,6 +44,16 @@ export function splitClipForAsr(
   return pieces;
 }
 
+/* Where to cut an overlong sentence: the last space within `maxChars` that is not inside an inline
+   code span, so the voice still gets each span whole. */
+function wordBreakOutsideCode(text, maxChars) {
+  const lastSpace = text.lastIndexOf(" ", maxChars);
+  for (let at = lastSpace; at > 0; at = text.lastIndexOf(" ", at - 1)) {
+    if ((text.slice(0, at).split("`").length - 1) % 2 === 0) return at;
+  }
+  return lastSpace > 0 ? lastSpace : maxChars;
+}
+
 /* Split a message into pieces of at most `maxChars`, breaking between sentences where possible
    and between words otherwise. Fenced code blocks are never spoken, so they are dropped here: split
    across two pieces they would no longer look like blocks to the voice. An inline code span is kept
@@ -71,8 +81,7 @@ export function splitForSpeech(text, maxChars) {
     if (current) pieces.push(current);
     let rest = unit;
     while (rest.length > maxChars) {
-      const breakAt = rest.lastIndexOf(" ", maxChars);
-      const cut = breakAt > 0 ? breakAt : maxChars;
+      const cut = wordBreakOutsideCode(rest, maxChars);
       pieces.push(rest.slice(0, cut).trim());
       rest = rest.slice(cut).trim();
     }

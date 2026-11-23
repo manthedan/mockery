@@ -35,10 +35,13 @@ class JobListingImportRequest(BaseModel):
     target_level: str = DEFAULT_LEVEL
 
 
+MyQuestionCategory = Literal["behavioral", "general", "system_design", "coding"]
+
+
 class MyQuestionsAddRequest(BaseModel):
     """Save one question as written, or (`as_list`) every question in a pasted list."""
 
-    category: Literal["behavioral", "general", "system_design", "coding"]
+    category: MyQuestionCategory
     text: str = Field(max_length=MAX_MY_QUESTIONS * MAX_MY_QUESTION_CHARS)
     as_list: bool = False
 
@@ -211,10 +214,10 @@ def build_profile_router(runtime: Any) -> APIRouter:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"added": added, "already_saved": already_saved, "removed_details": removed_details}
 
-    @router.delete("/api/banks/mine/{question_id}")
-    async def delete_my_question(question_id: str) -> dict[str, Any]:
+    @router.delete("/api/banks/mine/{category}/{question_id}")
+    async def delete_my_question(category: MyQuestionCategory, question_id: str) -> dict[str, Any]:
         try:
-            deleted = await asyncio.to_thread(runtime.banks.delete_my_question, question_id)
+            deleted = await asyncio.to_thread(runtime.banks.delete_my_question, category, question_id)
         except MyQuestionsError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not deleted:

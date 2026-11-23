@@ -235,21 +235,35 @@ class PracticeSession(BaseModel):
 
 _FILLER_RE = re.compile(
     r"\b(?:u+h+m*|u+m+|h+m+|e+r+m*|a+h+|o+h+|yeah|yep|yes|no|nope|well|so|like|okay|ok|right|sure|"
+    r"hi|hello|hey|sorry|pass|skip|next|test|testing|"
     r"you know|i mean|i guess|let me think|let me see|not sure|no idea|i don't know|i dunno|"
     r"(?:great|good|nice|tough|hard|interesting) question)\b",
     re.IGNORECASE,
 )
-MIN_ANSWER_WORDS = 3
-"""Fewer real words than this, once the filler is set aside, is not an answer."""
+
+
+MIN_PRAISE_WORDS = 3
+"""An answer with fewer real words than this is taken as an answer, but is too thin to praise."""
+
+
+def _real_words(answer_text: str | None) -> int | None:
+    """How many words are left once the filler is set aside; None when a number makes the answer factual."""
+    text = answer_text or ""
+    if re.search(r"\d", text):
+        return None
+    return len(re.findall(r"[A-Za-z']*[A-Za-z][A-Za-z']*", _FILLER_RE.sub(" ", text)))
 
 
 def said_too_little(answer_text: str | None) -> bool:
-    """True when nothing was really said: only filler, or a word or two. A number always counts
-    ("$130k to $150k base", "Yes, in 2021"), so a short factual answer is still an answer."""
-    text = answer_text or ""
-    if re.search(r"\d", text):
-        return False
-    return len(re.findall(r"[A-Za-z']+", _FILLER_RE.sub(" ", text))) < MIN_ANSWER_WORDS
+    """True when nothing was really said: silence or only filler. Any real word or number counts,
+    so a terse answer ("Fully remote", "O(n)", "$130k to $150k base") is still an answer."""
+    return _real_words(answer_text) == 0
+
+
+def too_thin_to_praise(answer_text: str | None) -> bool:
+    """True for an answer of a word or two: coach it, but it has not earned a compliment."""
+    words = _real_words(answer_text)
+    return words is not None and words < MIN_PRAISE_WORDS
 
 
 _RANK = {"missing": 0, "partial": 1, "strong": 2}
@@ -338,11 +352,25 @@ def _concise_level(low: str, wc: int) -> str:
     return "partial" if wc <= 350 else "missing"
 
 
+_CLAUSE_BREAK_RE = re.compile(r"[.;!?,]|\bbut\b|\bthough\b|\bhowever\b")
+_NEGATION_RE = re.compile(r"\b(?:not|never|no|without|cannot|forgot|skipped|\w+n't)\b")
+
+
+def _affirmed(low: str, cue: str) -> bool:
+    """True when the answer says ``cue`` somewhere without denying it in the same clause
+    ("I did not check empty inputs" does not show edge-case handling)."""
+    for clause in _CLAUSE_BREAK_RE.split(low):
+        at = clause.find(cue)
+        if at != -1 and not _NEGATION_RE.search(clause[:at]):
+            return True
+    return False
+
+
 def _cue_level(cues: tuple[str, ...]) -> Any:
     """Two distinct cues is a clear signal, one is a mention."""
 
     def level(low: str, wc: int) -> str:
-        hits = sum(1 for cue in cues if cue in low)
+        hits = sum(1 for cue in cues if _affirmed(low, cue))
         return "strong" if hits >= 2 else ("partial" if hits == 1 else "missing")
 
     return level
@@ -448,7 +476,11 @@ def build_heuristic_nudge(
         if carl.get(slot) == "missing":
             signal = rubric.signal(slot)
             before = rubric.preceding(slot)
-            earned = before is not None and carl.get(before.slot, "missing") != "missing"
+            earned = (
+                before is not None
+                and carl.get(before.slot, "missing") != "missing"
+                and not (answer_text is not None and too_thin_to_praise(answer_text))
+            )
             message = f"{signal.earned_praise} {signal.nudge}" if earned and signal.earned_praise else signal.nudge
             return {"tone": signal.nudge_tone if earned else "tip", "message": message}
     if all(carl.get(slot, "missing") == "missing" for slot in SIGNAL_SLOTS):

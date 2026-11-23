@@ -52,10 +52,14 @@ class _ThinkingModel:
         return _response("", "length", thought if self.report_usage else None, "" if self.report_usage else "t" * thought * 3)
 
 
+SERVER = "http://localhost:8100/v1"
+KEY = (SERVER, MODEL)
+
+
 def _llm(tmp_path: Path, client: Any) -> InterviewCopilotLLM:
     cfg = LLMRuntimeConfig(tmp_path)
     cfg.provider = "omlx"
-    cfg.base_url = "http://localhost:8100/v1"
+    cfg.base_url = SERVER
     llm = InterviewCopilotLLM(cfg)
     llm._client = lambda: client  # type: ignore[method-assign]
     return llm
@@ -87,7 +91,7 @@ def test_thinking_returned_as_text_is_counted_when_no_token_count_is_reported(tm
     llm = _llm(tmp_path, model)
     assert _ask(llm, 300) == '{"ok": true}'
     assert len(model.requested) >= 2
-    assert llm._reasoning_allowance[MODEL] > 0
+    assert llm._reasoning_allowance[KEY] > 0
 
 
 def test_a_model_that_does_not_think_is_never_given_extra_or_retried(tmp_path: Path) -> None:
@@ -101,7 +105,7 @@ def test_a_model_that_does_not_think_is_never_given_extra_or_retried(tmp_path: P
     llm = _llm(tmp_path, client)
     assert _ask(llm, 200) == '{"cut": "off'
     assert calls == [200]
-    assert MODEL not in llm._reasoning_allowance
+    assert KEY not in llm._reasoning_allowance
 
 
 def test_extra_room_is_bounded_and_retries_stop(tmp_path: Path) -> None:
@@ -110,10 +114,66 @@ def test_extra_room_is_bounded_and_retries_stop(tmp_path: Path) -> None:
     assert _ask(llm, 480) == ""
     assert len(model.requested) == 3
     assert max(model.requested) <= 480 + REASONING_ALLOWANCE_CAP
-    assert llm._reasoning_allowance[MODEL] <= REASONING_ALLOWANCE_CAP
+    assert llm._reasoning_allowance[KEY] <= REASONING_ALLOWANCE_CAP
 
 
 def test_unfinished_inline_thinking_counts_as_thinking() -> None:
     assert _reasoning_tokens_spent(None, "", "<think>Let me work through this " + "step " * 60) > 0
     assert _reasoning_tokens_spent(None, "", "<think>done</think>{\"ok\": true}") == 0
     assert _reasoning_tokens_spent(None, "", '{"ok": true}') == 0
+
+
+def test_an_answer_that_ran_long_is_not_asked_for_again(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    async def _create(**kwargs: Any) -> Any:
+        calls.append(int(kwargs["max_tokens"]))
+        return _response('{"summary": "This answer ran past the', "length", 100)
+
+    llm = _llm(tmp_path, SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create))))
+    assert _ask(llm, 200) == '{"summary": "This answer ran past the'
+    assert calls == [200]
+    assert llm._reasoning_allowance[KEY] == 125
+
+
+def test_room_learned_on_one_server_is_not_given_to_another(tmp_path: Path) -> None:
+    model = _ThinkingModel(thinking_tokens=900)
+    llm = _llm(tmp_path, model)
+    _ask(llm, 200)
+    assert llm._reasoning_allowance[KEY] > 0
+
+    llm.config.base_url = "http://localhost:1234/v1"
+    other = _ThinkingModel(thinking_tokens=0)
+    llm._client = lambda: other  # type: ignore[method-assign]
+    _ask(llm, 200)
+    assert other.requested == [200]
+
+
+def test_a_reply_that_is_only_unfinished_thinking_becomes_a_labelled_built_in_hint(tmp_path: Path) -> None:
+    async def _create(**kwargs: Any) -> Any:
+        return _response("<think>The candidate has not yet said what they did, so " + "I should consider " * 40, "length", None)
+
+    llm = _llm(tmp_path, SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create))))
+    llm.config.fast_model = MODEL
+    assert _ask(llm, 160) == ""
+
+    reasons: list[str] = []
+    hint = asyncio.run(
+        llm.generate_practice_hint(
+            interview_type="behavioral",
+            target_level="Senior",
+            current_question={"prompt": "Tell me about a missed deadline.", "carl_focus": "Ownership"},
+            recent_turns=[{"role": "candidate", "text": "We were late."}],
+            fallback_reasons=reasons,
+        )
+    )
+    assert "<think>" not in hint and "consider" not in hint
+    assert len(reasons) == 1
+
+
+def test_finished_inline_thinking_is_dropped_from_the_reply(tmp_path: Path) -> None:
+    async def _create(**kwargs: Any) -> Any:
+        return _response("<think>Short and warm.</think>Name the number you moved.", "stop", None)
+
+    llm = _llm(tmp_path, SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create))))
+    assert _ask(llm, 160) == "Name the number you moved."

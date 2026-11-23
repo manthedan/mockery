@@ -95,6 +95,18 @@ _PHONE_RE = re.compile(
     r"(?<!\w)(?:\+?1[\s.\-]?)?(?:\(\d{3}\)|\d{3})[\s.\-]\d{3}[\s.\-]\d{4}(?!\w)"
 )
 _CC_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d[ \-]?){13,19}(?!\d)")
+# Contact details in text the candidate wrote themselves (see `strip_contact_details`).
+_INTERNATIONAL_PHONE_RE = re.compile(r"(?<![\w+])\+(?:\d[ \t().\-]?){7,14}\d(?!\w)")
+_NAMED_PHONE_RE = re.compile(
+    r"\b(?:call|text|phone|tel|telephone|mobile|cell|whatsapp)\b(?:[ \t]+(?:me|us|him|her|them))?"
+    r"(?:[ \t]+(?:at|on))?[ \t:#]*(\d{10,11})\b",
+    re.IGNORECASE,
+)
+_NAMED_SSN_RE = re.compile(
+    r"\b(?:ssn|social security(?:[ \t]+(?:number|no\.?))?)\b[ \t:#]*(?:is[ \t]+)?(\d{9})\b", re.IGNORECASE
+)
+# A card number is written in groups, or as a bare 15 or 16 digits; a shorter bare run is just a number.
+_WRITTEN_AS_CARD_RE = re.compile(r"\d{3,6}(?:[ \-]\d{3,6}){2,4}|\d{15,16}")
 _IPV4_RE = re.compile(
     r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|1?\d\d?)\b"
 )
@@ -931,7 +943,10 @@ class RampartRedactor:
         for m in _CC_CANDIDATE_RE.finditer(text):
             digits = _NON_DIGIT_RE.sub("", m.group(0))
             if _luhn_valid(digits):
-                spans.append(DetectedSpan(m.start(), m.end(), "CREDIT_CARD", "rules"))
+                end = m.end()
+                while text[end - 1] in " -":
+                    end -= 1
+                spans.append(DetectedSpan(m.start(), end, "CREDIT_CARD", "rules"))
         for m in _STREET_RE.finditer(text):
             spans.append(DetectedSpan(m.start(), m.end(), "STREET_ADDRESS", "rules"))
         for m in _ZIP_RE.finditer(text):
@@ -945,11 +960,27 @@ class RampartRedactor:
         Light redaction for text the candidate wrote themselves: replace email addresses, phone
         numbers, Social Security numbers and card numbers with a plain note, and leave every other
         word as written. Returns the cleaned text and the kinds of detail removed, in reading order.
+
+        A bare run of digits is removed only when the words before it say what it is, and nothing
+        inside a URL is touched, so the numbers in a technical question stay as written.
         """
-        spans = sorted(
-            (sp for sp in self._run_deterministic_rules(text) if sp.label in CONTACT_DETAIL_NAMES),
-            key=lambda sp: (sp.start, -(sp.end - sp.start)),
+        rule_spans = self._run_deterministic_rules(text)
+        url_ranges = [(sp.start, sp.end) for sp in rule_spans if sp.label == "URL"]
+        candidates = [sp for sp in rule_spans if sp.label in CONTACT_DETAIL_NAMES]
+        candidates.extend(
+            DetectedSpan(m.start(), m.end(), "PHONE", "rules") for m in _INTERNATIONAL_PHONE_RE.finditer(text)
         )
+        candidates.extend(DetectedSpan(m.start(1), m.end(1), "PHONE", "rules") for m in _NAMED_PHONE_RE.finditer(text))
+        candidates.extend(DetectedSpan(m.start(1), m.end(1), "SSN", "rules") for m in _NAMED_SSN_RE.finditer(text))
+
+        def is_contact_detail(sp: DetectedSpan) -> bool:
+            if sp.label == "EMAIL":
+                return True
+            if any(start <= sp.start and sp.end <= end for start, end in url_ranges):
+                return False
+            return sp.label != "CREDIT_CARD" or bool(_WRITTEN_AS_CARD_RE.fullmatch(text[sp.start : sp.end]))
+
+        spans = sorted(filter(is_contact_detail, candidates), key=lambda sp: (sp.start, -(sp.end - sp.start)))
         parts: list[str] = []
         removed: list[str] = []
         cursor = 0

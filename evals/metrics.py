@@ -981,7 +981,10 @@ def score_practice_interviewer_reply(
     if harsh_hits:
         failures.append(f"Harsh or discouraging phrasing detected: {harsh_hits}")
         suggestions.append("Keep both interviewer reply and coach nudge warm, encouraging, and constructive.")
-    did_not_reask = bool(expected.get("must_reask")) and "?" not in reply
+    # Asking again means asking about the same thing: a question mark alone is not enough.
+    reask_terms = [str(term).lower() for term in (expected.get("reask_terms") or []) if str(term).strip()]
+    asked_again = "?" in reply and (not reask_terms or any(term in reply_low for term in reask_terms))
+    did_not_reask = bool(expected.get("must_reask")) and not asked_again
     if did_not_reask:
         failures.append("Did not ask the question again after an answer that said nothing.")
         suggestions.append("After a non-answer, ask the same question again in simpler words.")

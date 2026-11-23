@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ..levels import normalize_level
 from ..models import short_id
@@ -24,6 +27,9 @@ MY_PACK_TITLE = "My questions"
 MAX_MY_QUESTIONS = 300
 MAX_MY_QUESTION_CHARS = 6_000
 MAX_QUESTION_TITLE_CHARS = 64
+MY_QUESTIONS_LOCK_FILE = ".my_questions.lock"
+MY_PACK_WRITE_ATTEMPTS = 3
+_T = TypeVar("_T")
 _BLANK_LINE_RE = re.compile(r"\n[ \t]*\n+")
 _LIST_MARKER_RE = re.compile(r"^(?:[-*•–]|\(?\d{1,3}[.)])[ \t]+")
 _WS_RUN_RE = re.compile(r"\s+")
@@ -35,6 +41,9 @@ class MyQuestionsError(ValueError):
 
 def my_pack_id(category: str) -> str:
     return f"my_{category}"
+
+
+_MY_PACK_FILES = {f"{my_pack_id(category)}.json": category for category in MY_QUESTION_CATEGORIES}
 
 
 def title_from_prompt(prompt: str) -> str:
@@ -49,8 +58,8 @@ def title_from_prompt(prompt: str) -> str:
 def split_pasted_questions(text: str) -> list[str]:
     """
     Split a pasted list into questions. Blank lines separate questions when the paste has any, so a
-    question may run over several lines; otherwise every line is one question. Leading bullets and
-    list numbers are dropped.
+    question may run over several lines; otherwise every line is one question. Inside a block,
+    numbered or bulleted lines each start a question. Leading bullets and list numbers are dropped.
     """
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not cleaned:
@@ -58,14 +67,26 @@ def split_pasted_questions(text: str) -> list[str]:
     blocks = _BLANK_LINE_RE.split(cleaned) if _BLANK_LINE_RE.search(cleaned) else cleaned.split("\n")
     questions: list[str] = []
     for block in blocks:
-        question = _LIST_MARKER_RE.sub("", block.strip(), count=1).strip()
-        if question:
-            questions.append(question)
+        lines = [line.strip() for line in block.strip().split("\n")]
+        if sum(1 for line in lines if _LIST_MARKER_RE.match(line)) < 2:
+            items = ["\n".join(lines)]
+        else:
+            items = []
+            for line in lines:
+                if _LIST_MARKER_RE.match(line) or not items:
+                    items.append(line)
+                else:
+                    items[-1] += f"\n{line}"
+        for item in items:
+            question = _LIST_MARKER_RE.sub("", item, count=1).strip()
+            if re.search(r"[^\W_]", question):
+                questions.append(question)
     return questions
 
 
 def _question_key(prompt: str) -> str:
-    return _WS_RUN_RE.sub(" ", prompt.strip()).lower()
+    """Two saved questions are the same when only their spacing differs; case can change the answer."""
+    return _WS_RUN_RE.sub(" ", prompt.strip())
 
 
 @dataclass(frozen=True)
@@ -87,6 +108,7 @@ class _CachedPack:
     category_lower: str
     indexed_questions: list[_IndexedQuestion]
     by_id: dict[str, _IndexedQuestion]
+    mine: bool = False
 
 
 class QuestionBankStore:
@@ -137,8 +159,11 @@ class QuestionBankStore:
                     if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
                         self._pack_cache.pop(key, None)
                         continue
-                    pack_id = str(data.get("pack_id") or path.stem)
-                    category = str(data.get("category") or "general")
+                    # A saved-questions file is known by its name, whatever its contents say, so a
+                    # hand edit can never turn the candidate's own questions into bank questions.
+                    my_category = None if is_bundled else _MY_PACK_FILES.get(path.name)
+                    pack_id = my_pack_id(my_category) if my_category else str(data.get("pack_id") or path.stem)
+                    category = my_category or str(data.get("category") or "general")
                     raw_questions = data["questions"]
                     meta = {
                         "pack_id": pack_id,
@@ -180,6 +205,7 @@ class QuestionBankStore:
                         category_lower=category.lower(),
                         indexed_questions=indexed,
                         by_id=by_id,
+                        mine=my_category is not None,
                     )
                     self._pack_cache[key] = cp
                     loaded.append(cp)
@@ -232,7 +258,7 @@ class QuestionBankStore:
                 item["levels"] = list(iq.levels)
                 item["pack_id"] = pack_id
                 item["category"] = pack_cat
-                item["mine"] = _is_my_pack(cp)
+                item["mine"] = cp.mine
                 if has_jd:
                     score = 0
                     for tag in iq.jd_tags_lower:
@@ -248,15 +274,18 @@ class QuestionBankStore:
             results.sort(key=lambda item: int(item.get("jd_relevance_score", 0)), reverse=True)
         return results
 
-    def get_question(self, question_id: str) -> dict[str, Any] | None:
-        for cp in self._load_cached_packs():
+    def get_question(self, question_id: str, *, category: str | None = None) -> dict[str, Any] | None:
+        """The question with this id; when two packs share an id, the one in ``category`` wins."""
+        wanted = (category or "").strip().lower()
+        packs = sorted(self._load_cached_packs(), key=lambda cp: cp.category_lower != wanted)
+        for cp in packs:
             iq = cp.by_id.get(question_id)
             if iq is not None:
                 item = dict(iq.raw)
                 item["levels"] = list(iq.levels)
                 item["pack_id"] = cp.meta["pack_id"]
                 item["category"] = cp.meta["category"]
-                item["mine"] = _is_my_pack(cp)
+                item["mine"] = cp.mine
                 return item
         return None
 
@@ -267,8 +296,12 @@ class QuestionBankStore:
             raise MyQuestionsError("This install has no folder for saved questions.")
         return self.user_dir / f"{my_pack_id(category)}.json"
 
-    def _read_my_pack(self, path: Path, category: str) -> dict[str, Any]:
-        if not path.exists():
+    @staticmethod
+    def _read_my_pack(path: Path, category: str) -> tuple[dict[str, Any], tuple[int, int] | None]:
+        """The pack and the file version it was read from (None when the file does not exist yet)."""
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
             return {
                 "pack_id": my_pack_id(category),
                 "title": MY_PACK_TITLE,
@@ -276,81 +309,102 @@ class QuestionBankStore:
                 "version": "1.0",
                 "description": "Questions you saved in Mockery. Edit this file freely; each question needs an id and a prompt.",
                 "questions": [],
-            }
+            }, None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise MyQuestionsError(f"{path.name} could not be read, so it was left untouched: {exc}") from exc
         if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
             raise MyQuestionsError(f"{path.name} is not a question pack, so it was left untouched.")
-        return data
+        return data, (stat.st_mtime_ns, stat.st_size)
 
     @staticmethod
-    def _write_my_pack(path: Path, data: dict[str, Any]) -> None:
+    def _file_version(path: Path) -> tuple[int, int] | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _change_my_pack(self, category: str, change: Callable[[dict[str, Any]], _T]) -> _T:
+        """
+        Apply ``change`` to one saved-questions pack and write it back only if ``change`` altered it.
+        Every Mockery process sharing this folder takes the same file lock, and a file that changed
+        after it was read (an edit made in a text editor) is read again instead of being overwritten.
+        """
+        path = self._my_pack_path(category)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        os.chmod(tmp_path, 0o600)
-        tmp_path.replace(path)
+        with self._my_questions_lock, open(path.parent / MY_QUESTIONS_LOCK_FILE, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            for _attempt in range(MY_PACK_WRITE_ATTEMPTS):
+                data, version = self._read_my_pack(path, category)
+                before = json.dumps(data, sort_keys=True)
+                result = change(data)
+                if json.dumps(data, sort_keys=True) == before:
+                    return result
+                with tempfile.NamedTemporaryFile(
+                    "w", encoding="utf-8", dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False
+                ) as tmp:
+                    tmp.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+                tmp_path = Path(tmp.name)
+                os.chmod(tmp_path, 0o600)
+                if self._file_version(path) != version:
+                    tmp_path.unlink()
+                    continue
+                tmp_path.replace(path)
+                return result
+        raise MyQuestionsError(f"{path.name} kept changing while it was being saved. Try again in a moment.")
 
     def add_my_questions(self, category: str, prompts: list[str]) -> tuple[list[dict[str, Any]], int]:
         """
         Save the candidate's own questions for one interview format.
         Returns the questions added and how many were skipped because they were already saved.
         """
-        path = self._my_pack_path(category)
-        with self._my_questions_lock:
-            data = self._read_my_pack(path, category)
+        texts = [prompt.strip() for prompt in prompts if prompt.strip()]
+        for text in texts:
+            if len(text) > MAX_MY_QUESTION_CHARS:
+                raise MyQuestionsError(
+                    f"A question is longer than {MAX_MY_QUESTION_CHARS:,} characters: {title_from_prompt(text)}"
+                )
+
+        def add(data: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
             questions: list[Any] = data["questions"]
             known = {_question_key(str(q.get("prompt") or "")) for q in questions if isinstance(q, dict)}
+            taken_ids = {str(q.get("id")) for q in questions if isinstance(q, dict)}
             added: list[dict[str, Any]] = []
             already_saved = 0
-            for prompt in prompts:
-                text = prompt.strip()
-                if not text:
-                    continue
-                if len(text) > MAX_MY_QUESTION_CHARS:
-                    raise MyQuestionsError(
-                        f"A question is longer than {MAX_MY_QUESTION_CHARS:,} characters: {title_from_prompt(text)}"
-                    )
+            for text in texts:
                 key = _question_key(text)
                 if key in known:
                     already_saved += 1
                     continue
                 known.add(key)
+                question_id = short_id("my")
+                while question_id in taken_ids:
+                    question_id = short_id("my")
+                taken_ids.add(question_id)
                 added.append(
-                    {
-                        "id": short_id("my"),
-                        "title": title_from_prompt(text),
-                        "competency": "Your question",
-                        "prompt": text,
-                    }
+                    {"id": question_id, "title": title_from_prompt(text), "competency": "Your question", "prompt": text}
                 )
             if len(questions) + len(added) > MAX_MY_QUESTIONS:
                 raise MyQuestionsError(
                     f"My questions holds up to {MAX_MY_QUESTIONS} per format. Remove some before adding more."
                 )
-            if added:
-                questions.extend(added)
-                self._write_my_pack(path, data)
-        return added, already_saved
+            questions.extend(added)
+            return added, already_saved
 
-    def delete_my_question(self, question_id: str) -> bool:
-        if self.user_dir is None:
+        return self._change_my_pack(category, add)
+
+    def delete_my_question(self, category: str, question_id: str) -> bool:
+        """Remove one saved question from one format's pack. False when it is not there."""
+        if not self._my_pack_path(category).exists():
             return False
-        with self._my_questions_lock:
-            for category in MY_QUESTION_CATEGORIES:
-                path = self._my_pack_path(category)
-                if not path.exists():
-                    continue
-                data = self._read_my_pack(path, category)
-                kept = [q for q in data["questions"] if not (isinstance(q, dict) and str(q.get("id")) == question_id)]
-                if len(kept) != len(data["questions"]):
-                    data["questions"] = kept
-                    self._write_my_pack(path, data)
+
+        def remove(data: dict[str, Any]) -> bool:
+            for index, question in enumerate(data["questions"]):
+                if isinstance(question, dict) and str(question.get("id")) == question_id:
+                    del data["questions"][index]
                     return True
-        return False
+            return False
 
-
-def _is_my_pack(pack: _CachedPack) -> bool:
-    return not pack.meta["bundled"] and pack.meta["pack_id"] == my_pack_id(pack.category_lower)
+        return self._change_my_pack(category, remove)
