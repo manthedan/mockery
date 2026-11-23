@@ -57,6 +57,7 @@ export function createProfileAddonsController({
   setModalState,
   onRoleApply,
   onLevelApply = null,
+  onProfileSummaryChange = null,
   isPracticeHome = null,
   onAddonsChange,
   onPracticeQuestion = null,
@@ -130,6 +131,7 @@ export function createProfileAddonsController({
   function renderProfileSummaryIndicators(summary = null) {
     const sum = summary || buildSummaryFromProfile(local.profile);
     state.profileSummary = sum;
+    if (typeof onProfileSummaryChange === "function") onProfileSummaryChange(sum);
 
     // Topbar indicator dot
     const dot = el("profileReadyDot");

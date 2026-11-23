@@ -22,6 +22,9 @@ const SOURCE_NOTES = {
     "Generates tailored prompts from your locally redacted resume and target job listing.",
 };
 
+const SOURCE_NOTE_NOTHING_TO_TAILOR =
+  "No resume or job listing yet, so questions come from Mockery's curated bank. Add either under Context to get tailored questions.";
+
 const CUSTOM_QUESTION_VALUE = "__custom__";
 const HANDS_FREE_STORAGE_KEY = "mockery_practice_hands_free";
 /* The longest single spoken take; it is transcribed in pieces (voice_clip.js). */
@@ -682,7 +685,22 @@ export function createPracticeStudioController({
     renderVoiceControls();
   }
 
+  /* Tailored questions are built from a resume or a job listing; with neither, the bank is used. */
+  function canTailorQuestions() {
+    return Boolean(state.profileSummary?.has_resume || state.profileSummary?.active_jd);
+  }
+
+  function renderSourceNote() {
+    const desc = el("practiceSourceDesc");
+    if (!desc) return;
+    desc.textContent =
+      local.questionSource !== "bank_only" && !canTailorQuestions()
+        ? SOURCE_NOTE_NOTHING_TO_TAILOR
+        : SOURCE_NOTES[local.questionSource] || SOURCE_NOTES.mixed;
+  }
+
   async function refreshQuestionPicker() {
+    renderSourceNote();
     const picker = el("practiceQuestionPicker");
     if (!picker) return;
     const fmt = getSelectedFormat();
@@ -2469,7 +2487,7 @@ export function createPracticeStudioController({
     const voiceOn = Boolean(el("practiceVoiceCheckbox")?.checked ?? true);
     local.voiceEnabled = voiceOn;
 
-    const isTailored = local.questionSource !== "bank_only";
+    const isTailored = local.questionSource !== "bank_only" && canTailorQuestions();
     startPendingTimer((sec) => {
       if (!hintEl) return;
       const suffix = sec >= 1.5 ? ` (${sec.toFixed(1)}s)` : "";
@@ -3697,8 +3715,7 @@ export function createPracticeStudioController({
       el("practiceSourcePills")
         ?.querySelectorAll("[data-practice-source]")
         .forEach((b) => b.classList.toggle("active", b === btn));
-      const desc = el("practiceSourceDesc");
-      if (desc) desc.textContent = SOURCE_NOTES[local.questionSource] || SOURCE_NOTES.mixed;
+      renderSourceNote();
     });
 
     el("practiceLevelPills")?.addEventListener("click", (ev) => {
@@ -3923,6 +3940,7 @@ export function createPracticeStudioController({
     applyStatusSnapshot,
     refreshPracticeHistory,
     refreshQuestionPicker,
+    renderSourceNote,
     openPracticeSession,
     exitPracticeToHome,
     setHomeMode,

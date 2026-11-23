@@ -4704,6 +4704,7 @@ profileAddons = createProfileAddonsController({
     }
   },
   onLevelApply: (level, opts) => practiceStudio?.setTargetLevel(level, opts),
+  onProfileSummaryChange: () => practiceStudio?.renderSourceNote(),
   isPracticeHome: () => Boolean(practiceStudio?.isHomePracticeMode?.()),
   onAddonsChange: (addons, tts = null) => {
     state.addons = addons;
