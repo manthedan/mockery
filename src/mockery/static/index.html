@@ -314,6 +314,11 @@
                       <option value="">Auto-select the best match for your job listing</option>
                       <option value="__custom__">Write my own question…</option>
                     </select>
+                    <div id="practiceMyQuestionRow" class="my-question-row hidden">
+                      <button type="button" id="practiceRemoveMyQuestionBtn" class="btn btn-ghost btn-sm">
+                        Remove from my questions
+                      </button>
+                    </div>
                     <textarea
                       id="practiceCustomQuestionInput"
                       class="profile-textarea practice-custom-question hidden"
@@ -322,8 +327,27 @@
                       aria-label="Your own opening question"
                       placeholder="Type or paste the question you want to practice."
                     ></textarea>
+                    <div id="practiceCustomQuestionTools" class="my-question-tools hidden">
+                      <label class="check-line" for="practiceKeepQuestionCheckbox" title="Saved questions appear in this list under My questions, for the format selected above.">
+                        <input id="practiceKeepQuestionCheckbox" class="switch" type="checkbox" role="switch" />
+                        <span>Keep in my questions</span>
+                      </label>
+                      <details id="practiceQuestionListDetails" class="my-question-list">
+                        <summary>Add a list to my questions</summary>
+                        <textarea
+                          id="practiceQuestionListInput"
+                          class="profile-textarea practice-custom-question"
+                          rows="5"
+                          aria-label="A list of your own questions"
+                          placeholder="One question per line. If a question runs over several lines, leave a blank line between questions."
+                        ></textarea>
+                        <button type="button" id="practiceSaveQuestionListBtn" class="btn btn-outline btn-sm">
+                          Add to my questions
+                        </button>
+                      </details>
+                    </div>
                     <p id="practiceCustomQuestionNote" class="prop-note hidden">
-                      Email addresses, phone numbers and ID or card numbers are removed when the session starts. Everything else, names included, goes to your AI provider as written.
+                      Email addresses, phone numbers and ID or card numbers are removed before a question is saved or used. Everything else, names included, goes to your AI provider as written.
                     </p>
                   </div>
                 </div>

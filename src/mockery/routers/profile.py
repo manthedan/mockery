@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from ..banks import MAX_MY_QUESTION_CHARS, MAX_MY_QUESTIONS, MyQuestionsError, split_pasted_questions
 from ..levels import DEFAULT_LEVEL
 from ..profiles import ResumeRedactionPrefs, StaleResumeDocumentError
 from ..redactor import (
@@ -32,6 +33,14 @@ class JobListingImportRequest(BaseModel):
     title: str = ""
     company: str = ""
     target_level: str = DEFAULT_LEVEL
+
+
+class MyQuestionsAddRequest(BaseModel):
+    """Save one question as written, or (`as_list`) every question in a pasted list."""
+
+    category: Literal["behavioral", "general", "system_design", "coding"]
+    text: str = Field(max_length=MAX_MY_QUESTIONS * MAX_MY_QUESTION_CHARS)
+    as_list: bool = False
 
 
 def build_profile_router(runtime: Any) -> APIRouter:
@@ -183,5 +192,33 @@ def build_profile_router(runtime: Any) -> APIRouter:
             "questions": questions,
             "matched_jd_id": active_jd.id if active_jd else None,
         }
+
+    @router.post("/api/banks/mine")
+    async def add_my_questions(body: MyQuestionsAddRequest) -> dict[str, Any]:
+        pasted = split_pasted_questions(body.text) if body.as_list else [body.text.strip()]
+        prompts: list[str] = []
+        removed_details: list[str] = []
+        for question in pasted:
+            cleaned, removed = runtime.redactor.strip_contact_details(question)
+            if cleaned.strip():
+                prompts.append(cleaned)
+            removed_details.extend(name for name in removed if name not in removed_details)
+        if not prompts:
+            raise HTTPException(status_code=422, detail="Type or paste at least one question to save.")
+        try:
+            added, already_saved = await asyncio.to_thread(runtime.banks.add_my_questions, body.category, prompts)
+        except MyQuestionsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"added": added, "already_saved": already_saved, "removed_details": removed_details}
+
+    @router.delete("/api/banks/mine/{question_id}")
+    async def delete_my_question(question_id: str) -> dict[str, Any]:
+        try:
+            deleted = await asyncio.to_thread(runtime.banks.delete_my_question, question_id)
+        except MyQuestionsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="That question is not in My questions.")
+        return {"ok": True}
 
     return router

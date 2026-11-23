@@ -27,6 +27,7 @@ const SOURCE_NOTE_NOTHING_TO_TAILOR =
 
 const CUSTOM_QUESTION_VALUE = "__custom__";
 const HANDS_FREE_STORAGE_KEY = "mockery_practice_hands_free";
+const KEEP_QUESTION_STORAGE_KEY = "mockery_practice_keep_question";
 /* The longest single spoken take; it is transcribed in pieces (voice_clip.js). */
 const MAX_TAKE_SECONDS = 360;
 const MIN_TAKE_SAMPLES = ASR_SAMPLE_RATE / 10;
@@ -331,6 +332,7 @@ export function createPracticeStudioController({
     // Home launch form
     levelTouched: false,
     pickerSeq: 0,
+    myQuestionIds: new Set(),
     exitForceArmed: false,
     exitForceTimer: null,
   };
@@ -755,18 +757,22 @@ export function createPracticeStudioController({
       }
       if (seq !== local.pickerSeq) return;
       const prevVal = picker.value;
+      const optionFor = (q) => {
+        const tag = q.jd_relevance_score > 0 ? " ★ matches your listing" : "";
+        const title = q.title || q.prompt?.slice(0, 60) || q.competency || q.id;
+        const difficulty = q.difficulty ? ` · ${q.difficulty}` : "";
+        return `<option value="${escapeHtml(q.id)}">${escapeHtml(`${title}${difficulty}`)}${tag}</option>`;
+      };
+      const mine = questions.filter((q) => q.mine);
+      const bank = questions.filter((q) => !q.mine).slice(0, 24);
+      local.myQuestionIds = new Set(mine.map((q) => q.id));
+      const group = (label, items) =>
+        items.length ? `<optgroup label="${label}">${items.map(optionFor).join("")}</optgroup>` : "";
       picker.innerHTML =
         `<option value="">Auto-select the best match for your job listing</option>` +
         `<option value="${CUSTOM_QUESTION_VALUE}">Write my own question…</option>` +
-        questions
-          .slice(0, 24)
-          .map((q) => {
-            const tag = q.jd_relevance_score > 0 ? " ★ matches your listing" : "";
-            const title = q.title || q.prompt?.slice(0, 60) || q.competency || q.id;
-            const difficulty = q.difficulty ? ` · ${q.difficulty}` : "";
-            return `<option value="${escapeHtml(q.id)}">${escapeHtml(`${title}${difficulty}`)}${tag}</option>`;
-          })
-          .join("");
+        group("My questions", mine) +
+        (mine.length ? group("Question bank", bank) : bank.map(optionFor).join(""));
       if ([...picker.options].some((o) => o.value === prevVal)) {
         picker.value = prevVal;
       }
@@ -780,10 +786,92 @@ export function createPracticeStudioController({
   function syncCustomQuestionField() {
     const field = el("practiceCustomQuestionInput");
     if (!field) return;
-    const isCustom = el("practiceQuestionPicker")?.value === CUSTOM_QUESTION_VALUE;
+    const picked = el("practiceQuestionPicker")?.value || "";
+    const isCustom = picked === CUSTOM_QUESTION_VALUE;
     field.classList.toggle("hidden", !isCustom);
+    el("practiceCustomQuestionTools")?.classList.toggle("hidden", !isCustom);
     el("practiceCustomQuestionNote")?.classList.toggle("hidden", !isCustom);
+    el("practiceMyQuestionRow")?.classList.toggle("hidden", !local.myQuestionIds.has(picked));
     field.placeholder = CUSTOM_QUESTION_PLACEHOLDERS[getSelectedFormat()] || CUSTOM_QUESTION_PLACEHOLDERS.behavioral;
+  }
+
+  /* Save to the candidate's own pack for the selected format: one question as written, or every
+     question in a pasted list. Returns the server's answer, or null when nothing was saved. */
+  async function saveMyQuestions(text, { asList }) {
+    try {
+      const res = await fetch("/api/banks/mine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category: getSelectedFormat(), text, as_list: asList }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not save to My questions"));
+      return data;
+    } catch (err) {
+      showToast(String(err?.message || "Could not save to My questions."), 3800);
+      return null;
+    }
+  }
+
+  function savedQuestionsSummary(data) {
+    const added = data.added?.length || 0;
+    const parts = [];
+    if (added) parts.push(`Added ${added} ${added === 1 ? "question" : "questions"} to My questions.`);
+    if (data.already_saved) parts.push(`${data.already_saved} already there.`);
+    if (data.removed_details?.length) parts.push(`Removed first: ${data.removed_details.join(", ")}.`);
+    return parts.join(" ");
+  }
+
+  async function showSavedQuestion(data) {
+    await refreshQuestionPicker();
+    const picker = el("practiceQuestionPicker");
+    const firstId = data.added?.[0]?.id;
+    if (picker && firstId && local.myQuestionIds.has(firstId)) {
+      picker.value = firstId;
+      syncCustomQuestionField();
+    }
+  }
+
+  async function saveQuestionList() {
+    const field = el("practiceQuestionListInput");
+    const text = (field?.value || "").trim();
+    if (!text) {
+      showToast("Paste the questions you want to keep, one per line.", 3000);
+      field?.focus();
+      return;
+    }
+    const data = await saveMyQuestions(text, { asList: true });
+    if (!data) return;
+    showToast(savedQuestionsSummary(data), 4200);
+    field.value = "";
+    el("practiceQuestionListDetails")?.removeAttribute("open");
+    await showSavedQuestion(data);
+  }
+
+  /* The question just used to start a session moves from the box into the saved list. */
+  async function keepStartedQuestion(text) {
+    const data = await saveMyQuestions(text, { asList: false });
+    if (!data) return;
+    const field = el("practiceCustomQuestionInput");
+    if (field && field.value.trim() === text) field.value = "";
+    await showSavedQuestion(data);
+  }
+
+  async function removeMyQuestion() {
+    const picker = el("practiceQuestionPicker");
+    const id = picker?.value || "";
+    if (!local.myQuestionIds.has(id)) return;
+    try {
+      const res = await fetch(`/api/banks/mine/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(formatApiDetail(data.detail, "Could not remove the question"));
+    } catch (err) {
+      showToast(String(err?.message || "Could not remove the question."), 3800);
+      return;
+    }
+    picker.value = "";
+    await refreshQuestionPicker();
+    showToast("Removed from My questions.", 2600);
   }
 
   async function refreshPracticeHistory() {
@@ -2608,6 +2696,7 @@ export function createPracticeStudioController({
       if (data.removed_details?.length) {
         showToast(`Removed from your question before it was sent: ${data.removed_details.join(", ")}.`, 4200);
       }
+      if (customQuestion && el("practiceKeepQuestionCheckbox")?.checked) keepStartedQuestion(customQuestion);
       if (data.opening_turn?.text && local.voiceEnabled) {
         speakText(data.opening_turn.text, { thenListen: true });
       }
@@ -3836,6 +3925,24 @@ export function createPracticeStudioController({
       syncCustomQuestionField();
       if (el("practiceQuestionPicker")?.value === CUSTOM_QUESTION_VALUE) el("practiceCustomQuestionInput")?.focus();
     });
+
+    const keepBox = el("practiceKeepQuestionCheckbox");
+    if (keepBox) {
+      try {
+        keepBox.checked = window.localStorage?.getItem(KEEP_QUESTION_STORAGE_KEY) === "1";
+      } catch {
+        keepBox.checked = false;
+      }
+      keepBox.addEventListener("change", () => {
+        try {
+          window.localStorage?.setItem(KEEP_QUESTION_STORAGE_KEY, keepBox.checked ? "1" : "0");
+        } catch {
+          /* The choice still applies to this visit. */
+        }
+      });
+    }
+    el("practiceSaveQuestionListBtn")?.addEventListener("click", () => saveQuestionList());
+    el("practiceRemoveMyQuestionBtn")?.addEventListener("click", () => removeMyQuestion());
 
     el("practiceStartBtn")?.addEventListener("click", () => startNewPractice());
 

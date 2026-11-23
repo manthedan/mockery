@@ -10,12 +10,62 @@ from pathlib import Path
 from typing import Any
 
 from ..levels import normalize_level
+from ..models import short_id
 
 logger = logging.getLogger("mockery.banks")
 
 BUNDLED_BANKS_DIR = Path(__file__).resolve().parent
 _JD_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9+#.\-]{1,24}")
 _Q_WORD_RE = re.compile(r"[a-z0-9]{4,20}")
+
+# The candidate's own saved questions: one hand-editable pack per interview format.
+MY_QUESTION_CATEGORIES = ("behavioral", "general", "system_design", "coding")
+MY_PACK_TITLE = "My questions"
+MAX_MY_QUESTIONS = 300
+MAX_MY_QUESTION_CHARS = 6_000
+MAX_QUESTION_TITLE_CHARS = 64
+_BLANK_LINE_RE = re.compile(r"\n[ \t]*\n+")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*•–]|\(?\d{1,3}[.)])[ \t]+")
+_WS_RUN_RE = re.compile(r"\s+")
+
+
+class MyQuestionsError(ValueError):
+    """A saved-question change that cannot be applied; the message is written for the candidate."""
+
+
+def my_pack_id(category: str) -> str:
+    return f"my_{category}"
+
+
+def title_from_prompt(prompt: str) -> str:
+    """A one-line title for a question the candidate wrote: its first line, shortened if long."""
+    lines = prompt.strip().splitlines()
+    first_line = lines[0].strip() if lines else ""
+    if len(first_line) <= MAX_QUESTION_TITLE_CHARS:
+        return first_line
+    return first_line[: MAX_QUESTION_TITLE_CHARS - 1].rstrip() + "…"
+
+
+def split_pasted_questions(text: str) -> list[str]:
+    """
+    Split a pasted list into questions. Blank lines separate questions when the paste has any, so a
+    question may run over several lines; otherwise every line is one question. Leading bullets and
+    list numbers are dropped.
+    """
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not cleaned:
+        return []
+    blocks = _BLANK_LINE_RE.split(cleaned) if _BLANK_LINE_RE.search(cleaned) else cleaned.split("\n")
+    questions: list[str] = []
+    for block in blocks:
+        question = _LIST_MARKER_RE.sub("", block.strip(), count=1).strip()
+        if question:
+            questions.append(question)
+    return questions
+
+
+def _question_key(prompt: str) -> str:
+    return _WS_RUN_RE.sub(" ", prompt.strip()).lower()
 
 
 @dataclass(frozen=True)
@@ -50,6 +100,7 @@ class QuestionBankStore:
         self.bundled_dir = BUNDLED_BANKS_DIR
         self.user_dir = user_banks_dir
         self._lock = threading.Lock()
+        self._my_questions_lock = threading.Lock()
         self._pack_cache: dict[tuple[str, bool], _CachedPack] = {}
 
     def _iter_pack_files(self) -> list[tuple[Path, bool]]:
@@ -181,6 +232,7 @@ class QuestionBankStore:
                 item["levels"] = list(iq.levels)
                 item["pack_id"] = pack_id
                 item["category"] = pack_cat
+                item["mine"] = _is_my_pack(cp)
                 if has_jd:
                     score = 0
                     for tag in iq.jd_tags_lower:
@@ -204,5 +256,101 @@ class QuestionBankStore:
                 item["levels"] = list(iq.levels)
                 item["pack_id"] = cp.meta["pack_id"]
                 item["category"] = cp.meta["category"]
+                item["mine"] = _is_my_pack(cp)
                 return item
         return None
+
+    def _my_pack_path(self, category: str) -> Path:
+        if category not in MY_QUESTION_CATEGORIES:
+            raise MyQuestionsError(f"Unknown interview format: {category}")
+        if self.user_dir is None:
+            raise MyQuestionsError("This install has no folder for saved questions.")
+        return self.user_dir / f"{my_pack_id(category)}.json"
+
+    def _read_my_pack(self, path: Path, category: str) -> dict[str, Any]:
+        if not path.exists():
+            return {
+                "pack_id": my_pack_id(category),
+                "title": MY_PACK_TITLE,
+                "category": category,
+                "version": "1.0",
+                "description": "Questions you saved in Mockery. Edit this file freely; each question needs an id and a prompt.",
+                "questions": [],
+            }
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise MyQuestionsError(f"{path.name} could not be read, so it was left untouched: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
+            raise MyQuestionsError(f"{path.name} is not a question pack, so it was left untouched.")
+        return data
+
+    @staticmethod
+    def _write_my_pack(path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.chmod(tmp_path, 0o600)
+        tmp_path.replace(path)
+
+    def add_my_questions(self, category: str, prompts: list[str]) -> tuple[list[dict[str, Any]], int]:
+        """
+        Save the candidate's own questions for one interview format.
+        Returns the questions added and how many were skipped because they were already saved.
+        """
+        path = self._my_pack_path(category)
+        with self._my_questions_lock:
+            data = self._read_my_pack(path, category)
+            questions: list[Any] = data["questions"]
+            known = {_question_key(str(q.get("prompt") or "")) for q in questions if isinstance(q, dict)}
+            added: list[dict[str, Any]] = []
+            already_saved = 0
+            for prompt in prompts:
+                text = prompt.strip()
+                if not text:
+                    continue
+                if len(text) > MAX_MY_QUESTION_CHARS:
+                    raise MyQuestionsError(
+                        f"A question is longer than {MAX_MY_QUESTION_CHARS:,} characters: {title_from_prompt(text)}"
+                    )
+                key = _question_key(text)
+                if key in known:
+                    already_saved += 1
+                    continue
+                known.add(key)
+                added.append(
+                    {
+                        "id": short_id("my"),
+                        "title": title_from_prompt(text),
+                        "competency": "Your question",
+                        "prompt": text,
+                    }
+                )
+            if len(questions) + len(added) > MAX_MY_QUESTIONS:
+                raise MyQuestionsError(
+                    f"My questions holds up to {MAX_MY_QUESTIONS} per format. Remove some before adding more."
+                )
+            if added:
+                questions.extend(added)
+                self._write_my_pack(path, data)
+        return added, already_saved
+
+    def delete_my_question(self, question_id: str) -> bool:
+        if self.user_dir is None:
+            return False
+        with self._my_questions_lock:
+            for category in MY_QUESTION_CATEGORIES:
+                path = self._my_pack_path(category)
+                if not path.exists():
+                    continue
+                data = self._read_my_pack(path, category)
+                kept = [q for q in data["questions"] if not (isinstance(q, dict) and str(q.get("id")) == question_id)]
+                if len(kept) != len(data["questions"]):
+                    data["questions"] = kept
+                    self._write_my_pack(path, data)
+                    return True
+        return False
+
+
+def _is_my_pack(pack: _CachedPack) -> bool:
+    return not pack.meta["bundled"] and pack.meta["pack_id"] == my_pack_id(pack.category_lower)
