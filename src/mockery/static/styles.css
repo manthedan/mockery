@@ -8284,3 +8284,228 @@ label.addon-row {
   border-color: var(--bad);
   background: color-mix(in srgb, var(--bad) 10%, transparent);
 }
+
+/* ----------------------------------------------------------------------------
+   Browser-style Background Downloads Tray & Inline Pack Progress Bars
+   ---------------------------------------------------------------------------- */
+
+.downloads-trigger {
+  gap: 6px;
+  padding: 0 8px;
+}
+
+.dl-ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.dl-ring-svg {
+  position: absolute;
+  inset: 0;
+  width: 20px;
+  height: 20px;
+  transform: rotate(-90deg);
+}
+
+.dl-ring-track {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.8;
+}
+
+.dl-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-dasharray: 47.12;
+  stroke-dashoffset: 47.12;
+  transition: stroke-dashoffset 0.22s ease, stroke 0.18s ease;
+}
+
+.downloads-trigger.is-done .dl-ring-fill {
+  stroke: var(--good);
+}
+
+.downloads-trigger.is-error .dl-ring-fill {
+  stroke: var(--bad);
+}
+
+.dl-ring-arrow {
+  width: 11px;
+  height: 11px;
+  color: var(--ink-2);
+}
+
+.downloads-trigger.is-active .dl-ring-arrow {
+  color: var(--ink);
+}
+
+.downloads-trigger.is-done .dl-ring-arrow {
+  color: var(--good);
+}
+
+.downloads-trigger.is-error .dl-ring-arrow {
+  color: var(--bad);
+}
+
+.dl-trigger-label {
+  font-size: 12px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.dl-trigger-label:empty {
+  display: none;
+}
+
+.downloads-popover {
+  left: auto;
+  right: 0;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  padding: 12px 14px;
+}
+
+.downloads-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.dl-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.dl-item:first-child {
+  padding-top: 2px;
+  border-top: 0;
+}
+
+.dl-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dl-item-title {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.dl-item-state {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.dl-item-state.is-ok {
+  color: var(--good);
+}
+
+.dl-item-state.is-err {
+  color: var(--bad);
+}
+
+.dl-item-err {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--bad);
+  word-break: break-word;
+}
+
+.dl-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dl-bar {
+  position: relative;
+  height: 4px;
+  width: 100%;
+  border-radius: 99px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.dl-bar-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 99px;
+  background: var(--accent);
+  transition: width 0.22s ease;
+}
+
+.dl-bar-fill.is-indeterminate {
+  width: 36%;
+  animation: dl-indeterminate 1.25s ease-in-out infinite;
+}
+
+@keyframes dl-indeterminate {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.dl-bar-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-bar-meta-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-bar-meta-pct {
+  flex-shrink: 0;
+  font-weight: 550;
+  color: var(--ink-2);
+}
+
+.onboard-pack-progress,
+.addon-pack-progress {
+  margin-top: 8px;
+}
+
+.onboard-bg-note {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-right: 4px;
+}

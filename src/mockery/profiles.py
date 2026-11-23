@@ -271,6 +271,20 @@ class CandidateProfileStore:
         with self._prefs_lock:
             return self._update_redaction_prefs_serialized(prefs)
 
+    def refresh_resume_redaction(self) -> ResumeProfile | None:
+        """Re-run redaction on the active resume using its latest preferences under `_prefs_lock`."""
+        with self._prefs_lock:
+            with self._lock:
+                r = self._state.resume
+                doc_token = self._active_doc_token
+                if r is None or doc_token is None:
+                    return None
+                current_prefs = r.prefs.model_copy(deep=True)
+            try:
+                return self._update_redaction_prefs_serialized(current_prefs, expected_doc_token=doc_token)
+            except StaleResumeDocumentError:
+                return self._state.resume
+
     def toggle_span_redaction(
         self,
         span_id: str,

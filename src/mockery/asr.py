@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import re
@@ -20,6 +21,7 @@ from parakeet_mlx.audio import get_logmel
 from parakeet_mlx.cache import RotatingConformerCache
 from parakeet_mlx.conformer import DwStridingSubsampling
 
+from .downloads import DownloadProgress, format_download_error, make_hf_progress_tqdm_class
 from .models import DEFAULT_PARAKEET_MODEL, PARAKEET_CHECKPOINTS
 from .state_machines import ASR_MODEL_TRANSITIONS, ASRModelState
 
@@ -521,6 +523,7 @@ class ParakeetEngine:
         self.state: ASRModelState = ASRModelState.IDLE
         self.error_message: str | None = None
         self.last_inference_ms: float = 0.0
+        self._download_progress: dict[str, Any] | None = None
 
     def _set_state_locked(self, next_state: ASRModelState) -> None:
         if next_state == self.state:
@@ -584,6 +587,44 @@ class ParakeetEngine:
             t0 = time.perf_counter()
             _configure_mlx_cache_limit()
             source = _resolve_model_source(target_id)
+            if source == target_id and not Path(target_id).exists():
+                approx_mb = 620 if "v3" in target_id else 600
+
+                def _on_dl_progress(prog: dict[str, Any]) -> None:
+                    with self._state_lock:
+                        if self._load_gen == expected_gen:
+                            self._download_progress = prog
+
+                _on_dl_progress(
+                    DownloadProgress(
+                        phase="downloading",
+                        bytes_done=0,
+                        bytes_total=approx_mb * 1024 * 1024,
+                    ).to_dict()
+                )
+                tqdm_cls = make_hf_progress_tqdm_class(
+                    _on_dl_progress,
+                    approx_total_bytes=approx_mb * 1024 * 1024,
+                )
+                supports_tqdm = False
+                supports_allow = False
+                try:
+                    params = inspect.signature(snapshot_download).parameters
+                    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                    supports_tqdm = has_var_kw or "tqdm_class" in params
+                    supports_allow = has_var_kw or "allow_patterns" in params
+                except (TypeError, ValueError):
+                    pass
+                dl_kwargs: dict[str, Any] = {}
+                if supports_allow:
+                    dl_kwargs["allow_patterns"] = ["config.json", "model.safetensors"]
+                if supports_tqdm:
+                    dl_kwargs["tqdm_class"] = tqdm_cls
+                source = snapshot_download(target_id, **dl_kwargs)
+                _on_dl_progress(
+                    DownloadProgress(phase="loading", percent=100.0, cancellable=False).to_dict()
+                )
+
             model = from_pretrained(source, dtype=mx.bfloat16)
             opt_mode = _optimize_parakeet_model(model)
             fast_decoder = FastTDTGreedyDecoder.try_build(model)
@@ -612,6 +653,7 @@ class ParakeetEngine:
                     self._optimization_mode = (
                         f"{opt_mode}+amx-tdt+kv-stream" if fast_decoder is not None else opt_mode
                     )
+                    self._download_progress = None
                     self._set_state_locked(ASRModelState.READY)
                     self.error_message = None
 
@@ -623,10 +665,12 @@ class ParakeetEngine:
                 self._optimization_mode,
             )
         except Exception as exc:  # pragma: no cover
-            logger.exception("Failed to load Parakeet MLX model")
+            clean_err = format_download_error(exc, label=target_id)
+            logger.error("Failed to load Parakeet MLX model (%s): %s", target_id, clean_err)
             with self._state_lock:
                 if self._load_gen == expected_gen:
-                    self.error_message = str(exc)
+                    self._download_progress = None
+                    self.error_message = clean_err
                     self._set_state_locked(ASRModelState.ERROR)
 
     @staticmethod
@@ -845,5 +889,6 @@ class ParakeetEngine:
             "checkpoints": PARAKEET_CHECKPOINTS,
             "last_inference_ms": self.last_inference_ms,
             "error": self.error_message,
+            "download_progress": dict(self._download_progress) if self._download_progress else None,
         }
 

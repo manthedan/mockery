@@ -578,26 +578,34 @@ export function createPracticeStudioController({
         voiceNote.textContent = activeEngine === "macos_say" ? "Using macOS voice" : "Using browser voice";
       }
 
+      const packsList = state.addons?.packs || [];
+      const phononPack = packsList.find((p) => p.id === "phonon_tts");
+      const kokoroPack = packsList.find((p) => p.id === "kokoro_tts");
+
       if (installPhononBtn) {
         installPhononBtn.classList.toggle("hidden", !tts.phonon_available);
-        const busy = phononOp === "installing" || phononOp === "uninstalling";
+        const installing = phononOp === "installing" || phononPack?.state === "installing";
+        const busy = installing || phononOp === "uninstalling" || phononPack?.state === "uninstalling";
         installPhononBtn.disabled = busy;
         installPhononBtn.classList.toggle("is-busy", busy);
+        const pct = phononPack?.progress?.percent;
         installPhononBtn.textContent =
-          phononOp === "installing"
-            ? "Downloading…"
+          installing
+            ? (typeof pct === "number" && pct > 0 ? `Downloading ${Math.round(pct)}%…` : "Downloading…")
             : phononOp === "uninstalling"
               ? "Removing…"
               : "Phonon · 62 MB";
       }
       if (installKokoroBtn) {
         installKokoroBtn.classList.toggle("hidden", !tts.kokoro_available);
-        const busy = kokoroOp === "installing" || kokoroOp === "uninstalling";
+        const installing = kokoroOp === "installing" || kokoroPack?.state === "installing";
+        const busy = installing || kokoroOp === "uninstalling" || kokoroPack?.state === "uninstalling";
         installKokoroBtn.disabled = busy;
         installKokoroBtn.classList.toggle("is-busy", busy);
+        const pct = kokoroPack?.progress?.percent;
         installKokoroBtn.textContent =
-          kokoroOp === "installing"
-            ? "Downloading…"
+          installing
+            ? (typeof pct === "number" && pct > 0 ? `Downloading ${Math.round(pct)}%…` : "Downloading…")
             : kokoroOp === "uninstalling"
               ? "Removing…"
               : "Kokoro · 183 MB";

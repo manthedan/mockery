@@ -6,10 +6,11 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..downloads import format_download_error
 from ..state_machines import InvalidStateTransitionError
 
 MAX_ASR_AUDIO_BYTES = 4 * 1024 * 1024
@@ -64,13 +65,11 @@ def build_addons_router(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             if event == "install":
-                raise HTTPException(status_code=500, detail=f"Failed to install {pack_id}: {exc}") from exc
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to install {pack_id}: {format_download_error(exc)}",
+                ) from exc
             raise
-        if pack_id == "rampart_pii" and event == "install" and runtime.profiles.state.resume is not None:
-            await asyncio.to_thread(
-                runtime.profiles.update_redaction_prefs,
-                runtime.profiles.state.resume.prefs,
-            )
         return {
             "addons": status,
             "profile": runtime.profiles.public_dict(),
@@ -78,8 +77,59 @@ def build_addons_router(
         }
 
     @router.post("/api/addons/{pack_id}/install")
-    async def install_addon_pack(pack_id: str) -> dict[str, Any]:
+    async def install_addon_pack(
+        pack_id: str,
+        background: bool = Query(default=False),
+    ) -> Any:
+        if background:
+            pack = runtime.addons.get_pack_spec(pack_id)
+            if pack is not None and "install" not in pack["allowed_events"]:
+                if pack["state"] == "installing":
+                    return JSONResponse(
+                        status_code=202,
+                        content={
+                            "addons": runtime.addons.status_dict(),
+                            "tts": runtime.tts.status_dict(),
+                            "background": True,
+                        },
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail=InvalidStateTransitionError(
+                        machine="addon_pack",
+                        current_state=pack["state"],
+                        event="install",
+                        allowed_events=pack["allowed_events"],
+                        remediation=pack["blocked_reasons"].get(
+                            "install",
+                            f"Cannot install '{pack_id}' while in state '{pack['state']}'.",
+                        ),
+                    ).to_dict(),
+                )
+            try:
+                status = runtime.addons.start_install_pack(pack_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "addons": status,
+                    "tts": runtime.tts.status_dict(),
+                    "background": True,
+                },
+            )
         return await _run_pack_action(pack_id, "install", "install", runtime.addons.install_pack)
+
+    @router.post("/api/addons/{pack_id}/cancel")
+    async def cancel_addon_pack(pack_id: str) -> dict[str, Any]:
+        try:
+            status = runtime.addons.cancel_install(pack_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "addons": status,
+            "tts": runtime.tts.status_dict(),
+        }
 
     @router.delete("/api/addons/{pack_id}")
     async def uninstall_addon_pack(pack_id: str) -> dict[str, Any]:

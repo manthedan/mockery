@@ -112,6 +112,24 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # Suppress HTTP client INFO logs and strip signed query strings from Hub logs.
+    for _noisy_logger in ("httpx", "httpx2", "httpcore", "httpcore2"):
+        logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+    from .downloads import sanitize_error_text
+
+    class _RedactSignedUrlFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            try:
+                msg = record.getMessage()
+                cleaned = sanitize_error_text(msg)
+                if cleaned != msg:
+                    record.msg = cleaned
+                    record.args = ()
+            except Exception:
+                pass
+            return True
+
+    logging.getLogger("huggingface_hub").addFilter(_RedactSignedUrlFilter())
 
     lan_token: str | None = None
     if not _is_loopback_host(args.host):

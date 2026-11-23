@@ -272,27 +272,43 @@ class AppRuntime:
         self._asr_http_sem = asyncio.Semaphore(1)
         self._tts_sem = asyncio.Semaphore(2)
 
+        def _run_with_progress(fn: Any, on_progress: Any = None, cancel_event: Any = None) -> Any:
+            return asyncio.to_thread(
+                self.addons._call_install_handler,
+                fn,
+                on_progress=on_progress,
+                cancel_event=cancel_event,
+            )
+
         self.addons.register_pack_handler(
             "phonon_tts",
             is_installed=self.tts.is_phonon_installed,
-            install=lambda: asyncio.to_thread(self.tts.install_phonon),
+            install=lambda on_progress=None, cancel_event=None: _run_with_progress(
+                self.tts.install_phonon, on_progress, cancel_event
+            ),
             uninstall=lambda: asyncio.to_thread(self.tts.uninstall_phonon),
             available=self.tts.is_phonon_available(),
         )
         self.addons.register_pack_handler(
             "kokoro_tts",
             is_installed=self.tts.is_kokoro_installed,
-            install=lambda: asyncio.to_thread(self.tts.install_kokoro),
+            install=lambda on_progress=None, cancel_event=None: _run_with_progress(
+                self.tts.install_kokoro, on_progress, cancel_event
+            ),
             uninstall=lambda: asyncio.to_thread(self.tts.uninstall_kokoro),
             available=self.tts.is_kokoro_available(),
         )
         self.addons.register_pack_handler(
             "pyodide_python",
             is_installed=self.pyodide.is_installed,
-            install=lambda: asyncio.to_thread(self.pyodide.install),
+            install=lambda on_progress=None, cancel_event=None: _run_with_progress(
+                self.pyodide.install, on_progress, cancel_event
+            ),
             uninstall=lambda: asyncio.to_thread(self.pyodide.uninstall),
             available=True,
         )
+        self.addons.set_post_install_hook(self._handle_pack_installed)
+        self.addons.set_change_listener(self._handle_addons_change)
 
         self.active_session = InterviewSession()
         self.audio_router = SessionAudioRouter(
@@ -318,6 +334,9 @@ class AppRuntime:
         self.ws_senders: set[Any] = set()
         self.capturing_sender: Any | None = None
         self.asr_watcher_task: asyncio.Task[Any] | None = None
+        self._addons_broadcast_task: asyncio.Task[Any] | None = None
+        self._addons_pending_payloads: list[dict[str, Any]] = []
+        self._addons_progress_dirty: tuple[str | None, str | None] | None = None
         self._capture_locks_by_loop: dict[int, asyncio.Lock] = {}
 
     def capture_lifecycle_lock(self) -> asyncio.Lock:
@@ -459,11 +478,77 @@ class AppRuntime:
         )
 
     async def broadcast_all(self, payload: dict[str, Any]) -> None:
-        for sender in list(self.ws_senders):
+        senders = list(self.ws_senders)
+        if not senders:
+            return
+        if len(senders) == 1:
             try:
-                await sender(payload)
+                await asyncio.wait_for(senders[0](payload), timeout=2.0)
             except Exception:
                 pass
+            return
+
+        async def _send_one(sender: Any) -> None:
+            try:
+                await asyncio.wait_for(sender(payload), timeout=2.0)
+            except Exception:
+                pass
+
+        await asyncio.gather(*(_send_one(s) for s in senders), return_exceptions=True)
+
+    async def _handle_pack_installed(self, pack_id: str) -> None:
+        if pack_id == "rampart_pii":
+            try:
+                await asyncio.to_thread(self.profiles.refresh_resume_redaction)
+            except Exception as exc:
+                logger.warning("Failed to refresh resume redaction after Rampart install: %s", exc)
+
+    def _build_addons_ws_payload(self, pack_id: str | None, event: str | None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "type": "addons_status",
+            "pack_id": pack_id,
+            "event": event,
+            "addons": self.addons.status_dict(),
+            "tts": self.tts.status_dict(),
+        }
+        if event in ("installed", "uninstalled"):
+            payload["profile"] = self.profiles.public_dict()
+        return payload
+
+    def _handle_addons_change(self, pack_id: str | None, event: str | None) -> None:
+        if not self.ws_senders:
+            return
+        if event == "progress":
+            self._addons_progress_dirty = (pack_id, event)
+        else:
+            # Snapshot payload immediately so a queued terminal event never carries a newer retry's state.
+            self._addons_pending_payloads.append(self._build_addons_ws_payload(pack_id, event))
+            if self._addons_progress_dirty and self._addons_progress_dirty[0] == pack_id:
+                self._addons_progress_dirty = None
+        if self._addons_broadcast_task is not None and not self._addons_broadcast_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._drain_addons_broadcasts())
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        self._addons_broadcast_task = task
+
+    async def _drain_addons_broadcasts(self) -> None:
+        while self._addons_pending_payloads or self._addons_progress_dirty is not None:
+            if not self.ws_senders:
+                self._addons_pending_payloads.clear()
+                self._addons_progress_dirty = None
+                return
+            if self._addons_pending_payloads:
+                payload = self._addons_pending_payloads.pop(0)
+            else:
+                assert self._addons_progress_dirty is not None
+                pack_id, event = self._addons_progress_dirty
+                self._addons_progress_dirty = None
+                payload = self._build_addons_ws_payload(pack_id, event)
+            await self.broadcast_all(payload)
 
     def ensure_asr_watcher(self) -> None:
         if self.asr_watcher_task is not None and not self.asr_watcher_task.done():
@@ -471,7 +556,8 @@ class AppRuntime:
 
         async def _watch() -> None:
             while self.asr.state in (ASRModelState.LOADING, ASRModelState.SWITCHING):
-                await asyncio.sleep(0.75)
+                sleep_s = 0.35 if self.asr._download_progress else 0.75
+                await asyncio.sleep(sleep_s)
                 await self.broadcast_all({"type": "asr_status", "asr": self.asr.status_dict()})
             await self.broadcast_all({"type": "asr_status", "asr": self.asr.status_dict()})
 
@@ -507,6 +593,12 @@ def create_app(
             tts_warmup_task.cancel()
         if runtime.asr_watcher_task is not None and not runtime.asr_watcher_task.done():
             runtime.asr_watcher_task.cancel()
+        if runtime._addons_broadcast_task is not None and not runtime._addons_broadcast_task.done():
+            runtime._addons_broadcast_task.cancel()
+            try:
+                await runtime._addons_broadcast_task
+            except BaseException:
+                pass
         runtime.close_archive()
         runtime.asr.clear_streams()
         runtime.store.close()
@@ -1330,6 +1422,8 @@ def create_app(
                 "asr": runtime.asr.status_dict(),
                 "diarizer": runtime.diarizer.status_dict(),
                 "manual_speaker": runtime.audio_router.manual_speaker,
+                "addons": runtime.addons.status_dict(),
+                "tts": runtime.tts.status_dict(),
             }
         )
         await send_json({"type": "asr_status", "asr": runtime.asr.status_dict()})
