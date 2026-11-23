@@ -131,3 +131,60 @@ def test_system_design_level_bar_reaches_the_interviewer_plan(tmp_path: Path) ->
         questions=[PracticeQuestionItem.model_validate(lead)],
     )
     assert f"Depth expected at Lead level: {lead['level_bar']}" in _format_question_plan(session)
+
+
+def _spy_on_llm(client: TestClient) -> list[str]:
+    """Configure an LLM and record every prompt it is asked to complete."""
+    llm = client.app.state.runtime.llm
+    llm.config.provider = "openai"
+    llm.config.api_key = "test-key"
+    assert llm.config.is_configured
+    asked: list[str] = []
+
+    async def _fake_complete(*, system: str, user: str, **_: object) -> str:
+        asked.append(user)
+        return (
+            '{"opening": "Welcome.", "questions": [{"title": "Ledger Migration", '
+            '"competency": "Ownership", "prompt": "Tell me about the ledger migration."}]}'
+        )
+
+    llm._complete_text = _fake_complete  # type: ignore[method-assign]
+    return asked
+
+
+def test_nothing_to_tailor_means_no_llm_call_and_bank_questions(tmp_path: Path) -> None:
+    client = _offline_client(tmp_path)
+    asked = _spy_on_llm(client)
+
+    for source in ("mixed", "resume_jd_tailored"):
+        res = client.post(
+            "/api/practice/start",
+            json={"role_title": "Charge Nurse", "interview_type": "behavioral", "question_source": source},
+        )
+        assert res.status_code == 200, res.text
+        questions = res.json()["session"]["questions"]
+        assert questions and {q["source"] for q in questions} == {"bank"}
+
+    assert asked == []
+
+
+def test_a_job_listing_is_enough_to_tailor(tmp_path: Path) -> None:
+    client = _offline_client(tmp_path)
+    asked = _spy_on_llm(client)
+    saved = client.post(
+        "/api/profile/jd",
+        json={
+            "title": "Charge Nurse",
+            "company": "Example Health",
+            "text": "Lead a 24-bed surgical unit and coordinate staffing across shifts.",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    res = client.post(
+        "/api/practice/start",
+        json={"interview_type": "behavioral", "question_source": "resume_jd_tailored"},
+    )
+    assert res.status_code == 200, res.text
+    assert len(asked) == 1 and "surgical unit" in asked[0]
+    assert "tailored" in {q["source"] for q in res.json()["session"]["questions"]}

@@ -3107,6 +3107,10 @@ class InterviewCopilotLLM:
         slots_after_pin = effective_count - (1 if pinned_item else 0)
         if slots_after_pin <= 0 and pinned_item is not None:
             return [pinned_item], default_opening
+        # Tailoring needs something to tailor to: with no resume and no job listing the curated bank is the plan.
+        if selected_bank and not (redacted_resume.strip() or jd_text.strip()):
+            ordered = ([pinned_item] + remaining_bank) if pinned_item else selected_bank
+            return ordered[:effective_count], default_opening
         want_tailored = (
             slots_after_pin
             if question_source == "resume_jd_tailored"
