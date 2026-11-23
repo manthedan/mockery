@@ -8,10 +8,19 @@ import secrets
 import shutil
 import stat
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import httpx
+
+from .downloads import (
+    DEFAULT_BACKOFF_BASE_S,
+    DEFAULT_MAX_ATTEMPTS,
+    DownloadCancelledError,
+    MultiFileProgressTracker,
+    download_verified_file,
+)
 
 logger = logging.getLogger("mockery.pyodide")
 
@@ -214,52 +223,65 @@ class PyodidePackManager:
         )
         return manifest
 
-    def install(self) -> Path:
-        """Download pinned Pyodide core files, verify SHA-256 digests, and publish atomically."""
+    def install(
+        self,
+        *,
+        client: httpx.Client | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        backoff_base_s: float = DEFAULT_BACKOFF_BASE_S,
+    ) -> Path:
+        """Download pinned Pyodide core files with retries/resume, verify SHA-256 digests, and publish atomically."""
         if self.pack_dir.is_symlink():
             raise RuntimeError("Refusing to install Pyodide into a symlinked directory.")
         self.pack_dir.parent.mkdir(parents=True, exist_ok=True)
         staging = self.pack_dir.parent / f".pyodide_staging_{secrets.token_hex(6)}"
         backup = self.pack_dir.parent / f".pyodide_backup_{secrets.token_hex(6)}"
-        staging.mkdir(parents=True, exist_ok=True)
 
         total_bytes = 0
         files_meta: dict[str, dict[str, object]] = {}
+        tracker = MultiFileProgressTracker(
+            file_count=len(self.expected_hashes),
+            approx_total_bytes=14 * 1024 * 1024,
+            on_update=on_progress,
+        )
+        own_client = client is None
+        http = client or httpx.Client(
+            follow_redirects=True,
+            timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0),
+        )
         try:
-            timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
-            with httpx.Client(follow_redirects=True, timeout=timeout) as client:
-                for filename, expected_sha in self.expected_hashes.items():
-                    url = f"{self.base_url}/{filename}"
-                    dest = staging / filename
-                    file_bytes = 0
-                    digest = hashlib.sha256()
-                    with client.stream("GET", url) as resp:
-                        if resp.status_code != 200:
-                            raise RuntimeError(
-                                f"Failed to download {filename} (HTTP {resp.status_code})."
-                            )
-                        with dest.open("wb") as fh:
-                            for chunk in resp.iter_bytes(chunk_size=65536):
-                                if not chunk:
-                                    continue
-                                file_bytes += len(chunk)
-                                total_bytes += len(chunk)
-                                if file_bytes > MAX_SINGLE_FILE_BYTES or total_bytes > MAX_TOTAL_PACK_BYTES:
-                                    raise RuntimeError(
-                                        f"Pyodide download exceeded safety size limit on {filename}."
-                                    )
-                                digest.update(chunk)
-                                fh.write(chunk)
-                    actual_sha = digest.hexdigest()
-                    if file_bytes <= 0:
-                        raise RuntimeError(f"Downloaded Pyodide file {filename} was empty.")
-                    if actual_sha != expected_sha:
-                        raise RuntimeError(
-                            f"Integrity check failed for {filename} "
-                            f"(expected {expected_sha[:12]}…, got {actual_sha[:12]}…)."
-                        )
-                    files_meta[filename] = {"sha256": actual_sha, "size": file_bytes}
+            staging.mkdir(parents=True, exist_ok=True)
+            for filename, expected_sha in self.expected_hashes.items():
+                url = f"{self.base_url}/{filename}"
+                dest = staging / filename
+                tracker.start_file(filename)
+                remaining_budget = max(0, MAX_TOTAL_PACK_BYTES - total_bytes)
+                file_limit = min(MAX_SINGLE_FILE_BYTES, remaining_budget)
+                _, file_bytes = download_verified_file(
+                    url,
+                    dest,
+                    expected_sha,
+                    client=http,
+                    max_attempts=max_attempts,
+                    backoff_base_s=backoff_base_s,
+                    max_bytes=file_limit,
+                    progress_cb=tracker.on_file_progress,
+                    retry_cb=tracker.on_file_retry,
+                    cancel_event=cancel_event,
+                )
+                total_bytes += file_bytes
+                if total_bytes > MAX_TOTAL_PACK_BYTES:
+                    raise RuntimeError(
+                        f"Pyodide download exceeded safety size limit on {filename}."
+                    )
+                tracker.finish_file(file_bytes)
+                files_meta[filename] = {"sha256": expected_sha, "size": file_bytes}
 
+            if cancel_event is not None and cancel_event.is_set():
+                raise DownloadCancelledError("Download cancelled.")
+            tracker.set_phase("verifying", cancellable=False)
             manifest = {"version": PYODIDE_VERSION, "files": files_meta}
             (staging / MANIFEST_FILENAME).write_text(
                 json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -267,6 +289,8 @@ class PyodidePackManager:
 
             # Atomic directory swap serialized with open_asset/uninstall
             with self._lock:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise DownloadCancelledError("Download cancelled.")
                 if self.pack_dir.is_symlink():
                     raise RuntimeError("Refusing to overwrite symlinked Pyodide pack directory.")
                 had_existing = self.pack_dir.exists()
@@ -283,6 +307,8 @@ class PyodidePackManager:
             logger.info("Installed verified offline Pyodide %s (%d bytes)", PYODIDE_VERSION, total_bytes)
             return self.pack_dir
         finally:
+            if own_client:
+                http.close()
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
 
