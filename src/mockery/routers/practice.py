@@ -291,7 +291,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             selected_qid = None
         if selected_qid:
             picked = runtime.banks.get_question(selected_qid)
-            if picked is not None and picked.get("category") == body.interview_type:
+            if picked is not None and str(picked.get("category") or "").strip().lower() == body.interview_type:
                 bank_candidates = [picked] + [q for q in bank_candidates if q.get("id") != picked.get("id")]
             else:
                 # A pick made under another format (or since removed) does not carry over; the format decides.
@@ -309,6 +309,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             answer_framework=framework_for(body.interview_type, body.answer_framework),
         )
 
+        plan_fallback_reasons: list[str] = []
         try:
             planned_raw, opening = await runtime.llm.generate_practice_plan(
                 role_title=role_title,
@@ -323,6 +324,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 selected_question_id=cfg.selected_question_id,
                 custom_question=custom_question,
                 rubric=cfg.rubric,
+                fallback_reasons=plan_fallback_reasons,
             )
         except Exception as exc:
             raise HTTPException(
@@ -354,6 +356,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             role="interviewer",
             question_id=first_q.id,
             text=intro_text,
+            fallback_reason=plan_fallback_reasons[0] if plan_fallback_reasons else "",
         )
 
         session = PracticeSession(
@@ -487,7 +490,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             raw_reply_text = str(reply.get("interviewer_reply") or "").strip()
             reply_text = raw_reply_text
             target_q_id = cur_q.id
-            server_modified_reply = False
+            server_modified_reply = bool(reply.get("reply_replaced"))
 
             if should_advance:
                 cur_q.status = "completed"
@@ -564,6 +567,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 )
                 raise HTTPException(status_code=409, detail=err.to_dict())
 
+            hint_fallback_reasons: list[str] = []
             try:
                 hint_text = await _await_with_disconnect(
                     request,
@@ -574,6 +578,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         recent_turns=[t.model_dump() for t in session.turns[-8:]],
                         workspace_context=session.workspace_context or None,
                         rubric=session.config.rubric,
+                        fallback_reasons=hint_fallback_reasons,
                     ),
                 )
             except _ClientDisconnectedError:
@@ -587,6 +592,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 role="coach",
                 question_id=cur_q.id,
                 text=hint_text,
+                fallback_reason=hint_fallback_reasons[0] if hint_fallback_reasons else "",
             )
             session.turns.append(coach_turn)
             session.live_nudge = {"tone": "tip", "message": hint_text}
@@ -778,6 +784,10 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         q.status = "completed"
                     if rubric.coached and q.id in review_carl_by_qid:
                         q.carl_signals = review_carl_by_qid[q.id]
+                if not rubric.coached:
+                    for qr in debrief.get("question_reviews") or []:
+                        if isinstance(qr, dict):
+                            qr.pop("carl", None)
                 session.debrief = debrief
                 session.phase = PracticePhase.COMPLETED.value
                 session.live_nudge = None
@@ -869,6 +879,8 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     else None
                 ),
             )
+            if not rubric.coached and isinstance(feedback, dict):
+                feedback.pop("carl_after", None)
             session.turns.append(retry_turn)
             session.retry_history.append(
                 {

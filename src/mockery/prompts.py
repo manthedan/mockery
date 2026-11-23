@@ -81,6 +81,9 @@ _NUDGE_EXAMPLES: dict[str, str] = {
     "star": "e.g., state the Task that was theirs, separate their own Actions from the team's, quantify the Result",
     "general": "e.g., answer the question in the first sentence, name one concrete reason, tie it to this role",
 }
+_NO_FRAMEWORK_SIGNAL_DEFINITIONS = (
+    'This session is not graded on structure: output every one of these values as "missing" and do not assess them.'
+)
 _NO_FRAMEWORK_NUDGE_EXAMPLES = (
     "e.g., expand one detail, make a point more plainly; never name or teach an answer framework such as STAR or CARL"
 )
@@ -94,7 +97,8 @@ _COACH_FOCUS: dict[str, str] = {
 }
 _NO_FRAMEWORK_COACH_FOCUS = (
     "focused on the substance, clarity and specificity of each answer "
-    "(the candidate chose no answer framework, so never name or teach one such as STAR or CARL)"
+    "(the candidate chose no answer framework, so never name or teach one such as STAR or CARL, "
+    'and output every `carl` value as "missing" without assessing it)'
 )
 _PRIMER_BRIEFS: dict[str, str] = {
     "carl": "1 crisp sentence reminding how CARL elevates their target level",
@@ -142,8 +146,8 @@ def practice_reply_rubric_args(
     """Rubric-specific placeholders for `practice_interviewer_reply`; `coached=False` means no framework is taught."""
     return {
         "signal_schema": practice_signal_schema(signal_keys),
-        "signal_definitions": _SIGNAL_DEFINITIONS[grader],
-        "carry_forward_note": _CARRY_FORWARD_NOTES[grader],
+        "signal_definitions": _SIGNAL_DEFINITIONS[grader] if coached else _NO_FRAMEWORK_SIGNAL_DEFINITIONS,
+        "carry_forward_note": _CARRY_FORWARD_NOTES[grader] if coached else "",
         "nudge_examples": _NUDGE_EXAMPLES[grader] if coached else _NO_FRAMEWORK_NUDGE_EXAMPLES,
     }
 
@@ -435,7 +439,7 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             '{"encouragement": "<1-2 upbeat sentences>", '
             '"what_improved": "<1-2 sentences comparing what actually got stronger vs their first attempt>", '
             '"one_more_polish": "<optional 1 short micro-tip to lock it in>", '
-            '"carl_after": {signal_schema}}'
+            '"carl_after": {signal_schema} }'
         ),
         input_keys=("signal_schema",),
         output_format="json",
@@ -490,7 +494,7 @@ def list_prompts(tier: PromptTier | None = None) -> list[PromptSpec]:
     return [spec for spec in specs if spec.tier == tier]
 
 
-_BARE_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_BARE_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
 _DOUBLE_PLACEHOLDER_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
 

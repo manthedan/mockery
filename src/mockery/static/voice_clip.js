@@ -45,22 +45,31 @@ export function splitClipForAsr(
 }
 
 /* Split a message into pieces of at most `maxChars`, breaking between sentences where possible
-   and between words otherwise. Nothing is dropped. */
+   and between words otherwise. Fenced code blocks are never spoken, so they are dropped here: split
+   across two pieces they would no longer look like blocks to the voice. An inline code span is kept
+   whole for the same reason. */
 export function splitForSpeech(text, maxChars) {
   const pieces = [];
   let current = "";
   const sentences = String(text || "")
+    .replace(/```[\s\S]*?```/g, " ")
     .split(/(?<=[.!?])\s+|\n+/)
     .map((sentence) => sentence.trim())
     .filter(Boolean);
+  const units = [];
   for (const sentence of sentences) {
-    const joined = current ? `${current} ${sentence}` : sentence;
+    const open = units.length > 0 && (units[units.length - 1].split("`").length - 1) % 2 === 1;
+    if (open) units[units.length - 1] += ` ${sentence}`;
+    else units.push(sentence);
+  }
+  for (const unit of units) {
+    const joined = current ? `${current} ${unit}` : unit;
     if (joined.length <= maxChars) {
       current = joined;
       continue;
     }
     if (current) pieces.push(current);
-    let rest = sentence;
+    let rest = unit;
     while (rest.length > maxChars) {
       const breakAt = rest.lastIndexOf(" ", maxChars);
       const cut = breakAt > 0 ? breakAt : maxChars;

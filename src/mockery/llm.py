@@ -3046,6 +3046,7 @@ class InterviewCopilotLLM:
         selected_question_id: str | None = None,
         custom_question: str = "",
         rubric: Rubric = CARL,
+        fallback_reasons: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], str]:
         """
         Build the interview question plan and a warm opening greeting.
@@ -3171,6 +3172,8 @@ class InterviewCopilotLLM:
                 return [base], opening
             except Exception as exc:
                 logger.warning("Practice framing failed (%s); using base bank item", exc)
+                if fallback_reasons is not None:
+                    fallback_reasons.append(built_in_reason(self.config, exc))
                 return [base], default_opening
 
         # Behavioral / General: generate tailored questions from redacted resume + target JD
@@ -3251,6 +3254,8 @@ class InterviewCopilotLLM:
             return (combined[:effective_count] or selected_bank), opening
         except Exception as exc:
             logger.warning("LLM generate_practice_plan failed (%s); falling back to curated banks", exc)
+            if fallback_reasons is not None:
+                fallback_reasons.append(built_in_reason(self.config, exc))
             ordered = ([pinned_item] + remaining_bank) if pinned_item else selected_bank
             return ordered[:effective_count], default_opening
 
@@ -3287,32 +3292,35 @@ class InterviewCopilotLLM:
         follow_ups = list(current_question.get("follow_ups") or [])
         max_followups = 3 if interview_type in ("system_design", "coding") else 2
 
-        # In a conversation round a few words is not an answer, so it is neither thanked nor built on.
-        no_answer = interview_type not in ("system_design", "coding") and said_too_little(candidate_answer)
+        # In a conversation round, filler is not an answer: it is neither thanked nor built on.
+        is_studio = interview_type in ("system_design", "coding")
+        no_answer = not is_studio and said_too_little(candidate_answer)
+        # Thanks are for an answer with something in it; in a studio round the work is on the canvas.
+        has_substance = not no_answer and (
+            is_studio or any(heuristic_carl.get(slot) != "missing" for slot in SIGNAL_SLOTS)
+        )
 
         def _fallback() -> dict[str, Any]:
             if no_answer and follow_up_count < max_followups:
-                reply = (
-                    "No rush — take a moment and give me one real example. "
-                    f"I'll ask again: {current_question.get('prompt', '')}"
-                )
+                reply = f"No rush — take a moment. I'll ask again: {current_question.get('prompt', '')}"
                 advance = False
             elif not no_answer and follow_up_count < len(follow_ups) and follow_up_count < max_followups:
-                reply = f"Thanks for walking through that. {follow_ups[follow_up_count]}"
+                lead = "Thanks for walking through that. " if has_substance else "Let's make that concrete. "
+                reply = f"{lead}{follow_ups[follow_up_count]}"
                 advance = False
             elif next_question is not None:
                 lead = (
-                    "Let's leave that one there and move on to the next question: "
-                    if no_answer
-                    else "That gives me a clear picture — thank you! Let's move on to our next question: "
+                    "That gives me a clear picture — thank you! Let's move on to our next question: "
+                    if has_substance
+                    else "Let's leave that one there and move on to the next question: "
                 )
                 reply = f"{lead}{next_question.get('prompt', '')}"
                 advance = True
             else:
                 lead = (
-                    "Let's stop there for today. "
-                    if no_answer
-                    else "Thank you for sharing that — you covered a lot of thoughtful ground today! "
+                    "Thank you for sharing that — you covered a lot of thoughtful ground today! "
+                    if has_substance
+                    else "Let's stop there for today. "
                 )
                 reply = f"{lead}Whenever you're ready, click End & Debrief to review your coaching report."
                 advance = True
@@ -3431,8 +3439,14 @@ class InterviewCopilotLLM:
                 should_advance = raw_adv.strip().lower() in ("true", "1", "yes")
             else:
                 should_advance = False
-            if follow_up_count >= max_followups:
+            moved_on_by_limit = follow_up_count >= max_followups and not should_advance
+            if moved_on_by_limit:
                 should_advance = True
+                reply = (
+                    "Let's leave that one there and move on."
+                    if next_question is not None
+                    else "Let's stop there for today. Whenever you're ready, click End & Debrief to review your coaching report."
+                )
 
             graded = rubric.signals_from_grader(parsed.get("carl_signals"))
             rank = {level: idx for idx, level in enumerate(SIGNAL_LEVELS)}
@@ -3455,6 +3469,7 @@ class InterviewCopilotLLM:
                 "should_advance": should_advance,
                 "carl_signals": merged_carl,
                 "coach_nudge": nudge,
+                "reply_replaced": moved_on_by_limit,
             }
             if conv_commit is not None:
                 out["_conversation_commit"] = conv_commit
@@ -3474,8 +3489,12 @@ class InterviewCopilotLLM:
         recent_turns: list[dict[str, Any]],
         workspace_context: dict[str, Any] | None = None,
         rubric: Rubric = CARL,
+        fallback_reasons: list[str] | None = None,
     ) -> str:
-        """Return a supportive, non-spoiler coaching hint when the candidate asks for help."""
+        """Return a supportive, non-spoiler coaching hint when the candidate asks for help.
+
+        When the connected model fails, the built-in hint is returned and the reason is appended
+        to ``fallback_reasons``."""
         fallback = rubric.offline_hint.format(
             focus=current_question.get("carl_focus") or "your own decisions & measurable impact"
         )
@@ -3540,8 +3559,12 @@ class InterviewCopilotLLM:
                 use_warm_spare=True,
                 operation="practice_hint",
             )
+            if not txt.strip() and fallback_reasons is not None:
+                fallback_reasons.append(built_in_reason(self.config, None))
             return txt.strip() or fallback
-        except Exception:
+        except Exception as exc:
+            if fallback_reasons is not None:
+                fallback_reasons.append(built_in_reason(self.config, exc))
             return fallback
 
     async def generate_practice_debrief(

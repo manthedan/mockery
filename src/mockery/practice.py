@@ -18,9 +18,11 @@ from .models import DEFAULT_PRACTICE_ROLE_TITLE, short_id
 from .practice_conversation import PracticeConversation
 from .rubrics import (
     CARL,
+    CODING,
     GENERAL,
     SIGNAL_SLOTS,
     STAR,
+    SYSTEM_DESIGN,
     AnswerFramework,
     Rubric,
     rubric_for,
@@ -93,7 +95,7 @@ class PracticeTurn(BaseModel):
     carl_signals: dict[str, str] | None = None
     coach_tip: str = ""
     fallback_reason: str = ""
-    """Set on an interviewer turn that is a built-in reply because the connected model failed."""
+    """Set on an interviewer or coach turn that is built-in text because the connected model failed."""
 
 
 class PracticeSession(BaseModel):
@@ -231,6 +233,25 @@ class PracticeSession(BaseModel):
         return "\n".join(lines)
 
 
+_FILLER_RE = re.compile(
+    r"\b(?:u+h+m*|u+m+|h+m+|e+r+m*|a+h+|o+h+|yeah|yep|yes|no|nope|well|so|like|okay|ok|right|sure|"
+    r"you know|i mean|i guess|let me think|let me see|not sure|no idea|i don't know|i dunno|"
+    r"(?:great|good|nice|tough|hard|interesting) question)\b",
+    re.IGNORECASE,
+)
+MIN_ANSWER_WORDS = 3
+"""Fewer real words than this, once the filler is set aside, is not an answer."""
+
+
+def said_too_little(answer_text: str | None) -> bool:
+    """True when nothing was really said: only filler, or a word or two. A number always counts
+    ("$130k to $150k base", "Yes, in 2021"), so a short factual answer is still an answer."""
+    text = answer_text or ""
+    if re.search(r"\d", text):
+        return False
+    return len(re.findall(r"[A-Za-z']+", _FILLER_RE.sub(" ", text))) < MIN_ANSWER_WORDS
+
+
 _RANK = {"missing": 0, "partial": 1, "strong": 2}
 _LEVEL = {0: "missing", 1: "partial", 2: "strong"}
 _METRIC_RE = re.compile(
@@ -294,9 +315,10 @@ def _owned_task_level(low: str, wc: int) -> str:
 
 def _direct_level(low: str, wc: int) -> str:
     first_sentence = re.split(r"[.!?]", low, maxsplit=1)[0].split()
-    if wc >= 12 and len(first_sentence) <= 30:
+    # A short factual answer ("$130k to $150k base") is as direct as an answer gets.
+    if len(first_sentence) <= 30 and (wc >= 12 or re.search(r"\d", low)):
         return "strong"
-    return "partial" if wc >= 5 else "missing"
+    return "partial"
 
 
 def _specific_level(low: str, wc: int) -> str:
@@ -311,9 +333,31 @@ def _role_fit_level(low: str, wc: int) -> str:
 
 
 def _concise_level(low: str, wc: int) -> str:
-    if 20 <= wc <= 220:
+    if wc <= 220:
         return "strong"
     return "partial" if wc <= 350 else "missing"
+
+
+def _cue_level(cues: tuple[str, ...]) -> Any:
+    """Two distinct cues is a clear signal, one is a mention."""
+
+    def level(low: str, wc: int) -> str:
+        hits = sum(1 for cue in cues if cue in low)
+        return "strong" if hits >= 2 else ("partial" if hits == 1 else "missing")
+
+    return level
+
+
+def _scale_level(low: str, wc: int) -> str:
+    if _METRIC_RE.search(low):
+        return "strong"
+    return _cue_level(("bottleneck", "throughput", "partition", "hot key", "capacity", "scale", "peak", "load"))(low, wc)
+
+
+def _complexity_level(low: str, wc: int) -> str:
+    if re.search(r"\bo\(|o of \w", low):
+        return "strong"
+    return _cue_level(("complexity", "linear", "constant time", "quadratic", "logarithmic", "log n", "amortized"))(low, wc)
 
 
 _CARL_SCORERS = {
@@ -323,6 +367,28 @@ _CARL_SCORERS = {
     "learning": _reflection_level,
 }
 _SCORERS_BY_RUBRIC = {
+    SYSTEM_DESIGN.id: {
+        "context": _cue_level(
+            ("requirement", "constraint", "users", "latency", "read-heavy", "write-heavy", "sla", "assum", "scope")
+        ),
+        "action": _cue_level(
+            ("service", "database", "cache", "queue", "load balancer", "api", "shard", "replica", "storage", "gateway")
+        ),
+        "result": _scale_level,
+        "learning": _cue_level(
+            ("tradeoff", "trade-off", "instead of", "versus", "at the cost", "consistency", "availability", "downside")
+        ),
+    },
+    CODING.id: {
+        "context": _cue_level(
+            ("approach", "brute force", "plan", "idea", "i would", "i'd", "hash", "pointer", "sort", "stack", "recurs")
+        ),
+        "action": _cue_level(("works", "passes", "correct", "handles", "returns", "invariant", "walk through", "trace")),
+        "result": _complexity_level,
+        "learning": _cue_level(
+            ("edge case", "empty", "null", "duplicate", "overflow", "boundary", "negative", "single element", "zero")
+        ),
+    },
     STAR.id: {
         "context": _setting_level,
         "action": _owned_task_level,
@@ -352,18 +418,13 @@ def estimate_carl_heuristic(
     wc = len(low.split())
     prev = existing or {}
     scorers = _SCORERS_BY_RUBRIC.get(rubric.id, _CARL_SCORERS)
+    answered = not said_too_little(answer_text)
     return {
-        slot: _LEVEL[max(_RANK.get(prev.get(slot, "missing"), 0), _RANK[scorers[slot](low, wc)])]
+        slot: _LEVEL[
+            max(_RANK.get(prev.get(slot, "missing"), 0), _RANK[scorers[slot](low, wc)] if answered else 0)
+        ]
         for slot in SIGNAL_SLOTS
     }
-
-
-MIN_COACHABLE_WORDS = 8
-"""Fewer words than this is not an answer: nothing is praised, and the question is asked again."""
-
-
-def said_too_little(answer_text: str | None) -> bool:
-    return len((answer_text or "").split()) < MIN_COACHABLE_WORDS
 
 
 def build_heuristic_nudge(

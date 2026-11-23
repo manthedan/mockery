@@ -3339,6 +3339,7 @@ export function createPracticeStudioController({
         <article class="pturn pturn-coach">
           <div class="pturn-head"><span>Coach hint</span></div>
           <div class="pturn-body">${formatWithNewlines(t.text)}</div>
+          ${renderBuiltInNote(t.fallback_reason, "This is a built-in hint.")}
         </article>
       `;
     }

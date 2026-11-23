@@ -981,6 +981,10 @@ def score_practice_interviewer_reply(
     if harsh_hits:
         failures.append(f"Harsh or discouraging phrasing detected: {harsh_hits}")
         suggestions.append("Keep both interviewer reply and coach nudge warm, encouraging, and constructive.")
+    did_not_reask = bool(expected.get("must_reask")) and "?" not in reply
+    if did_not_reask:
+        failures.append("Did not ask the question again after an answer that said nothing.")
+        suggestions.append("After a non-answer, ask the same question again in simpler words.")
     if unearned_praise_hits:
         failures.append(f"Thanked or praised an answer that said nothing: {unearned_praise_hits}")
         suggestions.append(
@@ -999,7 +1003,7 @@ def score_practice_interviewer_reply(
         tone_safety_score = 0.0
     elif harsh_hits:
         tone_safety_score = 0.0
-    elif spoiler_hits or unearned_praise_hits:
+    elif spoiler_hits or unearned_praise_hits or did_not_reask:
         tone_safety_score = 0.0
     else:
         tone_safety_score = 0.80 + (0.20 if nudge_concise else 0.0)
@@ -1493,7 +1497,10 @@ def score_practice_debrief(
     if not drill_schema_ok:
         failures.append("Incomplete `retry_drill` object (needs `question_id`, `focus`, `prompt`).")
 
-    strengths_count_ok = (len(strengths) == 0) if nothing_to_praise else (2 <= len(strengths) <= 4)
+    strengths_listed = isinstance(parsed.get("top_strengths"), list)
+    strengths_count_ok = strengths_listed and ((len(strengths) == 0) if nothing_to_praise else (2 <= len(strengths) <= 4))
+    if not strengths_listed:
+        failures.append("`top_strengths` must be a list (use [] when there are none).")
     top_schema_checks = [
         bool(overall),
         strengths_count_ok,
@@ -1543,6 +1550,14 @@ def score_practice_debrief(
     invented: list[str] = []
     if nothing_to_praise and strengths:
         invented.append(f"top_strengths lists {len(strengths)}")
+    if nothing_to_praise:
+        summary_praise = [
+            pat_str
+            for pat_str in expected.get("unearned_praise_patterns") or []
+            if isinstance(pat_str, str) and pat_str.strip() and re.search(pat_str, overall, flags=re.IGNORECASE)
+        ]
+        if summary_praise:
+            invented.append(f"overall_encouragement praises {summary_praise}")
     for qid in exp_qids:
         rev = reviews_by_id.get(qid)
         if qid in no_strength_qids and rev and str(rev.get("strength") or "").strip():
