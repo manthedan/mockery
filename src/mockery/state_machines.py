@@ -396,7 +396,7 @@ def compute_allowed_practice_events(
     blocked: dict[str, str] = {}
 
     if phase == PracticePhase.DEBRIEFING:
-        msg = "Wait for the CARL Debrief to finish generating."
+        msg = "Wait for the debrief to finish generating."
         for ev in (
             "submit_turn",
             "request_hint",
@@ -416,15 +416,15 @@ def compute_allowed_practice_events(
             blocked["request_hint"] = "No active question in this practice session."
             blocked["advance_question"] = "No remaining active questions in this session."
         allowed.extend(["update_workspace", "generate_debrief"])
-        blocked["submit_retry"] = "Complete the CARL Debrief before submitting a retry drill."
+        blocked["submit_retry"] = "Complete the debrief before submitting a retry drill."
         return allowed, blocked
 
     if phase == PracticePhase.AWAITING_DEBRIEF:
         allowed.extend(["update_workspace", "generate_debrief"])
-        blocked["submit_turn"] = "All questions are complete — generate your CARL Debrief to continue."
+        blocked["submit_turn"] = "All questions are complete — generate your debrief to continue."
         blocked["request_hint"] = "Hints are only available while a question is active."
         blocked["advance_question"] = "No remaining active questions in this session."
-        blocked["submit_retry"] = "Complete the CARL Debrief before submitting a retry drill."
+        blocked["submit_retry"] = "Complete the debrief before submitting a retry drill."
         return allowed, blocked
 
     # PracticePhase.COMPLETED
@@ -432,7 +432,7 @@ def compute_allowed_practice_events(
     if session.debrief is not None:
         allowed.append("submit_retry")
     else:
-        blocked["submit_retry"] = "Complete the CARL Debrief before submitting a retry drill."
+        blocked["submit_retry"] = "Complete the debrief before submitting a retry drill."
     blocked["submit_turn"] = "This practice session is already completed."
     blocked["request_hint"] = "Hints are only available while a question is active."
     blocked["advance_question"] = "No remaining active questions in this session."

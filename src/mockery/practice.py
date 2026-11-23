@@ -16,6 +16,15 @@ from pydantic import BaseModel, Field, field_validator
 from .levels import DEFAULT_LEVEL, normalize_level
 from .models import DEFAULT_PRACTICE_ROLE_TITLE, short_id
 from .practice_conversation import PracticeConversation
+from .rubrics import (
+    CARL,
+    GENERAL,
+    SIGNAL_SLOTS,
+    STAR,
+    AnswerFramework,
+    Rubric,
+    rubric_for,
+)
 
 PracticeInterviewType = Literal["behavioral", "system_design", "coding", "general"]
 PracticeQuestionSource = Literal["bank_only", "resume_jd_tailored", "mixed"]
@@ -33,6 +42,12 @@ class PracticeConfig(BaseModel):
     voice_enabled: bool = True
     question_count: int = Field(default=4, ge=1, le=8)
     selected_question_id: str | None = None
+    answer_framework: AnswerFramework = "carl"
+    """Sessions saved before frameworks existed were all graded on CARL, which is the default."""
+
+    @property
+    def rubric(self) -> Rubric:
+        return rubric_for(self.interview_type, self.answer_framework)
 
     @field_validator("target_level", mode="before")
     @classmethod
@@ -132,29 +147,30 @@ class PracticeSession(BaseModel):
                 lines.append("")
             q_reviews = [qr for qr in (d.get("question_reviews") or []) if isinstance(qr, dict)]
             if q_reviews:
-                lines.append("## Question-by-question CARL coaching")
+                rubric = self.config.rubric
+                framework = f"{rubric.name} " if rubric.named_framework else ""
+                lines.append(f"## Question-by-question {framework}coaching")
                 lines.append("")
                 for idx, qr in enumerate(q_reviews, 1):
                     lines.append(f"### Q{idx}: {qr.get('title') or str(qr.get('prompt', ''))[:80]}")
-                    carl = qr.get("carl") if isinstance(qr.get("carl"), dict) else {}
-                    lines.append(
-                        f"- **CARL:** Context `{carl.get('context', '—')}` · "
-                        f"Action `{carl.get('action', '—')}` · "
-                        f"Result `{carl.get('result', '—')}` · "
-                        f"Learning `{carl.get('learning', '—')}`"
-                    )
+                    graded = qr.get("carl") if isinstance(qr.get("carl"), dict) else {}
+                    if rubric.coached:
+                        marks = " · ".join(
+                            f"{signal.label} `{graded.get(signal.slot, '—')}`" for signal in rubric.signals
+                        )
+                        lines.append(f"- **{rubric.name}:** {marks}")
                     if qr.get("strength"):
                         lines.append(f"- **Strength:** {qr['strength']}")
                     if qr.get("coaching_tip"):
                         lines.append(f"- **Next-Level Tip:** {qr['coaching_tip']}")
                     if qr.get("carl_reframe"):
-                        lines.append(f"- **Suggested CARL Reframe:** {qr['carl_reframe']}")
+                        lines.append(f"- **Suggested {framework}Reframe:** {qr['carl_reframe']}")
                     lines.append("")
             drill = d.get("retry_drill") if isinstance(d.get("retry_drill"), dict) else {}
             if drill.get("prompt"):
                 lines.append("## Recommended 45-second retry drill")
                 lines.append("")
-                lines.append(f"- **Focus:** {drill.get('focus', 'Strengthen CARL signal')}")
+                lines.append(f"- **Focus:** {drill.get('focus', 'Strengthen your answer')}")
                 lines.append(f"- **Prompt:** {drill['prompt']}")
                 lines.append("")
 
@@ -213,69 +229,137 @@ class PracticeSession(BaseModel):
         return "\n".join(lines)
 
 
-def estimate_carl_heuristic(answer_text: str, existing: dict[str, str] | None = None) -> dict[str, str]:
+_RANK = {"missing": 0, "partial": 1, "strong": 2}
+_LEVEL = {0: "missing", 1: "partial", 2: "strong"}
+_METRIC_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:%(?!\w)|(?:ms|s|x|k|m|million|thousand|hours|days|weeks|users|qps|rps)\b)"
+)
+_SETTING_CUES = (
+    "when i", "at my", "our team", "project", "problem", "incident", "outage",
+    "context", "situation", "legacy", "migrat", "quarter", "stakeholder", "deadline",
+)
+_OWN_ACTION_CUES = (
+    "i designed", "i built", "i led", "i proposed", "i refactored", "i implemented",
+    "i wrote", "i decided", "i aligned", "i benchmarked", "i set up", "i profiled",
+    "i debugged", "my approach", "i chose", "i worked with", "i convinced",
+)
+_OUTCOME_CUES = (
+    "reduced", "improved", "increased", "shipped", "launched", "saved",
+    "result", "outcome", "impact", "resolved", "adopted", "unblocked",
+)
+_REFLECTION_CUES = (
+    "learned", "takeaway", "next time", "retrospective", "in hindsight",
+    "changed how", "now i always", "lesson", "would do differently", "taught me",
+)
+_OWNED_TASK_CUES = (
+    "my job was", "my role was", "i was responsible", "my responsibility", "i was asked to",
+    "i was tasked", "it fell to me", "i owned", "my goal was", "i was brought in to",
+)
+_GOAL_CUES = ("needed to", "had to", "the goal", "our goal", "objective", "responsible for", "supposed to")
+_EXAMPLE_CUES = ("for example", "for instance", "specifically", "such as", "one time", "last year", "recently")
+_ROLE_FIT_CUES = (
+    "this role", "the role", "this position", "this job", "your team", "this team",
+    "your company", "the company", "your product", "your mission", "your customers", "working here",
+)
+
+
+def _setting_level(low: str, wc: int) -> str:
+    has_setting = any(k in low for k in _SETTING_CUES)
+    return "strong" if (has_setting and wc >= 20) else ("partial" if has_setting or wc >= 12 else "missing")
+
+
+def _own_action_level(low: str, wc: int) -> str:
+    has_action = any(k in low for k in _OWN_ACTION_CUES) or (" i " in f" {low} " and wc >= 25)
+    return "strong" if (has_action and wc >= 35) else ("partial" if has_action else "missing")
+
+
+def _outcome_level(low: str, wc: int) -> str:
+    if _METRIC_RE.search(low):
+        return "strong"
+    return "partial" if any(k in low for k in _OUTCOME_CUES) else "missing"
+
+
+def _reflection_level(low: str, wc: int) -> str:
+    return "strong" if any(k in low for k in _REFLECTION_CUES) else "missing"
+
+
+def _owned_task_level(low: str, wc: int) -> str:
+    if any(k in low for k in _OWNED_TASK_CUES):
+        return "strong"
+    return "partial" if any(k in low for k in _GOAL_CUES) else "missing"
+
+
+def _direct_level(low: str, wc: int) -> str:
+    first_sentence = re.split(r"[.!?]", low, maxsplit=1)[0].split()
+    if wc >= 12 and len(first_sentence) <= 30:
+        return "strong"
+    return "partial" if wc >= 5 else "missing"
+
+
+def _specific_level(low: str, wc: int) -> str:
+    if _METRIC_RE.search(low) or any(k in low for k in _EXAMPLE_CUES):
+        return "strong"
+    return "partial" if ("because" in low or wc >= 40) else "missing"
+
+
+def _role_fit_level(low: str, wc: int) -> str:
+    hits = sum(1 for k in _ROLE_FIT_CUES if k in low)
+    return "strong" if hits >= 2 else ("partial" if hits == 1 else "missing")
+
+
+def _concise_level(low: str, wc: int) -> str:
+    if 20 <= wc <= 220:
+        return "strong"
+    return "partial" if wc <= 350 else "missing"
+
+
+_CARL_SCORERS = {
+    "context": _setting_level,
+    "action": _own_action_level,
+    "result": _outcome_level,
+    "learning": _reflection_level,
+}
+_SCORERS_BY_RUBRIC = {
+    STAR.id: {
+        "context": _setting_level,
+        "action": _owned_task_level,
+        "result": _own_action_level,
+        "learning": _outcome_level,
+    },
+    GENERAL.id: {
+        "context": _direct_level,
+        "action": _specific_level,
+        "result": _role_fit_level,
+        "learning": _concise_level,
+    },
+}
+
+
+def estimate_carl_heuristic(
+    answer_text: str,
+    existing: dict[str, str] | None = None,
+    rubric: Rubric = CARL,
+) -> dict[str, str]:
     """
-    Fast, deterministic CARL signal estimator used as instant baseline and offline fallback.
-    Never downgrades an already-strong dimension across follow-up turns for the same question.
+    Fast, deterministic estimate of the four coaching signals, used as the instant baseline
+    and the offline fallback. Each slot is scored by what it means in ``rubric``.
+    Never downgrades a signal across follow-up turns for the same question.
     """
     low = (answer_text or "").lower()
-    words = low.split()
-    wc = len(words)
-
-    rank = {"missing": 0, "partial": 1, "strong": 2}
-    inv_rank = {0: "missing", 1: "partial", 2: "strong"}
-
-    prev = existing or {"context": "missing", "action": "missing", "result": "missing", "learning": "missing"}
-
-    has_context = any(
-        k in low
-        for k in (
-            "when i", "at my", "our team", "project", "problem", "incident", "outage",
-            "context", "situation", "legacy", "migrat", "quarter", "stakeholder", "deadline",
-        )
-    )
-    has_action = any(
-        k in low
-        for k in (
-            "i designed", "i built", "i led", "i proposed", "i refactored", "i implemented",
-            "i wrote", "i decided", "i aligned", "i benchmarked", "i set up", "i profiled",
-            "i debugged", "my approach", "i chose", "i worked with", "i convinced",
-        )
-    ) or (" i " in f" {low} " and wc >= 25)
-    has_metric = bool(
-        re.search(
-            r"\b\d+(?:\.\d+)?\s*(?:%(?!\w)|(?:ms|s|x|k|m|million|thousand|hours|days|weeks|users|qps|rps)\b)",
-            low,
-        )
-    )
-    has_result = has_metric or any(
-        k in low
-        for k in (
-            "reduced", "improved", "increased", "shipped", "launched", "saved",
-            "result", "outcome", "impact", "resolved", "adopted", "unblocked",
-        )
-    )
-    has_learning = any(
-        k in low
-        for k in (
-            "learned", "takeaway", "next time", "retrospective", "in hindsight",
-            "changed how", "now i always", "lesson", "would do differently", "taught me",
-        )
-    )
-
-    cur = {
-        "context": "strong" if (has_context and wc >= 20) else ("partial" if has_context or wc >= 12 else "missing"),
-        "action": "strong" if (has_action and wc >= 35) else ("partial" if has_action else "missing"),
-        "result": "strong" if has_metric else ("partial" if has_result else "missing"),
-        "learning": "strong" if has_learning else "missing",
-    }
+    wc = len(low.split())
+    prev = existing or {}
+    scorers = _SCORERS_BY_RUBRIC.get(rubric.id, _CARL_SCORERS)
     return {
-        dim: inv_rank[max(rank.get(prev.get(dim, "missing"), 0), rank.get(cur[dim], 0))]
-        for dim in ("context", "action", "result", "learning")
+        slot: _LEVEL[max(_RANK.get(prev.get(slot, "missing"), 0), _RANK[scorers[slot](low, wc)])]
+        for slot in SIGNAL_SLOTS
     }
 
 
-def build_heuristic_nudge(carl: dict[str, str], interview_type: str) -> dict[str, str]:
+def build_heuristic_nudge(
+    carl: dict[str, str],
+    interview_type: str,
+    rubric: Rubric = CARL,
+) -> dict[str, str]:
     """Warm, encouraging deterministic coach nudge when LLM is unavailable."""
     if interview_type == "system_design":
         return {
@@ -287,25 +371,11 @@ def build_heuristic_nudge(carl: dict[str, str], interview_type: str) -> dict[str
             "tone": "tip",
             "message": "Nice thinking out loud — state the time/space complexity and check an edge case before finalizing.",
         }
-    if carl.get("action") == "missing":
-        return {
-            "tone": "tip",
-            "message": "Good setup on the context! Now zoom into what YOU specifically decided and built.",
-        }
-    if carl.get("result") == "missing":
-        return {
-            "tone": "tip",
-            "message": "Strong ownership on the actions — next, anchor it with a concrete result or number (time saved, revenue, adoption, quality).",
-        }
-    if carl.get("learning") == "missing":
-        return {
-            "tone": "encourage",
-            "message": "Solid C-A-R foundation! Adding a 1-sentence Learning ('what I'd do differently or kept doing since') makes strong answers shine.",
-        }
-    return {
-        "tone": "encourage",
-        "message": "Great CARL structure — clear context, personal ownership, measurable impact, and genuine reflection!",
-    }
+    for slot in rubric.nudge_order:
+        if carl.get(slot) == "missing":
+            signal = rubric.signal(slot)
+            return {"tone": signal.nudge_tone, "message": signal.nudge}
+    return {"tone": "encourage", "message": rubric.all_landed}
 
 
 class PracticeSessionStore:
@@ -329,19 +399,21 @@ class PracticeSessionStore:
     @staticmethod
     def _summary_from_raw(raw: dict[str, Any], stem: str) -> dict[str, Any]:
         cfg = raw.get("config") or {}
+        interview_type = cfg.get("interview_type", "behavioral")
+        rubric = rubric_for(interview_type, str(cfg.get("answer_framework") or "carl"))
         return {
             "id": raw.get("id", stem),
             "created_at_iso": raw.get("created_at_iso", ""),
             "role_title": raw.get("role_title", "Practice Interview"),
             "company": raw.get("company", ""),
-            "interview_type": cfg.get("interview_type", "behavioral"),
+            "interview_type": interview_type,
             "target_level": normalize_level(cfg.get("target_level")) or DEFAULT_LEVEL,
             "phase": raw.get("phase", "active"),
             "question_count": len(raw.get("questions") or []),
             "turn_count": len(raw.get("turns") or []),
             "has_debrief": bool(raw.get("debrief")),
             **PracticeSessionStore._history_extras(
-                raw.get("questions") or [], raw.get("retry_history"), raw.get("debrief")
+                raw.get("questions") or [], raw.get("retry_history"), raw.get("debrief"), scored=rubric.coached
             ),
         }
 
@@ -350,8 +422,12 @@ class PracticeSessionStore:
         questions: list[Any],
         retry_history: list[Any] | None = None,
         debrief: Any = None,
+        *,
+        scored: bool = True,
     ) -> dict[str, Any]:
         """Small, privacy-safe facts that let the history rail tell sessions apart.
+
+        A session with no answer structure (``scored=False``) has no score.
 
         ``score`` is the same number the debrief headline shows (see ``aggregateSignals`` /
         ``effectiveQuestionSignals`` in practice_studio.js): each signal is averaged across
@@ -409,12 +485,12 @@ class PracticeSessionStore:
             )
             rows[drill_idx] = retry_after
 
-        scored = [row for row in rows if isinstance(row, dict)]
+        graded = [row for row in rows if isinstance(row, dict)]
         score: float | None = None
-        if scored:
+        if scored and graded:
             score = 0.0
             for dim in dims:
-                avg = sum(weight.get(row.get(dim), 0.0) for row in scored) / len(scored)
+                avg = sum(weight.get(row.get(dim), 0.0) for row in graded) / len(graded)
                 score += 1.0 if avg >= 0.75 else 0.5 if avg >= 0.25 else 0.0
         return {"focus_title": focus_title, "answered_count": answered, "score": score}
 
@@ -432,7 +508,10 @@ class PracticeSessionStore:
             "turn_count": len(session.turns),
             "has_debrief": bool(session.debrief),
             **PracticeSessionStore._history_extras(
-                list(session.questions), session.retry_history, session.debrief
+                list(session.questions),
+                session.retry_history,
+                session.debrief,
+                scored=session.config.rubric.coached,
             ),
         }
 

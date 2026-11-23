@@ -44,6 +44,7 @@ from mockery.prompts import (
     find_missing_placeholders,
     get_prompt_spec,
     list_prompts,
+    practice_reply_rubric_args,
     practice_tone_instruction,
     probe_guidance_for,
     render_prompt,
@@ -276,6 +277,7 @@ def test_llm_runtime_prompt_parity_all_12_prompts(tmp_path: Path, monkeypatch: p
         role_title="Senior Engineer",
         target_level="Senior (L5)",
         tone_instruction=practice_tone_instruction("supportive"),
+        **practice_reply_rubric_args(),
     )
 
 

@@ -43,11 +43,17 @@ from .practice_conversation import (
 )
 from .prompts import (
     calibration_rubric_for,
+    practice_debrief_rubric_args,
+    practice_focus_brief,
+    practice_hint_behavioral_nudge,
+    practice_reply_rubric_args,
+    practice_signal_schema,
     practice_tone_instruction,
     probe_guidance_for,
     render_prompt,
     triage_diarize_rules,
 )
+from .rubrics import CARL, SIGNAL_LEVELS, SIGNAL_SLOTS, Rubric
 
 if TYPE_CHECKING:
     from .practice import PracticeSession
@@ -2976,6 +2982,7 @@ class InterviewCopilotLLM:
         jd_text: str = "",
         selected_question_id: str | None = None,
         custom_question: str = "",
+        rubric: Rubric = CARL,
     ) -> tuple[list[dict[str, Any]], str]:
         """
         Build the interview question plan and a warm opening greeting.
@@ -3122,7 +3129,10 @@ class InterviewCopilotLLM:
             else remaining_bank[: max(0, slots_after_pin - want_tailored)]
         )
 
-        sys_p = render_prompt("practice_plan_tailored")
+        sys_p = render_prompt(
+            "practice_plan_tailored",
+            focus_brief=practice_focus_brief(rubric.grader, coached=rubric.coached),
+        )
         usr_p = (
             f"Target Role: {role_label} ({target_level}) | Format: {interview_type}\n"
             f"Generate exactly {want_tailored} distinct, tailored interview question(s).\n\n"
@@ -3157,7 +3167,7 @@ class InterviewCopilotLLM:
                         "title": str(item.get("title") or "Tailored Question").strip(),
                         "competency": str(item.get("competency") or "Role Fit").strip(),
                         "prompt": prompt_text,
-                        "carl_focus": str(item.get("carl_focus") or "Clear Context, personal Actions, measurable Result, and Learning.").strip(),
+                        "carl_focus": str(item.get("carl_focus") or rubric.default_focus).strip(),
                         "follow_ups": [str(f).strip() for f in (item.get("follow_ups") or [])[:3] if str(f).strip()],
                         "core_requirements": [],
                         "deep_dives": [],
@@ -3198,6 +3208,7 @@ class InterviewCopilotLLM:
         workspace_context: dict[str, Any] | None = None,
         cache_key: str | None = None,
         session: PracticeSession | None = None,
+        rubric: Rubric = CARL,
     ) -> dict[str, Any]:
         """
         Generate the AI interviewer's natural next turn + live CARL status + supportive coach nudge.
@@ -3207,7 +3218,9 @@ class InterviewCopilotLLM:
         """
         from .practice import build_heuristic_nudge, estimate_carl_heuristic
 
-        heuristic_carl = estimate_carl_heuristic(candidate_answer, existing_carl)
+        if session is not None:
+            rubric = session.config.rubric
+        heuristic_carl = estimate_carl_heuristic(candidate_answer, existing_carl, rubric)
         follow_ups = list(current_question.get("follow_ups") or [])
         max_followups = 3 if interview_type in ("system_design", "coding") else 2
 
@@ -3224,14 +3237,14 @@ class InterviewCopilotLLM:
             else:
                 reply = (
                     "Thank you for sharing that — you covered a lot of thoughtful ground today! "
-                    "Whenever you're ready, click End & CARL Debrief to review your coaching report."
+                    "Whenever you're ready, click End & Debrief to review your coaching report."
                 )
                 advance = True
             return {
                 "interviewer_reply": reply,
                 "should_advance": advance,
                 "carl_signals": heuristic_carl,
-                "coach_nudge": build_heuristic_nudge(heuristic_carl, interview_type),
+                "coach_nudge": build_heuristic_nudge(heuristic_carl, interview_type, rubric),
             }
 
         if not self.config.is_configured:
@@ -3290,7 +3303,7 @@ class InterviewCopilotLLM:
                 next_q_block = (
                     f"Next planned question (ONLY introduce if should_advance=true): {next_question.get('prompt')}"
                     if next_question
-                    else "This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their CARL Coaching Debrief."
+                    else f"This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their {rubric.debrief_name}."
                 )
 
                 tone_instruction = practice_tone_instruction(coach_style)
@@ -3300,10 +3313,11 @@ class InterviewCopilotLLM:
                     role_title=role_title,
                     target_level=target_level,
                     tone_instruction=tone_instruction,
+                    **practice_reply_rubric_args(rubric.grader, rubric.signal_keys, coached=rubric.coached),
                 )
                 stable_prefix = (
                     f"Current Question: {current_question.get('prompt')}\n"
-                    f"CARL / Rubric Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
+                    f"{rubric.focus_label}: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
                     f"Suggested follow-up angles: {follow_ups}\n"
                     f"{next_q_block}\n\n"
                     f"Recent conversation:\n" + ("\n".join(history_lines) if history_lines else "(Opening turn)")
@@ -3344,17 +3358,13 @@ class InterviewCopilotLLM:
             if follow_up_count >= max_followups:
                 should_advance = True
 
-            raw_carl = parsed.get("carl_signals") if isinstance(parsed.get("carl_signals"), dict) else {}
-            valid = {"strong", "partial", "missing"}
-            rank = {"missing": 0, "partial": 1, "strong": 2}
-            inv_rank = {0: "missing", 1: "partial", 2: "strong"}
+            graded = rubric.signals_from_grader(parsed.get("carl_signals"))
+            rank = {level: idx for idx, level in enumerate(SIGNAL_LEVELS)}
             merged_carl: dict[str, str] = {}
-            for dim in ("context", "action", "result", "learning"):
-                llm_val = str(raw_carl.get(dim, "")).lower()
-                if llm_val not in valid:
-                    llm_val = heuristic_carl[dim]
+            for dim in SIGNAL_SLOTS:
+                llm_val = graded.get(dim, heuristic_carl[dim])
                 prev_val = existing_carl.get(dim, "missing")
-                merged_carl[dim] = inv_rank[max(rank.get(prev_val, 0), rank.get(llm_val, 0))]
+                merged_carl[dim] = SIGNAL_LEVELS[max(rank.get(prev_val, 0), rank[llm_val])]
 
             nudge_raw = parsed.get("coach_nudge") if isinstance(parsed.get("coach_nudge"), dict) else {}
             nudge_msg = str(nudge_raw.get("message") or "").strip()
@@ -3362,7 +3372,7 @@ class InterviewCopilotLLM:
             nudge = (
                 {"tone": nudge_tone, "message": nudge_msg}
                 if nudge_msg
-                else build_heuristic_nudge(merged_carl, interview_type)
+                else build_heuristic_nudge(merged_carl, interview_type, rubric)
             )
             out: dict[str, Any] = {
                 "interviewer_reply": reply,
@@ -3387,11 +3397,11 @@ class InterviewCopilotLLM:
         current_question: dict[str, Any],
         recent_turns: list[dict[str, Any]],
         workspace_context: dict[str, Any] | None = None,
+        rubric: Rubric = CARL,
     ) -> str:
         """Return a supportive, non-spoiler coaching hint when the candidate asks for help."""
-        fallback = (
-            f"Start with a 2-sentence Context, then walk through 2 specific Actions YOU drove "
-            f"(focus on: {current_question.get('carl_focus') or 'your technical decisions & measurable impact'})."
+        fallback = rubric.offline_hint.format(
+            focus=current_question.get("carl_focus") or "your own decisions & measurable impact"
         )
         if interview_type == "system_design":
             reqs = current_question.get("core_requirements") or []
@@ -3432,7 +3442,10 @@ class InterviewCopilotLLM:
             if workspace_context.get("code"):
                 ws_note += f"\nCurrent code:\n{str(workspace_context['code'])[:1500]}"
 
-        sys_p = render_prompt("practice_hint")
+        sys_p = render_prompt(
+            "practice_hint",
+            behavioral_nudge=practice_hint_behavioral_nudge(rubric.grader, coached=rubric.coached),
+        )
         usr_p = (
             f"Format: {interview_type} ({target_level})\n"
             f"Question: {current_question.get('prompt')}\n"
@@ -3465,25 +3478,27 @@ class InterviewCopilotLLM:
         questions: list[dict[str, Any]],
         turns: list[dict[str, Any]],
         workspace_context: dict[str, Any] | None = None,
+        rubric: Rubric = CARL,
     ) -> dict[str, Any]:
         """
-        Generate a Supportive CARL Coaching Debrief:
+        Generate a supportive coaching debrief in the session's rubric:
           - Leads with genuine strengths & confidence-building encouragement
-          - Per-question CARL breakdown + concrete Before -> After reframe
+          - Per-question signal breakdown + concrete Before -> After reframe
           - One targeted 45-second Retry Weak Part drill
         """
         # Build deterministic fallback debrief first (also guarantees schema safety)
         q_reviews_fb: list[dict[str, Any]] = []
         weakest_q: dict[str, Any] | None = None
-        weakest_dim = "result"
+        weakest_dim = rubric.drill_order[0]
+        finish = f"your {rubric.name} finish" if rubric.named_framework else "how you land each answer"
 
         for q in questions:
             q_turns = [t for t in turns if t.get("question_id") == q.get("id") and t.get("role") == "candidate"]
             if not q_turns:
                 continue
             carl = dict(q.get("carl_signals") or {"context": "partial", "action": "partial", "result": "missing", "learning": "missing"})
-            missing_dims = [d for d in ("result", "learning", "action", "context") if carl.get(d) != "strong"]
-            focus_dim = missing_dims[0] if missing_dims else "learning"
+            focus_dim = rubric.drill_slot(carl)
+            focus_label = rubric.signal(focus_dim).label if rubric.coached else "main point"
             if weakest_q is None or carl.get(focus_dim) == "missing":
                 weakest_q = q
                 weakest_dim = focus_dim
@@ -3494,29 +3509,28 @@ class InterviewCopilotLLM:
                     "prompt": q.get("prompt") or "",
                     "carl": carl,
                     "strength": "You engaged thoughtfully with the prompt and kept the story clear and grounded.",
-                    "coaching_tip": f"Next pass, spend 15 extra seconds sharpening your {focus_dim.title()} so a hiring panel immediately hears your {target_level} impact.",
-                    "carl_reframe": (
-                        "Try closing with: 'As a result, [measurable outcome], and what I carried forward to future projects was [1-sentence learning].'"
-                    ),
+                    "coaching_tip": f"Next pass, spend 15 extra seconds sharpening your {focus_label} so a hiring panel immediately hears your {target_level} impact.",
+                    "carl_reframe": rubric.reframe_tip,
                 }
             )
 
+        weakest_label = rubric.signal(weakest_dim).label if rubric.coached else "main point"
         fallback_debrief: dict[str, Any] = {
             "overall_encouragement": (
                 f"Great rep! Practicing out loud for {role_title} ({target_level}) builds real fluency — "
-                "you already have solid instincts, and tightening your CARL finish will make your stories land with even more confidence."
+f"you already have solid instincts, and tightening {finish} will make your answers land with even more confidence."
             ),
             "top_strengths": [
                 "You stayed composed and communicated your reasoning clearly.",
                 "You provided concrete context rather than speaking only in abstractions.",
             ],
-            "carl_primer": "CARL = Context (brief setup) → Action (what YOU decided & drove) → Result (measurable outcome) → Learning (what changed afterward).",
+            "carl_primer": rubric.primer,
             "question_reviews": q_reviews_fb,
             "retry_drill": {
                 "question_id": (weakest_q or (questions[0] if questions else {})).get("id"),
-                "focus": f"Sharpen {weakest_dim.title()} in 45 seconds",
+                "focus": f"Sharpen {weakest_label} in 45 seconds",
                 "prompt": (
-                    f"In 45 seconds, re-deliver just the {weakest_dim.upper()} portion of your answer to: "
+                    f"In 45 seconds, re-deliver just the {weakest_label.upper()} portion of your answer to: "
                     f"\"{(weakest_q or (questions[0] if questions else {})).get('prompt', 'your main story')}\""
                 ),
             },
@@ -3554,7 +3568,10 @@ class InterviewCopilotLLM:
             if workspace_context.get("test_output"):
                 ws_block += f"\nTEST RESULTS:\n{str(workspace_context['test_output'])[:1000]}\n"
 
-        system_prompt = render_prompt("practice_debrief")
+        system_prompt = render_prompt(
+            "practice_debrief",
+            **practice_debrief_rubric_args(rubric.grader, rubric.signal_keys, coached=rubric.coached),
+        )
         user_prompt = (
             f"Role: {role_title}" + (f" at {company}" if company else "") + f" | Target Level: {target_level} | Format: {interview_type}\n"
             f"Answered Questions:\n"
@@ -3564,15 +3581,9 @@ class InterviewCopilotLLM:
             + ws_block
         )
 
-        valid_carl_vals = {"strong", "partial", "missing"}
-
         def _norm_carl(raw_c: Any, default_c: dict[str, str]) -> dict[str, str]:
-            src = raw_c if isinstance(raw_c, dict) else {}
-            out: dict[str, str] = {}
-            for dim in ("context", "action", "result", "learning"):
-                v = str(src.get(dim, "")).strip().lower()
-                out[dim] = v if v in valid_carl_vals else default_c.get(dim, "missing")
-            return out
+            graded = rubric.signals_from_grader(raw_c)
+            return {dim: graded.get(dim, default_c.get(dim, "missing")) for dim in SIGNAL_SLOTS}
 
         try:
             debrief_model = self.config.calibration_model or self.config.fast_model
@@ -3667,7 +3678,7 @@ class InterviewCopilotLLM:
             else:
                 clean_drill = {
                     "question_id": drill_qid,
-                    "focus": str(raw_drill.get("focus") or "Sharpen CARL clarity in 45 seconds").strip(),
+                    "focus": str(raw_drill.get("focus") or "Sharpen clarity in 45 seconds").strip(),
                     "prompt": drill_prompt,
                 }
 
@@ -3691,43 +3702,45 @@ class InterviewCopilotLLM:
         drill_prompt: str,
         original_answer: str,
         retry_answer: str,
+        rubric: Rubric = CARL,
     ) -> dict[str, Any]:
         """Give immediate, encouraging before-vs-after coaching on a 45-second Retry Weak Part drill."""
         from .practice import estimate_carl_heuristic
 
         rank = {"missing": 0, "partial": 1, "strong": 2}
-        carl_before = estimate_carl_heuristic(original_answer)
-        carl_after = estimate_carl_heuristic(retry_answer)
+        carl_before = estimate_carl_heuristic(original_answer, rubric=rubric)
+        carl_after = estimate_carl_heuristic(retry_answer, rubric=rubric)
+        signal_word = f"{rubric.name} signal" if rubric.named_framework else "signal"
         improved_dims = [
-            dim.title()
-            for dim in ("context", "action", "result", "learning")
-            if rank[carl_after[dim]] > rank[carl_before[dim]]
+            rubric.signal(dim).label
+            for dim in SIGNAL_SLOTS
+            if rubric.coached and rank[carl_after[dim]] > rank[carl_before[dim]]
         ]
         missing_after = [
-            dim.title()
-            for dim in ("result", "learning", "action", "context")
-            if carl_after[dim] != "strong"
+            rubric.signal(dim).label
+            for dim in rubric.drill_order
+            if rubric.coached and carl_after[dim] != "strong"
         ]
 
         if improved_dims:
             encourage_fb = f"Great rep — you clearly leveled up {', '.join(improved_dims)} in this 45-second pass!"
             improved_fb = (
-                f"Compared to your first answer, {', '.join(improved_dims)} moved up in CARL signal "
+                f"Compared to your first answer, {', '.join(improved_dims)} moved up in {signal_word} "
                 "and reads much tighter for a panel."
             )
         elif sum(rank[v] for v in carl_after.values()) >= 6:
-            encourage_fb = "Strong, crisp delivery — you kept your CARL signal intact in a tight 45-second window!"
+            encourage_fb = f"Strong, crisp delivery — you kept your {signal_word} intact in a tight 45-second window!"
             improved_fb = "You maintained clear ownership and measurable impact while keeping the pacing focused."
         else:
             encourage_fb = "Good effort getting another rep in — let's sharpen one concrete detail on the next pass."
             improved_fb = (
-                "The retry stayed close to your original CARL coverage; adding a concrete metric or explicit takeaway "
+                "The retry stayed close to your original coverage; adding one more concrete detail "
                 "will create a bigger before → after jump."
             )
         polish_fb = (
             f"For one final polish, add a crisp sentence strengthening {missing_after[0]}."
             if missing_after
-            else "Lock this phrasing in — it's concise, owned, quantified, and reflective."
+            else "Lock this phrasing in — it's clear, specific, and tight."
         )
 
         fallback = {
@@ -3739,7 +3752,7 @@ class InterviewCopilotLLM:
         if not self.config.is_configured:
             return fallback
 
-        sys_p = render_prompt("practice_retry_eval")
+        sys_p = render_prompt("practice_retry_eval", signal_schema=practice_signal_schema(rubric.signal_keys))
         usr_p = (
             f"Role: {role_title} ({target_level})\n"
             f"Retry Drill Focus: {drill_focus}\nDrill Prompt: {drill_prompt}\n\n"
@@ -3760,12 +3773,8 @@ class InterviewCopilotLLM:
             enc = str(parsed.get("encouragement") or "").strip()
             if not enc:
                 return fallback
-            raw_ca = parsed.get("carl_after") if isinstance(parsed.get("carl_after"), dict) else {}
-            valid = {"strong", "partial", "missing"}
-            norm_ca = {
-                dim: (str(raw_ca.get(dim, "")).lower() if str(raw_ca.get(dim, "")).lower() in valid else carl_after[dim])
-                for dim in ("context", "action", "result", "learning")
-            }
+            graded_after = rubric.signals_from_grader(parsed.get("carl_after"))
+            norm_ca = {dim: graded_after.get(dim, carl_after[dim]) for dim in SIGNAL_SLOTS}
             return {
                 "encouragement": enc,
                 "what_improved": str(parsed.get("what_improved") or improved_fb).strip(),

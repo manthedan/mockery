@@ -22,6 +22,7 @@ from ..practice import (
     PracticeTurn,
     estimate_carl_heuristic,
 )
+from ..rubrics import framework_for
 from ..practice_conversation import (
     build_practice_session_system_prompt,
     commit_practice_conversation_turn,
@@ -53,6 +54,7 @@ class PracticeStartRequest(BaseModel):
     question_count: int = Field(default=4, ge=1, le=8)
     selected_question_id: str | None = None
     custom_question: str = Field(default="", max_length=MAX_CUSTOM_QUESTION_CHARS)
+    answer_framework: Literal["carl", "star", "none"] = "carl"
 
 
 class PracticeTurnRequest(BaseModel):
@@ -184,6 +186,7 @@ def serialize_practice_session(
     sm = serialize_practice_state_machines(session, debrief_job=debrief_job)
     data = session.model_dump()
     data.pop("llm_conversation", None)
+    data["rubric"] = session.config.rubric.public_dict()
     data["phase"] = sm["practice"]["phase"]
     data["state_machines"] = sm
     return data
@@ -212,7 +215,7 @@ def _check_practice_not_debriefing(
             current_state=PracticePhase.DEBRIEFING.value,
             event=event,
             allowed_events=[],
-            remediation="Wait for the CARL Debrief to finish generating.",
+            remediation="Wait for the debrief to finish generating.",
         )
         raise HTTPException(status_code=409, detail=err.to_dict())
 
@@ -300,6 +303,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             voice_enabled=body.voice_enabled,
             question_count=body.question_count,
             selected_question_id=selected_qid,
+            answer_framework=framework_for(body.interview_type, body.answer_framework),
         )
 
         try:
@@ -315,6 +319,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 jd_text=jd_text,
                 selected_question_id=cfg.selected_question_id,
                 custom_question=custom_question,
+                rubric=cfg.rubric,
             )
         except Exception as exc:
             raise HTTPException(
@@ -335,7 +340,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     title="Core Experience Walkthrough",
                     competency="Ownership & Impact",
                     prompt=f"Tell me about a challenging project you led that best prepares you for {role_title}.",
-                    carl_focus="Clear Context, your personal Actions, measurable Result, and Learning.",
+                    carl_focus=cfg.rubric.default_focus,
                     status="active",
                 )
             )
@@ -459,10 +464,14 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 ) from exc
 
             conv_commit = reply.pop("_conversation_commit", None)
-            carl_signals = reply.get("carl_signals") or estimate_carl_heuristic(answer_text, cur_q.carl_signals)
-            cur_q.carl_signals = dict(carl_signals)
+            rubric = session.config.rubric
+            if rubric.coached:
+                carl_signals = reply.get("carl_signals") or estimate_carl_heuristic(
+                    answer_text, cur_q.carl_signals, rubric
+                )
+                cur_q.carl_signals = dict(carl_signals)
+                cand_turn.carl_signals = dict(carl_signals)
             cur_q.follow_up_count += 1
-            cand_turn.carl_signals = dict(carl_signals)
 
             nudge = reply.get("coach_nudge")
             if session.config.live_coach_nudges and isinstance(nudge, dict) and nudge.get("message"):
@@ -560,6 +569,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         current_question=cur_q.model_dump(),
                         recent_turns=[t.model_dump() for t in session.turns[-8:]],
                         workspace_context=session.workspace_context or None,
+                        rubric=session.config.rubric,
                     ),
                 )
             except _ClientDisconnectedError:
@@ -672,6 +682,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
             _require_practice_event(runtime, session, "generate_debrief")
+            rubric = session.config.rubric
             if session.phase == PracticePhase.COMPLETED.value and session.debrief is not None:
                 if body and body.final_answer and body.final_answer.strip():
                     phase = derive_practice_phase(session)
@@ -712,14 +723,16 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         remediation="Active question changed before your final answer was recorded; refresh and review before ending.",
                     )
                     raise HTTPException(status_code=409, detail=err.to_dict())
-                est_carl = estimate_carl_heuristic(final_answer, cur_q.carl_signals)
-                cur_q.carl_signals = dict(est_carl)
+                final_signals: dict[str, str] | None = None
+                if rubric.coached:
+                    final_signals = estimate_carl_heuristic(final_answer, cur_q.carl_signals, rubric)
+                    cur_q.carl_signals = dict(final_signals)
                 session.turns.append(
                     PracticeTurn(
                         role="candidate",
                         question_id=cur_q.id,
                         text=final_answer,
-                        carl_signals=dict(est_carl),
+                        carl_signals=final_signals,
                     )
                 )
             await _safe_close_practice_worker(runtime, session.id)
@@ -738,6 +751,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         questions=questions_snapshot,
                         turns=[t.model_dump() for t in session.turns],
                         workspace_context=session.workspace_context or None,
+                        rubric=rubric,
                     )
                 except Exception as exc:
                     raise HTTPException(
@@ -758,7 +772,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 for q in session.questions:
                     if q.status == "active":
                         q.status = "completed"
-                    if q.id in review_carl_by_qid:
+                    if rubric.coached and q.id in review_carl_by_qid:
                         q.carl_signals = review_carl_by_qid[q.id]
                 session.debrief = debrief
                 session.phase = PracticePhase.COMPLETED.value
@@ -790,6 +804,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
             if session is None:
                 raise HTTPException(status_code=404, detail="Practice session not found.")
             _require_practice_event(runtime, session, "submit_retry")
+            rubric = session.config.rubric
 
             drill = session.debrief.get("retry_drill") if isinstance(session.debrief, dict) else {}
             if not isinstance(drill, dict):
@@ -805,7 +820,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                     session.questions[0] if session.questions else None
                 )
 
-            drill_focus = body.focus.strip() or str(drill.get("focus") or "Strengthen CARL clarity & impact")
+            drill_focus = body.focus.strip() or str(drill.get("focus") or "Strengthen clarity & impact")
             drill_prompt = str(
                 drill.get("prompt")
                 or (target_q.prompt if target_q else "Re-deliver your sharpest 45-second answer.")
@@ -828,6 +843,7 @@ def build_practice_router(runtime: Any) -> APIRouter:
                         drill_prompt=drill_prompt,
                         original_answer=original_answer,
                         retry_answer=retry_text,
+                        rubric=rubric,
                     ),
                 )
             except _ClientDisconnectedError:
@@ -843,7 +859,11 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 question_id=target_q.id if target_q else None,
                 text=retry_text,
                 is_retry=True,
-                carl_signals=feedback.get("carl_after") if isinstance(feedback.get("carl_after"), dict) else None,
+                carl_signals=(
+                    feedback.get("carl_after")
+                    if rubric.coached and isinstance(feedback.get("carl_after"), dict)
+                    else None
+                ),
             )
             session.turns.append(retry_turn)
             session.retry_history.append(

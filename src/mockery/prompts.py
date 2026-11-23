@@ -45,6 +45,133 @@ def practice_tone_instruction(coach_style: str) -> str:
     return "Be realistic, fair, and constructive — probing cleanly while remaining respectful and encouraging."
 
 
+PracticeGrader = Literal["carl", "star", "general"]
+CARL_SIGNAL_KEYS: tuple[str, ...] = ("context", "action", "result", "learning")
+
+_SIGNAL_DEFINITIONS: dict[str, str] = {
+    "carl": (
+        "Context = the situation, problem, or constraints are established. "
+        "Action = what the candidate specifically did, decided, or implemented. "
+        "Result = outcome, impact, or verified behavior (metrics, tests passing, bug fixed). "
+        "Learning = reflection, takeaway, tradeoffs, or what they would do differently."
+    ),
+    "star": (
+        "Situation = the setting and what was at stake are established. "
+        "Task = the candidate states the goal or responsibility that was personally theirs in that situation. "
+        "Action = what the candidate specifically did, decided, or implemented (their own part, not the team's). "
+        "Result = the outcome or impact, ideally measured."
+    ),
+    "general": (
+        "Direct = the question that was asked is answered plainly, early in the answer. "
+        "Specific = concrete reasons, facts, or a short example rather than generalities. "
+        "Fit = the answer is tied to this role, team, or company rather than any job. "
+        "Concise = focused, without rambling or repetition."
+    ),
+}
+_CARRY_FORWARD_NOTES: dict[str, str] = {
+    "carl": (
+        " When the problem or context was clearly stated earlier (including in the prompt, workspace, "
+        "or earlier turns), keep context at strong."
+    ),
+    "star": " When the situation was clearly stated in an earlier turn, keep situation at strong.",
+    "general": "",
+}
+_NUDGE_EXAMPLES: dict[str, str] = {
+    "carl": "e.g., quantify the Result, add a Learning, mention complexity or tests",
+    "star": "e.g., state the Task that was theirs, separate their own Actions from the team's, quantify the Result",
+    "general": "e.g., answer the question in the first sentence, name one concrete reason, tie it to this role",
+}
+_NO_FRAMEWORK_NUDGE_EXAMPLES = (
+    "e.g., expand one detail, make a point more plainly; never name or teach an answer framework such as STAR or CARL"
+)
+_COACH_FOCUS: dict[str, str] = {
+    "carl": "teaching the CARL framework (Context, Action, Result, Learning)",
+    "star": "teaching the STAR framework (Situation, Task, Action, Result)",
+    "general": (
+        "helping the candidate give direct, specific answers that are clearly about this role "
+        "(these are motivation and fit questions, not stories, so do not impose a story framework such as STAR or CARL)"
+    ),
+}
+_NO_FRAMEWORK_COACH_FOCUS = (
+    "focused on the substance, clarity and specificity of each answer "
+    "(the candidate chose no answer framework, so never name or teach one such as STAR or CARL)"
+)
+_PRIMER_BRIEFS: dict[str, str] = {
+    "carl": "1 crisp sentence reminding how CARL elevates their target level",
+    "star": "1 crisp sentence reminding how STAR elevates their target level",
+    "general": "1 crisp sentence on what makes these answers land at their target level",
+}
+_NO_FRAMEWORK_PRIMER_BRIEF = "1 crisp sentence on what will most raise their answers to their target level"
+_REFRAME_BRIEFS: dict[str, str] = {
+    "carl": "a concise 2-3 sentence example showing how to rephrase their weakest part into crisp CARL format",
+    "star": "a concise 2-3 sentence example showing how to rephrase their weakest part into crisp STAR format",
+    "general": "a concise 2-3 sentence example of a more direct, specific version of their weakest answer",
+}
+_NO_FRAMEWORK_REFRAME_BRIEF = "a concise 2-3 sentence example of a stronger way to say their weakest part, in their own voice"
+_DRILL_FOCUS_EXAMPLES: dict[str, str] = {
+    "carl": "Quantify Result & Add Learning (45s)",
+    "star": "Name the Task & Quantify Result (45s)",
+    "general": "Answer First & Tie It to the Role (45s)",
+}
+_NO_FRAMEWORK_DRILL_FOCUS_EXAMPLE = "Say It Plainly With One Concrete Detail (45s)"
+_BEHAVIORAL_HINT_NUDGES: dict[str, str] = {
+    "carl": "nudge structure and ownership (the situation, their specific actions, the result, what they learned)",
+    "star": "nudge structure and ownership (the situation, the task that was theirs, their specific actions, the result)",
+    "general": "nudge them toward a direct answer with one concrete detail",
+}
+_NO_FRAMEWORK_BEHAVIORAL_HINT_NUDGE = "nudge them toward the most concrete, specific version of their own answer"
+_FOCUS_BRIEFS: dict[str, str] = {
+    "carl": "what strong Context/Action/Result/Learning looks like here",
+    "star": "what strong Situation/Task/Action/Result looks like here",
+    "general": "what a direct, specific, role-relevant answer covers here",
+}
+_NO_FRAMEWORK_FOCUS_BRIEF = "what a strong answer covers here, without naming an answer framework"
+
+
+def practice_signal_schema(signal_keys: tuple[str, ...] = CARL_SIGNAL_KEYS) -> str:
+    """The JSON object the grader fills in: one level per signal, under the rubric's own names."""
+    return "{" + ", ".join(f'"{key}": "strong|partial|missing"' for key in signal_keys) + "}"
+
+
+def practice_reply_rubric_args(
+    grader: PracticeGrader = "carl",
+    signal_keys: tuple[str, ...] = CARL_SIGNAL_KEYS,
+    *,
+    coached: bool = True,
+) -> dict[str, str]:
+    """Rubric-specific placeholders for `practice_interviewer_reply`; `coached=False` means no framework is taught."""
+    return {
+        "signal_schema": practice_signal_schema(signal_keys),
+        "signal_definitions": _SIGNAL_DEFINITIONS[grader],
+        "carry_forward_note": _CARRY_FORWARD_NOTES[grader],
+        "nudge_examples": _NUDGE_EXAMPLES[grader] if coached else _NO_FRAMEWORK_NUDGE_EXAMPLES,
+    }
+
+
+def practice_debrief_rubric_args(
+    grader: PracticeGrader = "carl",
+    signal_keys: tuple[str, ...] = CARL_SIGNAL_KEYS,
+    *,
+    coached: bool = True,
+) -> dict[str, str]:
+    """Rubric-specific placeholders for `practice_debrief`."""
+    return {
+        "coach_focus": _COACH_FOCUS[grader] if coached else _NO_FRAMEWORK_COACH_FOCUS,
+        "primer_brief": _PRIMER_BRIEFS[grader] if coached else _NO_FRAMEWORK_PRIMER_BRIEF,
+        "signal_schema": practice_signal_schema(signal_keys),
+        "reframe_brief": _REFRAME_BRIEFS[grader] if coached else _NO_FRAMEWORK_REFRAME_BRIEF,
+        "drill_focus_example": _DRILL_FOCUS_EXAMPLES[grader] if coached else _NO_FRAMEWORK_DRILL_FOCUS_EXAMPLE,
+    }
+
+
+def practice_hint_behavioral_nudge(grader: PracticeGrader = "carl", *, coached: bool = True) -> str:
+    return _BEHAVIORAL_HINT_NUDGES[grader] if coached else _NO_FRAMEWORK_BEHAVIORAL_HINT_NUDGE
+
+
+def practice_focus_brief(grader: PracticeGrader = "carl", *, coached: bool = True) -> str:
+    return _FOCUS_BRIEFS[grader] if coached else _NO_FRAMEWORK_FOCUS_BRIEF
+
+
 def probe_guidance_for(interview_type: str) -> str:
     if interview_type == "system_design":
         return (
@@ -151,16 +278,16 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             "OUTPUT RULES\n"
             "- Output ONLY one raw JSON object. No markdown, no code fences, no text before or after, no comments.\n"
             "- Use exactly this schema and key names:\n"
-            '{"interviewer_reply": "<string>", "should_advance": true|false, "carl_signals": {"context": "strong|partial|missing", "action": "strong|partial|missing", "result": "strong|partial|missing", "learning": "strong|partial|missing"}, "coach_nudge": {"tone": "encourage|tip", "message": "<string>"}}\n\n'
+            '{"interviewer_reply": "<string>", "should_advance": true|false, "carl_signals": {signal_schema}, "coach_nudge": {"tone": "encourage|tip", "message": "<string>"}}\n\n'
             "FIELD GUIDANCE\n"
             "1. interviewer_reply: 1-3 short spoken sentences. First briefly acknowledge something specific the candidate said (refer to their actual details, code, or edge case). Then do exactly ONE of: ask ONE crisp follow-up question, or smoothly transition to the next question. Never ask multiple questions. Warm, conversational, no bullet points or lists.\n"
             "2. should_advance: true only when the candidate has covered the current question well enough (for behavioral: situation, their actions, and a result are reasonably addressed; for technical/coding: the approach is clear and the main concern, such as the edge case, has been handled or discussed). Otherwise false, and your reply should probe the most important missing piece. If true, the reply should transition to the next topic rather than re-probing the same one.\n"
             "3. carl_signals: Rate cumulatively across the WHOLE conversation so far, not just the latest turn.\n"
-            "   - Context = the situation, problem, or constraints are established. Action = what the candidate specifically did, decided, or implemented. Result = outcome, impact, or verified behavior (metrics, tests passing, bug fixed). Learning = reflection, takeaway, tradeoffs, or what they would do differently.\n"
+            "   - {signal_definitions}\n"
             "   - Levels: strong = clearly and specifically covered; partial = mentioned but vague or incomplete; missing = absent.\n"
-            "   - STRICT MONOTONICITY: signals may only stay the same or improve (missing < partial < strong). If prior turns or any prior signals show a dimension at a level, never output a lower level for it. A short or off-topic latest answer must not lower earlier ratings; carry them forward. When the problem or context was clearly stated earlier (including in the prompt, workspace, or earlier turns), keep context at strong.\n"
+            "   - STRICT MONOTONICITY: signals may only stay the same or improve (missing < partial < strong). If prior turns or any prior signals show a dimension at a level, never output a lower level for it. A short or off-topic latest answer must not lower earlier ratings; carry them forward.{carry_forward_note}\n"
             "   - Be fair: if the candidate gave specific details for a dimension, rate it strong rather than partial. Do not rate a dimension strong if it was never addressed.\n"
-            '4. coach_nudge: ONE short supportive sentence, 12-30 words (never over 35). Lead with a genuine specific strength, then optionally one concrete tip for the next turn (e.g., quantify the Result, add a Learning, mention complexity or tests). tone = "encourage" when mainly praising, "tip" when mainly suggesting. Keep it to a single sentence; do not use semicolons to chain several ideas.\n\n'
+            '4. coach_nudge: ONE short supportive sentence, 12-30 words (never over 35). Lead with a genuine specific strength, then optionally one concrete tip for the next turn ({nudge_examples}). tone = "encourage" when mainly praising, "tip" when mainly suggesting. Keep it to a single sentence; do not use semicolons to chain several ideas.\n\n'
             "NO SPOILERS\n"
             '- Never give code, pseudocode, the algorithm, the data structure to use, the specific fix, or the solution to a coding problem. Guide with questions and hints about what to think about (e.g., "what inputs might break this?") rather than answers. Do not reveal what the bug is or how to resolve it.\n\n'
             "STYLE\n"
@@ -168,7 +295,16 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             "- Keep language plain and speakable; no markdown, emojis, or special formatting inside strings.\n"
             "- Escape any quotes inside strings so the JSON stays valid."
         ),
-        input_keys=("interview_type_label", "role_title", "target_level", "tone_instruction"),
+        input_keys=(
+            "interview_type_label",
+            "role_title",
+            "target_level",
+            "tone_instruction",
+            "signal_schema",
+            "signal_definitions",
+            "carry_forward_note",
+            "nudge_examples",
+        ),
         output_format="json",
     ),
     "suggest_probes": PromptSpec(
@@ -236,10 +372,10 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             '{"opening": "<warm 2-sentence welcome putting the candidate at ease>", '
             '"questions": [{"title": "<short 3-6 word title>", "competency": "<competency label>", '
             '"prompt": "<clear natural interview question>", '
-            '"carl_focus": "<what strong Context/Action/Result/Learning looks like here>", '
+            '"carl_focus": "<{focus_brief}>", '
             '"follow_ups": ["<follow-up 1>", "<follow-up 2>"]}]}'
         ),
-        input_keys=(),
+        input_keys=("focus_brief",),
         output_format="json",
     ),
     "practice_hint": PromptSpec(
@@ -254,11 +390,11 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             "2. Ground the hint in what the candidate has actually said, written, or tried so far. Briefly acknowledge something specific and good about their current attempt, then point to one place to look.\n"
             '3. Never name or hint at the target algorithm, data structure, library, API, pattern, or code fix, even by common synonym. Instead, point at the underlying need, bottleneck, invariant, or edge case, ideally as a guiding question (for example, "What has to happen to the oldest item when time runs out?" rather than naming a structure).\n'
             "4. Do not say what to use or write. Ask what they need, what is costly, or what could break.\n"
-            "5. For behavioral questions, nudge structure and ownership (the situation, their specific actions, the result, what they learned) without writing the answer or supplying content for them.\n"
+            "5. For behavioral questions, {behavioral_nudge} without writing the answer or supplying content for them.\n"
             "6. Keep the tone calm, friendly, and confident. No filler, no lecturing, no repeating the question back.\n\n"
             "Before replying, check: is it 1-2 sentences, under 50 words, tied to their attempt, and free of any named solution technique? If not, shorten and rephrase."
         ),
-        input_keys=(),
+        input_keys=("behavioral_nudge",),
         output_format="text",
     ),
     "practice_debrief": PromptSpec(
@@ -266,24 +402,23 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
         description="End-of-practice supportive CARL coaching debrief with reframes and 45-second retry drill.",
         tier=2,
         default_text=(
-            "You are a warm, expert, confidence-building interview coach teaching the CARL framework "
-            "(Context, Action, Result, Learning). NEVER be harsh, dismissive, or discouraging. "
+            "You are a warm, expert, confidence-building interview coach {coach_focus}. NEVER be harsh, dismissive, or discouraging. "
             "ALWAYS lead with genuine strengths grounded in what the candidate actually said, then give clear, "
             "concrete, actionable ways to elevate their answers to the target level.\n"
             "Output ONLY valid JSON matching this exact schema:\n"
             '{"overall_encouragement": "<warm 2-3 sentence summary celebrating effort & highlighting trajectory>", '
             '"top_strengths": ["<specific strength 1 grounded in their answer>", "<specific strength 2>", "<optional strength 3>"], '
-            '"carl_primer": "<1 crisp sentence reminding how CARL elevates their target level>", '
+            '"carl_primer": "<{primer_brief}>", '
             '"question_reviews": [{"question_id": "<exact id>", "title": "<title>", "prompt": "<prompt>", '
-            '"carl": {"context": "strong|partial|missing", "action": "strong|partial|missing", "result": "strong|partial|missing", "learning": "strong|partial|missing"}, '
+            '"carl": {signal_schema}, '
             '"strength": "<1-2 sentences on what worked well in this answer>", '
             '"coaching_tip": "<1-2 encouraging sentences on the highest-leverage improvement>", '
-            '"carl_reframe": "<a concise 2-3 sentence example showing how to rephrase their weakest part into crisp CARL format>"}], '
+            '"carl_reframe": "<{reframe_brief}>"}], '
             '"retry_drill": {"question_id": "<id of highest-leverage question to retry>", '
-            '"focus": "<short label e.g. Quantify Result & Add Learning (45s)>", '
+            '"focus": "<short label e.g. {drill_focus_example}>", '
             '"prompt": "<specific encouraging 45-second retry prompt>"}}'
         ),
-        input_keys=(),
+        input_keys=("coach_focus", "primer_brief", "signal_schema", "reframe_brief", "drill_focus_example"),
         output_format="json",
     ),
     "practice_retry_eval": PromptSpec(
@@ -298,9 +433,9 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             '{"encouragement": "<1-2 upbeat sentences>", '
             '"what_improved": "<1-2 sentences comparing what actually got stronger vs their first attempt>", '
             '"one_more_polish": "<optional 1 short micro-tip to lock it in>", '
-            '"carl_after": {"context": "strong|partial|missing", "action": "strong|partial|missing", "result": "strong|partial|missing", "learning": "strong|partial|missing"}}'
+            '"carl_after": {signal_schema}}'
         ),
-        input_keys=(),
+        input_keys=("signal_schema",),
         output_format="json",
     ),
     "calibration_report": PromptSpec(
@@ -353,7 +488,7 @@ def list_prompts(tier: PromptTier | None = None) -> list[PromptSpec]:
     return [spec for spec in specs if spec.tier == tier]
 
 
-_BARE_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
+_BARE_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _DOUBLE_PLACEHOLDER_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
 
