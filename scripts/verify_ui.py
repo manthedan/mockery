@@ -848,6 +848,51 @@ async def run_uat(out_dir: Path | None) -> int:
                 str(role_test),
             )
 
+            # My questions: paste a list, find it in the picker, remove one
+            await cdp.eval("""document.querySelector('[data-home-mode="practice"]')?.click()""")
+            await asyncio.sleep(0.6)
+            await cdp.eval(
+                """(() => {
+                  const picker = document.getElementById('practiceQuestionPicker');
+                  picker.value = '__custom__';
+                  picker.dispatchEvent(new Event('change', { bubbles: true }));
+                  document.getElementById('practiceQuestionListDetails').open = true;
+                  document.getElementById('practiceQuestionListInput').value =
+                    '1. Tell me about a missed deadline.\\n2. Why this role?';
+                  document.getElementById('practiceSaveQuestionListBtn').click();
+                })()"""
+            )
+            await asyncio.sleep(1.0)
+            my_questions_probe = """(() => {
+              const picker = document.getElementById('practiceQuestionPicker');
+              const mine = [...picker.querySelectorAll('optgroup[label="My questions"] option')];
+              return {
+                titles: mine.map((o) => o.textContent),
+                pickedIsMine: mine.some((o) => o.value === picker.value),
+                removeShown: !!document.getElementById('practiceRemoveMyQuestionBtn')?.offsetParent,
+                boxShown: !!document.getElementById('practiceCustomQuestionInput')?.offsetParent,
+              };
+            })()"""
+            my_saved = await cdp.eval(my_questions_probe)
+            record(
+                "pasted_list_lands_in_my_questions",
+                my_saved["titles"] == ["Tell me about a missed deadline.", "Why this role?"]
+                and my_saved["pickedIsMine"]
+                and my_saved["removeShown"]
+                and not my_saved["boxShown"],
+                str(my_saved),
+            )
+            await cdp.eval("document.getElementById('practiceRemoveMyQuestionBtn')?.click()")
+            await asyncio.sleep(0.8)
+            my_removed = await cdp.eval(my_questions_probe)
+            record(
+                "my_question_can_be_removed",
+                my_removed["titles"] == ["Why this role?"] and not my_removed["pickedIsMine"] and not my_removed["removeShown"],
+                str(my_removed),
+            )
+            await cdp.eval("""document.querySelector('[data-home-mode="copilot"]')?.click()""")
+            await asyncio.sleep(0.3)
+
             # Profile redaction live toggle
             await cdp.eval("document.getElementById('profileBtn')?.click()")
             await asyncio.sleep(0.35)

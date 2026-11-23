@@ -4854,6 +4854,27 @@ kbd {
   display: none;
 }
 
+.my-question-row {
+  margin-top: 6px;
+}
+
+.my-question-tools {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.my-question-list > summary {
+  width: fit-content;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.my-question-list .btn {
+  margin-top: 8px;
+}
+
 .home-cta {
   display: flex;
   align-items: center;

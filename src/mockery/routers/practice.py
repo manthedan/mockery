@@ -285,6 +285,9 @@ def build_practice_router(runtime: Any) -> APIRouter:
                 jd_text=jd_text or None,
             )
 
+        # The candidate's saved questions are asked only when picked, and then exactly as written.
+        bank_candidates = [q for q in bank_candidates if not q.get("mine")]
+
         custom_question, removed_details = runtime.redactor.strip_contact_details(body.custom_question.strip())
         selected_qid = body.selected_question_id.strip() if body.selected_question_id else None
         if custom_question:
@@ -292,7 +295,14 @@ def build_practice_router(runtime: Any) -> APIRouter:
         if selected_qid:
             picked = runtime.banks.get_question(selected_qid)
             if picked is not None and str(picked.get("category") or "").strip().lower() == body.interview_type:
-                bank_candidates = [picked] + [q for q in bank_candidates if q.get("id") != picked.get("id")]
+                if picked.get("mine"):
+                    # A saved question of the candidate's own is asked as written, like one typed in.
+                    custom_question, removed_details = runtime.redactor.strip_contact_details(
+                        str(picked.get("prompt") or "").strip()
+                    )
+                    selected_qid = None
+                else:
+                    bank_candidates = [picked] + [q for q in bank_candidates if q.get("id") != picked.get("id")]
             else:
                 # A pick made under another format (or since removed) does not carry over; the format decides.
                 selected_qid = None

@@ -22,6 +22,7 @@ import httpx
 from dotenv import dotenv_values
 from openai import AsyncOpenAI
 
+from .banks import title_from_prompt
 from .levels import normalize_level
 from .models import (
     DEFAULT_PARAKEET_MODEL,
@@ -3105,13 +3106,12 @@ class InterviewCopilotLLM:
         pinned_item: dict[str, Any] | None = None
         custom_text = custom_question.strip()
         if custom_text:
-            first_line = custom_text.splitlines()[0].strip()
             pinned_item = {
                 **_bank_to_item({}),
                 "bank_question_id": None,
                 "source": "custom",
                 "category": interview_type,
-                "title": first_line if len(first_line) <= 64 else first_line[:63].rstrip() + "…",
+                "title": title_from_prompt(custom_text),
                 "competency": "Your question",
                 "prompt": custom_text,
             }
