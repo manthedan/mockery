@@ -870,8 +870,27 @@ async def run_uat(out_dir: Path | None) -> int:
                   navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
                 })()"""
             )
+            dock_probe = """(() => {
+              const box = document.getElementById('practiceAnswerInput');
+              return {
+                voiceFirst: !!document.getElementById('practiceComposerWrap')?.classList.contains('is-voice-first'),
+                boxShown: !!(box && box.offsetParent),
+              };
+            })()"""
+            dock_before = await cdp.eval(dock_probe)
+            record(
+                "hands_free_dock_is_mic_only",
+                dock_before["voiceFirst"] and not dock_before["boxShown"],
+                str(dock_before),
+            )
             await cdp.eval("document.getElementById('practiceMicBtn')?.click()")
             await asyncio.sleep(0.5)
+            dock_denied = await cdp.eval(dock_probe)
+            record(
+                "mic_denied_brings_back_typing_box",
+                dock_denied["boxShown"] and not dock_denied["voiceFirst"],
+                str(dock_denied),
+            )
             mic_inv = await cdp.check_invariants("mic_denied")
             mic_state = await cdp.eval(
                 """(() => {

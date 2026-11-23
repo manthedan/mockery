@@ -4621,7 +4621,7 @@ function initEvents() {
 
     if (state.practiceActive) {
       if (
-        (ev.key === "m" || ev.key === "M") &&
+        (ev.key === "m" || ev.key === "M" || ev.code === "Space") &&
         !ev.repeat &&
         !ev.metaKey &&
         !ev.ctrlKey &&
