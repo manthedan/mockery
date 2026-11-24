@@ -206,6 +206,12 @@ class PracticeSession(BaseModel):
                 lines.append("")
                 lines.extend(_fenced_block(diag[:6000], "text"))
                 lines.append("")
+            design_notes = str(self.workspace_context.get("design_notes") or "").strip()
+            if design_notes:
+                lines.append("## System Design Notes (API / Schema / Math)")
+                lines.append("")
+                lines.extend(_fenced_block(design_notes[:8000], "text"))
+                lines.append("")
             code = str(self.workspace_context.get("code") or "").strip()
             if code:
                 lang = re.sub(r"[^A-Za-z0-9_+-]", "", str(self.workspace_context.get("language") or "text")) or "text"

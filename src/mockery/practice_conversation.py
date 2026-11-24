@@ -79,6 +79,9 @@ def build_workspace_snapshot(workspace_context: dict[str, Any] | None) -> dict[s
     diagram = str(workspace_context.get("diagram_summary") or "").strip()
     if diagram:
         out["diagram_summary"] = diagram[:2500]
+    design_notes = str(workspace_context.get("design_notes") or "").strip()
+    if design_notes:
+        out["design_notes"] = design_notes[:3000]
     code = str(workspace_context.get("code") or "").strip()
     if code:
         out["language"] = str(workspace_context.get("language") or "code").strip()[:40] or "code"
@@ -97,6 +100,12 @@ def _format_workspace_delta(prev: dict[str, str], curr: dict[str, str]) -> str:
             parts.append(f"LIVE SYSTEM DESIGN DIAGRAM STATE:\n{curr['diagram_summary']}")
         elif prev.get("diagram_summary"):
             parts.append("LIVE SYSTEM DESIGN DIAGRAM STATE:\n(cleared)")
+
+    if curr.get("design_notes") != prev.get("design_notes"):
+        if curr.get("design_notes"):
+            parts.append(f"LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n{curr['design_notes']}")
+        elif prev.get("design_notes"):
+            parts.append("LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n(cleared)")
 
     if curr.get("code") != prev.get("code") or curr.get("language") != prev.get("language"):
         if curr.get("code"):
@@ -127,6 +136,21 @@ def build_practice_session_system_prompt(session: PracticeSession) -> str:
     )
 
 
+SYSTEM_DESIGN_INTERVIEWER_RULES = (
+    "SYSTEM DESIGN INTERVIEWER PROTOCOL:\n"
+    "- Clarifying questions first: when the candidate asks scoping questions (traffic/QPS, latency SLOs, "
+    "consistency vs. availability, payload sizes, multi-region, tenancy), answer directly with realistic, "
+    "concrete assumptions and keep should_advance=false.\n"
+    "- Natural 45-minute pacing: progress through (1) Requirements & scale assumptions, (2) API & data model, "
+    "(3) Baseline end-to-end architecture, (4) 2-3 deep dives into concrete bottlenecks and failure modes, "
+    "and (5) Tradeoff defense before advancing or wrapping up.\n"
+    "- Concrete pushback over generic praise: once the baseline architecture is in place, stress-test ONE "
+    "specific weak spot per turn grounded in their whiteboard diagram or API/schema/math notes (e.g., hot "
+    "keys, cache stampede, backpressure/OOM, dual-write inconsistency, split-brain, node or region failure, "
+    "or a 10x traffic spike). Stay collaborative and warm, and never hand them the solution."
+)
+
+
 def _format_question_plan(session: PracticeSession) -> str:
     """Format the full immutable question plan once on Turn 1 so Q advances never alter prefix."""
     lines = ["SESSION INTERVIEW PLAN (fixed for the full interview):"]
@@ -140,8 +164,13 @@ def _format_question_plan(session: PracticeSession) -> str:
             lines.append(f"  {session.config.rubric.focus_label}: {focus}")
         if q.level_bar:
             lines.append(f"  Depth expected at {session.config.target_level} level: {q.level_bar}")
+        if q.deep_dives:
+            lines.append(f"  Deep-dive bottlenecks & failure modes to probe: {q.deep_dives}")
         if q.follow_ups:
             lines.append(f"  Suggested follow-up angles: {q.follow_ups}")
+    if session.config.interview_type == "system_design":
+        lines.append("")
+        lines.append(SYSTEM_DESIGN_INTERVIEWER_RULES)
     return "\n".join(lines)
 
 
@@ -155,6 +184,7 @@ def _format_turn_directive(
     ws_delta: str,
     candidate_answer: str,
     debrief_name: str,
+    interview_type: str = "",
 ) -> str:
     q_id = current_question.get("id") or "current"
     q_title = current_question.get("title") or ""
@@ -164,14 +194,20 @@ def _format_turn_directive(
         if next_question
         else f"This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their {debrief_name}."
     )
+    pacing_note = (
+        f"(system design: keep should_advance=false while clarifying requirements, sketching the baseline "
+        f"architecture, or exploring deep dives; advance only after requirements, baseline design, and "
+        f"2-3 concrete bottlenecks/failure modes are covered OR after {max_followups} turns)."
+        if interview_type == "system_design"
+        else f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
+    )
     sections: list[str] = []
     if intervening_notes:
         sections.append("SESSION EVENTS SINCE LAST TURN:\n" + "\n".join(intervening_notes))
     sections.append(
         f"ACTIVE QUESTION: [{q_id}] {q_title}\n"
         f"Prompt: {current_question.get('prompt')}\n"
-        f"Follow-ups already asked on this question: {follow_up_count} "
-        f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal).\n"
+        f"Follow-ups already asked on this question: {follow_up_count} {pacing_note}\n"
         f"{next_note}"
     )
     if ws_delta:
@@ -236,6 +272,7 @@ def build_practice_turn_messages(
             ws_delta=ws_delta,
             candidate_answer=candidate_answer,
             debrief_name=session.config.rubric.debrief_name,
+            interview_type=session.config.interview_type,
         )
         if total_chars + len(user_content) <= MAX_PRACTICE_CONVERSATION_CHARS:
             messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
@@ -258,6 +295,7 @@ def build_practice_turn_messages(
         ws_delta=ws_delta,
         candidate_answer=candidate_answer,
         debrief_name=session.config.rubric.debrief_name,
+        interview_type=session.config.interview_type,
     )
     fixed_overhead = len(system_prompt) + len(plan_block) + len(base_directive) + 64
     history_budget = max(0, _SEED_HISTORY_TARGET_CHARS - fixed_overhead)
@@ -271,6 +309,7 @@ def build_practice_turn_messages(
         ws_delta=ws_delta,
         candidate_answer=candidate_answer,
         debrief_name=session.config.rubric.debrief_name,
+        interview_type=session.config.interview_type,
     )
     user_content = f"{plan_block}\n\n{directive}"
     messages = [
