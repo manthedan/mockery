@@ -2,9 +2,11 @@
 # Mockery one-line installer for Apple Silicon macOS
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/manthedan/mockery/main/install.sh | sh
+# Installs the latest tagged release. Set MOCKERY_VERSION=v0.2.5 (or any tag/branch) to choose another.
 set -euo pipefail
 
 REPO_URL="${MOCKERY_REPO_URL:-https://github.com/manthedan/mockery.git}"
+RELEASES_API="${MOCKERY_RELEASES_API:-https://api.github.com/repos/manthedan/mockery/releases/latest}"
 APP_DEST="/Applications/Mockery.app"
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
@@ -41,12 +43,22 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
+MOCKERY_REF=""
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
   info "Installing Mockery from local checkout ($SCRIPT_DIR)..."
   uv tool install --force --python 3.12 "$SCRIPT_DIR"
 else
-  info "Installing Mockery from $REPO_URL..."
-  uv tool install --force --python 3.12 "git+${REPO_URL}"
+  MOCKERY_REF="${MOCKERY_VERSION:-}"
+  if [ -z "$MOCKERY_REF" ]; then
+    MOCKERY_REF="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$RELEASES_API" 2>/dev/null \
+      | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 || true)"
+  fi
+  if [ -z "$MOCKERY_REF" ]; then
+    warn "Could not look up the latest Mockery release. Re-run with MOCKERY_VERSION=<tag>, e.g. MOCKERY_VERSION=v0.2.5."
+    exit 1
+  fi
+  info "Installing Mockery $MOCKERY_REF from $REPO_URL..."
+  uv tool install --force --python 3.12 "git+${REPO_URL}@${MOCKERY_REF}"
 fi
 
 # 4. Install double-clickable /Applications/Mockery.app
@@ -67,7 +79,7 @@ else
   trap 'rm -rf "$TMP_BUILD"' EXIT
   # Only run git clone when real git is present (avoid triggering macOS Xcode CLT stub popup)
   if command -v git >/dev/null 2>&1 && ( [ -x /opt/homebrew/bin/git ] || [ -x /usr/local/bin/git ] || xcode-select -p >/dev/null 2>&1 ); then
-    if git clone --depth 1 "$REPO_URL" "$TMP_BUILD/mockery" >/dev/null 2>&1; then
+    if git clone --depth 1 --branch "$MOCKERY_REF" "$REPO_URL" "$TMP_BUILD/mockery" >/dev/null 2>&1; then
       UV_PY="$(uv python find 3.12 2>/dev/null || true)"
       if [ -n "$UV_PY" ]; then
         if "$UV_PY" "$TMP_BUILD/mockery/scripts/build_macos_app.py" --install; then
