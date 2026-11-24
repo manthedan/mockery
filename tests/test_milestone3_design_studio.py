@@ -651,7 +651,77 @@ def test_offline_system_design_answers_clarifications_and_runs_past_three_probes
     reply_txt = clarify.json()["reply"]["interviewer_reply"]
     assert "50k" in reply_txt and "200ms" in reply_txt
 
-    # Turns 2-5: continues well past the old 3-probe cutoff
+    # Additional clarifications (consistency + retention) match stems cleanly, answer the asked dimension,
+    # and do NOT consume unasked architecture/failure-mode probes
+    clarify_cons = client.post(
+        f"/api/practice/{sid}/turn",
+        json={"text": "Strong or eventual consistency?", "expected_question_id": q0["id"]},
+    )
+    assert clarify_cons.status_code == 200
+    assert clarify_cons.json()["reply"]["should_advance"] is False
+    assert "consistency" in clarify_cons.json()["reply"]["interviewer_reply"].lower()
+
+    clarify_ret = client.post(
+        f"/api/practice/{sid}/turn",
+        json={"text": "What retention period should we support?", "expected_question_id": q0["id"]},
+    )
+    assert clarify_ret.status_code == 200
+    assert clarify_ret.json()["reply"]["should_advance"] is False
+    assert "90-day" in clarify_ret.json()["reply"]["interviewer_reply"].lower()
+
+    # Even on a custom question with zero bank probes, 3 clarifications followed by the first architecture
+    # answer MUST NOT prematurely advance (still asks baseline + spike + failover probes)
+    custom_start = client.post(
+        "/api/practice/start",
+        json={
+            "role_title": "Senior Backend Engineer",
+            "company": "Acme",
+            "interview_type": "system_design",
+            "question_source": "bank_only",
+            "target_level": "L5",
+            "custom_question": "Design a multi-tenant audit log service.",
+        },
+    )
+    assert custom_start.status_code == 200
+    csid = custom_start.json()["session"]["id"]
+    cq0 = custom_start.json()["session"]["questions"][0]
+    for qtxt in ("Peak QPS?", "Strong or eventual consistency?", "What retention period?"):
+        r = client.post(f"/api/practice/{csid}/turn", json={"text": qtxt, "expected_question_id": cq0["id"]})
+        assert r.status_code == 200 and r.json()["reply"]["should_advance"] is False
+    first_arch = client.post(
+        f"/api/practice/{csid}/turn",
+        json={"text": "Client hits Gateway -> Audit Ingest API -> Kafka -> Object Store.", "expected_question_id": cq0["id"]},
+    )
+    assert first_arch.status_code == 200
+    assert first_arch.json()["reply"]["should_advance"] is False
+
+    # Oversized custom deep_dives stay bounded in offline fallback replies too (never emit 130k chars)
+    import asyncio
+
+    huge_reply = asyncio.run(
+        runtime.llm.generate_practice_interviewer_reply(
+            role_title="Staff Engineer",
+            company="Acme",
+            interview_type="system_design",
+            target_level="L6",
+            coach_style="supportive",
+            current_question={"id": "pq_big", "prompt": "Design X", "deep_dives": ["hot-shard " * 13_000]},
+            next_question=None,
+            recent_turns=[
+                {
+                    "role": "interviewer",
+                    "question_id": "pq_big",
+                    "text": "Let's lock down the core APIs, data model, and baseline end-to-end architecture on the whiteboard first — how does a single request flow from client to storage?",
+                }
+            ],
+            candidate_answer="Client hits gateway and DB.",
+            follow_up_count=1,
+            existing_carl={},
+        )
+    )
+    assert len(huge_reply["interviewer_reply"]) < 500
+
+    # Turns 2-5 on bundled question: continues well past the old 3-probe cutoff
     for i in range(4):
         step = client.post(
             f"/api/practice/{sid}/turn",
@@ -859,12 +929,13 @@ def test_oversized_custom_bank_deep_dives_stay_within_conversation_budget(tmp_pa
 
 
 def test_eval_harness_supports_system_design_rast_and_held_out_clarification_case():
-    """P2 regression #6: eval harness uses RAST schema, 12-turn SD budget, design_notes, and scores RAST outputs."""
+    """P2 regression #6: eval harness uses RAST/ACOE/General schemas, 12-turn SD budget, design_notes, and scores them."""
     from evals.metrics import (
         build_user_prompt_for_example,
         load_jsonl_dataset,
         render_system_prompt_for_example,
         score_practice_interviewer_reply,
+        score_practice_retry_eval,
     )
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -883,4 +954,45 @@ def test_eval_harness_supports_system_design_rast_and_held_out_clarification_cas
 
     score, info = score_practice_interviewer_reply(ex["reference_response"], ex)
     assert score >= 0.95, f"Expected RAST clarification reference response to score high, got {score}: {info}"
+
+    # General-round eval renders Direct/Specific/Fit/Concise rubric (matching live General sessions)
+    gen_ex = rows["pi_12_val_general_technical_probe"]
+    gen_sys = render_system_prompt_for_example("practice_interviewer", gen_ex)
+    assert '"direct": "strong|partial|missing"' in gen_sys
+    gen_score, gen_info = score_practice_interviewer_reply(gen_ex["reference_response"], gen_ex)
+    assert gen_score >= 0.9, f"General reference response should remain valid: {gen_info}"
+
+    # Coding retry eval accepts ACOE keys requested by its own system prompt
+    coding_retry_ex = {
+        "id": "pr_coding_acoe",
+        "interview_type": "coding",
+        "role_title": "Senior Engineer",
+        "target_level": "L5",
+        "drill_focus": "Explain complexity and edge cases",
+        "drill_prompt": "State Big-O and edge cases in 45s.",
+        "original_answer": "I used a map.",
+        "retry_answer": "O(1) average lookup with Map, O(n) worst-case sweep, tested capacity zero and exact expiry.",
+        "expected": {
+            "expected_carl_after": {"context": "strong", "action": "strong", "result": "strong", "learning": "strong"},
+            "must_not_inflate": [],
+            "must_reference_any": ["O(1)", "capacity", "edge"],
+        },
+    }
+    retry_sys = render_system_prompt_for_example("practice_retry_eval", coding_retry_ex)
+    assert '"approach": "strong|partial|missing"' in retry_sys
+    retry_out = json.dumps(
+        {
+            "encouragement": "Great improvement on complexity and boundaries!",
+            "what_improved": "You stated O(1) lookup and verified capacity zero edge cases.",
+            "one_more_polish": "Keep leading with the invariant.",
+            "carl_after": {
+                "approach": "strong",
+                "correctness": "strong",
+                "complexity": "strong",
+                "edge_cases": "strong",
+            },
+        }
+    )
+    r_score, r_info = score_practice_retry_eval(retry_out, coding_retry_ex)
+    assert r_score >= 0.95, f"Expected coding retry ACOE response to score high, got {r_score}: {r_info}"
 
