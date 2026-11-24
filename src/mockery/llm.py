@@ -56,7 +56,7 @@ from .prompts import (
     render_prompt,
     triage_diarize_rules,
 )
-from .rubrics import CARL, SIGNAL_LEVELS, SIGNAL_SLOTS, Rubric, rubric_for
+from .rubrics import CARL, SIGNAL_LEVELS, SIGNAL_SLOTS, Rubric, framework_for, rubric_for
 
 if TYPE_CHECKING:
     from .practice import PracticeSession
@@ -3313,23 +3313,31 @@ class InterviewCopilotLLM:
         if session is not None:
             rubric = session.config.rubric
         elif rubric is None:
-            rubric = rubric_for(interview_type, "carl")
+            rubric = rubric_for(interview_type, framework_for(interview_type, "carl"))
         heuristic_carl = estimate_carl_heuristic(candidate_answer, existing_carl, rubric)
         follow_ups = list(current_question.get("follow_ups") or [])
         deep_dives = list(current_question.get("deep_dives") or [])
         core_requirements = list(current_question.get("core_requirements") or [])
         max_followups = practice_max_followups(interview_type)
+
+        def _clip_probe(raw_text: Any, max_len: int = 240) -> str:
+            cleaned = " ".join(str(raw_text or "").split()).strip()
+            if len(cleaned) <= max_len:
+                return cleaned
+            return cleaned[: max(1, max_len - 1)].rstrip() + "…"
+
         if interview_type == "system_design":
-            phase_probes = [
+            bounded_fups = [_clip_probe(f) for f in follow_ups[:8] if _clip_probe(f)]
+            bounded_sd_dives = [_clip_probe(d) for d in deep_dives[:8] if _clip_probe(d)]
+            fallback_probes = [
                 "Let's lock down the core APIs, data model, and baseline end-to-end architecture on the whiteboard first — how does a single request flow from client to storage?",
-                *follow_ups,
-                *[f"Let's dive deeper into {d} — how would you handle that in your design?" for d in deep_dives],
+                *bounded_fups,
+                *[f"Let's dive deeper into {d} — how would you handle that in your design?" for d in bounded_sd_dives],
                 "What breaks first under a 10x traffic spike or hot-key skew, and how would you mitigate it?",
                 "Walk me through a node or region failure — what fails, what degrades gracefully, and what tradeoff are you accepting?",
             ]
-            fallback_probes = phase_probes
         else:
-            fallback_probes = follow_ups
+            fallback_probes = [_clip_probe(f) for f in follow_ups[:8] if _clip_probe(f)]
 
         # In a conversation round, filler is not an answer: it is neither thanked nor built on.
         is_studio = interview_type in ("system_design", "coding")
@@ -3339,31 +3347,71 @@ class InterviewCopilotLLM:
             is_studio or any(heuristic_carl.get(slot) != "missing" for slot in SIGNAL_SLOTS)
         )
         sd_clarifying_re = re.compile(
-            r"\b(?:qps|rps|tps|dau|mau|latency|p99|p95|sla|slo|scale|traffic|region|consisten|availab|"
-            r"storage|payload|size|read|write|rate|limit|users|budget|scope|clarif|assum|tenant|retention|throughput)\b",
+            r"\b(?:qps|rps|tps|dau|mau|latency|p99|p95|sla|slo|scale|traffic|region\w*|consisten\w*|availab\w*|"
+            r"storage|payload\w*|size\w*|read\w*|write\w*|rate|limit\w*|users?|budget\w*|scope|clarif\w*|assum\w*|"
+            r"tenant\w*|retent\w*|ttl|expir\w*|throughput|durab\w*|strong|eventual)\b",
             re.IGNORECASE,
         )
+        ans_text = candidate_answer or ""
         is_sd_clarification = (
             interview_type == "system_design"
-            and "?" in (candidate_answer or "")
-            and bool(sd_clarifying_re.search(candidate_answer or ""))
+            and "?" in ans_text
+            and bool(sd_clarifying_re.search(ans_text))
         )
+
+        prior_interviewer_text = "\n".join(
+            str(t.get("text") or "")
+            for t in recent_turns
+            if t.get("role") == "interviewer"
+            and (
+                not current_question.get("id")
+                or not t.get("question_id")
+                or t.get("question_id") == current_question.get("id")
+            )
+        )
+
+        def _build_sd_clarification_reply() -> str:
+            low = ans_text.lower()
+            clauses: list[str] = []
+            if re.search(r"\b(?:qps|rps|tps|dau|mau|traffic|scale|throughput|read\w*|write\w*|users?|latency|p99|p95|sla|slo)\b", low):
+                clauses.append("assume 50k peak RPS with p99 latency under 200ms")
+            if re.search(r"\b(?:consisten\w*|availab\w*|strong|eventual|region\w*|durab\w*)\b", low):
+                clauses.append("favor high availability and eventual consistency on reads, with strong consistency only where writes require invariants across multi-region deployments")
+            if re.search(r"\b(?:retent\w*|storage|ttl|expir\w*|payload\w*|size\w*|budget\w*)\b", low):
+                clauses.append("assume 90-day hot retention (1-year cold archive) and ~4 KB average payload size")
+            if re.search(r"\b(?:tenant\w*|rate|limit\w*)\b", low):
+                clauses.append("assume multi-tenant traffic where a top tenant can drive 20-30% of peak load and needs per-tenant isolation")
+            if not clauses:
+                clauses.append(
+                    "assume 50k peak RPS, p99 latency under 200ms, 90-day hot retention, and eventual consistency unless a write path needs strict invariants"
+                )
+            req_hint = f" Focus first on: {_clip_probe(core_requirements[0], 200)}." if core_requirements else ""
+            joined = "; ".join(clauses)
+            return (
+                f"Good scoping question — {joined}.{req_hint} "
+                "With those assumptions locked in, what core API and baseline architecture would you sketch next?"
+            )
+
+        def _next_unasked_probe() -> str | None:
+            if interview_type == "system_design":
+                for probe in fallback_probes:
+                    if probe[:48] not in prior_interviewer_text:
+                        return probe
+                return None
+            if follow_up_count < len(fallback_probes):
+                return fallback_probes[follow_up_count]
+            return None
 
         def _fallback() -> dict[str, Any]:
             if is_sd_clarification and follow_up_count < max_followups:
-                req_hint = f" Focus first on: {core_requirements[0]}." if core_requirements else ""
-                reply = (
-                    "Good scoping question — assume 50k peak RPS, p99 latency under 200ms, multi-region reads, "
-                    f"and eventual consistency unless a write path strictly needs linearizability.{req_hint} "
-                    "With those assumptions locked in, what core API and baseline architecture would you sketch first?"
-                )
+                reply = _build_sd_clarification_reply()
                 advance = False
             elif no_answer and follow_up_count < max_followups:
                 reply = f"No rush — take a moment. I'll ask again: {current_question.get('prompt', '')}"
                 advance = False
-            elif not no_answer and follow_up_count < len(fallback_probes) and follow_up_count < max_followups:
+            elif not no_answer and follow_up_count < max_followups and (next_probe := _next_unasked_probe()) is not None:
                 lead = "Thanks for walking through that. " if has_substance else "Let's make that concrete. "
-                reply = f"{lead}{fallback_probes[follow_up_count]}"
+                reply = f"{lead}{next_probe}"
                 advance = False
             elif next_question is not None:
                 lead = (
@@ -3577,7 +3625,7 @@ class InterviewCopilotLLM:
         When the connected model fails, the built-in hint is returned and the reason is appended
         to ``fallback_reasons``."""
         if rubric is None:
-            rubric = rubric_for(interview_type, "carl")
+            rubric = rubric_for(interview_type, framework_for(interview_type, "carl"))
         fallback = rubric.offline_hint.format(
             focus=current_question.get("carl_focus") or "your own decisions & measurable impact"
         )
@@ -3674,7 +3722,7 @@ class InterviewCopilotLLM:
           - One targeted 45-second Retry Weak Part drill
         """
         if rubric is None:
-            rubric = rubric_for(interview_type, "carl")
+            rubric = rubric_for(interview_type, framework_for(interview_type, "carl"))
         # Build deterministic fallback debrief first (also guarantees schema safety)
         q_reviews_fb: list[dict[str, Any]] = []
         weakest_q: dict[str, Any] | None = None

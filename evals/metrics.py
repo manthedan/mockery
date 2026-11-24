@@ -20,7 +20,7 @@ from mockery.prompts import (
     triage_diarize_rules,
     validate_prompt_template,
 )
-from mockery.rubrics import rubric_for
+from mockery.rubrics import Rubric, framework_for, rubric_for
 
 TARGET_TO_PROMPT_NAME: dict[str, str] = {
     "triage_window": "triage_window",
@@ -216,6 +216,25 @@ def validate_candidate_prompt(target: str, candidate_text: str) -> tuple[bool, l
     return (len(errors) == 0), errors
 
 
+def _rubric_for_example(example: dict[str, Any]) -> Rubric:
+    interview_type = str(example.get("interview_type") or "behavioral")
+    requested = str(example.get("answer_framework") or "carl")
+    return rubric_for(interview_type, framework_for(interview_type, requested))
+
+
+def _normalize_eval_signals(raw_map: Any, rubric: Rubric) -> dict[str, str]:
+    if not isinstance(raw_map, dict):
+        return {}
+    out_map: dict[str, str] = {}
+    for sig in rubric.signals:
+        v = raw_map.get(sig.key)
+        if v is None and rubric.legacy_slot_fallback:
+            v = raw_map.get(sig.slot)
+        if isinstance(v, str) and v.strip().lower() in CARL_RANK:
+            out_map[sig.slot] = v.strip().lower()
+    return out_map
+
+
 def render_system_prompt_for_example(
     target: str,
     example: dict[str, Any],
@@ -232,7 +251,7 @@ def render_system_prompt_for_example(
     if target == "practice_interviewer":
         interview_type = str(example.get("interview_type") or "behavioral")
         coach_style = str(example.get("coach_style") or "supportive")
-        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
+        rubric = _rubric_for_example(example)
         return render_prompt(
             "practice_interviewer_reply",
             override_text=override_text,
@@ -250,24 +269,21 @@ def render_system_prompt_for_example(
             probe_guidance=probe_guidance_for(interview_type),
         )
     if target == "practice_retry_eval":
-        interview_type = str(example.get("interview_type") or "behavioral")
-        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
+        rubric = _rubric_for_example(example)
         return render_prompt(
             "practice_retry_eval",
             override_text=override_text,
             signal_schema=practice_signal_schema(rubric.signal_keys, coached=rubric.coached),
         )
     if target == "practice_hint":
-        interview_type = str(example.get("interview_type") or "behavioral")
-        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
+        rubric = _rubric_for_example(example)
         return render_prompt(
             "practice_hint",
             override_text=override_text,
             behavioral_nudge=practice_hint_behavioral_nudge(rubric.grader, coached=rubric.coached),
         )
     if target == "practice_debrief":
-        interview_type = str(example.get("interview_type") or "behavioral")
-        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
+        rubric = _rubric_for_example(example)
         return render_prompt(
             "practice_debrief",
             override_text=override_text,
@@ -290,7 +306,7 @@ def build_triage_user_prompt(example: dict[str, Any]) -> str:
 def build_practice_interviewer_user_prompt(example: dict[str, Any]) -> str:
     """Matches the exact user prompt built by InterviewCopilotLLM.generate_practice_interviewer_reply."""
     interview_type = str(example.get("interview_type") or "behavioral")
-    rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
+    rubric = _rubric_for_example(example)
     max_followups = practice_max_followups(interview_type)
     current_question = example.get("current_question") or {}
     next_question = example.get("next_question")
@@ -888,17 +904,8 @@ def score_practice_interviewer_reply(
     nudge_msg = raw_nudge_msg.strip() if nudge_msg_is_str else ""
 
     # 1. Strict schema conformance (no silent coercion of non-strings)
-    rubric = rubric_for(
-        str(example.get("interview_type") or "behavioral"),
-        str(example.get("answer_framework") or "carl"),
-    )
-    normalized_carl: dict[str, str] = {}
-    for sig in rubric.signals:
-        v = raw_carl.get(sig.key)
-        if v is None and rubric.legacy_slot_fallback:
-            v = raw_carl.get(sig.slot)
-        if isinstance(v, str) and v.strip().lower() in CARL_RANK:
-            normalized_carl[sig.slot] = v.strip().lower()
+    rubric = _rubric_for_example(example)
+    normalized_carl = _normalize_eval_signals(raw_carl, rubric)
     carl_valid_dims = len(normalized_carl)
     schema_checks = [
         reply_is_str and bool(reply),
@@ -1290,9 +1297,9 @@ def score_practice_retry_eval(
     imp = raw_imp.strip() if isinstance(raw_imp, str) else ""
     pol = raw_pol.strip() if isinstance(raw_pol, str) else ""
 
-    carl_valid = sum(
-        1 for d in CARL_DIMS if isinstance(raw_ca.get(d), str) and raw_ca[d].strip().lower() in CARL_RANK
-    )
+    rubric = _rubric_for_example(example)
+    normalized_ca = _normalize_eval_signals(raw_ca, rubric)
+    carl_valid = len(normalized_ca)
     schema_checks = [
         isinstance(raw_enc, str) and bool(enc),
         isinstance(raw_imp, str) and bool(imp),
@@ -1315,7 +1322,7 @@ def score_practice_retry_eval(
     acc_pts: list[float] = []
     inflated: list[str] = []
     for dim in CARL_DIMS:
-        pv = raw_ca.get(dim).strip().lower() if isinstance(raw_ca.get(dim), str) else ""
+        pv = normalized_ca.get(dim, "")
         ev = str(exp_ca.get(dim, "missing")).strip().lower()
         if pv not in CARL_RANK:
             acc_pts.append(0.0)
@@ -1531,22 +1538,7 @@ def score_practice_debrief(
         failures.append(f"Missing or mangled `question_id`(s) in `question_reviews`: {missing_qids}")
         suggestions.append("Copy every answered `question_id` verbatim into `question_reviews` (never rename to Q1/Q2).")
 
-    rubric = rubric_for(
-        str(example.get("interview_type") or "behavioral"),
-        str(example.get("answer_framework") or "carl"),
-    )
-
-    def _norm_debrief_carl(raw_map: Any) -> dict[str, str]:
-        if not isinstance(raw_map, dict):
-            return {}
-        out_map: dict[str, str] = {}
-        for sig in rubric.signals:
-            v = raw_map.get(sig.key)
-            if v is None and rubric.legacy_slot_fallback:
-                v = raw_map.get(sig.slot)
-            if isinstance(v, str) and v.strip().lower() in CARL_RANK:
-                out_map[sig.slot] = v.strip().lower()
-        return out_map
+    rubric = _rubric_for_example(example)
 
     per_review_schema: list[float] = []
     for qid in exp_qids:
@@ -1554,7 +1546,7 @@ def score_practice_debrief(
         if rev is None:
             per_review_schema.append(0.0)
             continue
-        carl_norm = _norm_debrief_carl(rev.get("carl"))
+        carl_norm = _normalize_eval_signals(rev.get("carl"), rubric)
         carl_ok = len(carl_norm) == 4
         fields_ok = [
             isinstance(rev.get("title"), str) and bool(rev["title"].strip()),
@@ -1602,7 +1594,7 @@ def score_practice_debrief(
         if rev is None or not isinstance(rev.get("carl"), dict):
             carl_pts.extend([0.0] * len(CARL_DIMS))
             continue
-        raw_c = _norm_debrief_carl(rev["carl"])
+        raw_c = _normalize_eval_signals(rev["carl"], rubric)
         for dim in CARL_DIMS:
             pv = raw_c.get(dim, "")
             ev = str(exp_c.get(dim, "missing")).strip().lower()

@@ -271,6 +271,7 @@ GENERAL = Rubric(
     offline_hint="Answer in one sentence first, then give one concrete reason (focus on: {focus}).",
     focus_label="Answer Focus",
     debrief_name="Coaching Debrief",
+    legacy_slot_fallback=True,
 )
 
 SYSTEM_DESIGN = Rubric(
