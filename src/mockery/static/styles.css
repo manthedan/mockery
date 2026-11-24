@@ -6700,6 +6700,77 @@ label.addon-row {
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
+.sd-dives-spoiler {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sd-dives-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.sd-dives-summary::-webkit-details-marker {
+  display: none;
+}
+
+.sd-dives-summary::before {
+  content: "▸ ";
+  display: inline-block;
+  margin-right: 2px;
+}
+
+.sd-dives-spoiler[open] > .sd-dives-summary::before {
+  content: "▾ ";
+}
+
+.sd-notes-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg);
+  padding: 10px 12px;
+  border-radius: 11px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.sd-notes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sd-notes-meta {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--ink-3);
+}
+
+.sd-notes-textarea {
+  width: 100%;
+  min-height: 92px;
+  max-height: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.sd-notes-textarea:focus {
+  outline: none;
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
 .sd-req-item {
   display: flex;
   align-items: flex-start;
@@ -8101,6 +8172,7 @@ label.addon-row {
    tabs; the canvas flexes to fill the pane and the hint line rests on the bottom edge. */
 
 .practice-studio-slot > .sd-studio > .sd-toolbar,
+.practice-studio-slot > .sd-studio > .sd-notes-panel,
 .practice-studio-slot > .sd-studio > .sd-inspector {
   flex-shrink: 0;
 }

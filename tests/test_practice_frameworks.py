@@ -59,12 +59,53 @@ def test_every_rubric_fills_the_four_slots_in_order(rubric) -> None:
         assert rubric.signal(slot).nudge
 
 
-@pytest.mark.parametrize("rubric", [CARL, STAR, GENERAL])
+@pytest.mark.parametrize("rubric", [CARL, STAR, GENERAL, SYSTEM_DESIGN, CODING])
 def test_the_grader_is_told_what_each_signal_means(rubric) -> None:
     args = practice_reply_rubric_args(rubric.grader, rubric.signal_keys)
     for signal in rubric.signals:
         assert f'"{signal.key}": "strong|partial|missing"' in args["signal_schema"]
         assert f"{signal.label} = " in args["signal_definitions"]
+
+
+@pytest.mark.parametrize("rubric", [SYSTEM_DESIGN, CODING])
+def test_system_design_and_coding_rubrics_avoid_carl_bleedthrough(rubric) -> None:
+    assert "CARL" not in rubric.focus_label
+    assert "CARL" not in rubric.debrief_name
+
+    reply_prompt = render_prompt(
+        "practice_interviewer_reply",
+        interview_type_label=rubric.id.replace("_", " "),
+        role_title="Senior Engineer",
+        target_level="Senior",
+        tone_instruction=practice_tone_instruction("supportive"),
+        **practice_reply_rubric_args(rubric.grader, rubric.signal_keys),
+    )
+    debrief_prompt = render_prompt(
+        "practice_debrief",
+        **practice_debrief_rubric_args(rubric.grader, rubric.signal_keys),
+    )
+    assert "teaching the CARL framework" not in debrief_prompt
+    assert "CARL format" not in debrief_prompt
+    assert "Learning = " not in reply_prompt
+    for signal in rubric.signals:
+        assert f'"{signal.key}": "strong|partial|missing"' in reply_prompt
+        assert f'"{signal.key}": "strong|partial|missing"' in debrief_prompt
+        assert f"{signal.label} = " in reply_prompt
+
+    graded = rubric.signals_from_grader(
+        {
+            rubric.signals[0].key: "strong",
+            rubric.signals[1].key: "partial",
+            rubric.signals[2].key: "strong",
+            rubric.signals[3].key: "missing",
+        }
+    )
+    assert graded == {
+        "context": "strong",
+        "action": "partial",
+        "result": "strong",
+        "learning": "missing",
+    }
 
 
 def test_the_format_decides_which_frameworks_apply() -> None:

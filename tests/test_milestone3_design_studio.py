@@ -44,6 +44,8 @@ def test_system_design_playbook_workspace_roundtrip_and_markdown(tmp_path: Path,
     assert start_res.status_code == 200
     sess = start_res.json()["session"]
     sid = sess["id"]
+    # Blank canvas default: no pre-populated diagram_graph on Turn 0
+    assert not sess["workspace_context"].get("diagram_graph")
     assert len(sess["questions"]) == 1
     q0 = sess["questions"][0]
     assert q0["bank_question_id"] == "sd_ai_stream_01"
@@ -75,24 +77,31 @@ def test_system_design_playbook_workspace_roundtrip_and_markdown(tmp_path: Path,
         "- Edge Gateway -> Redis Streams (Resume offset)"
     )
 
+    notes = (
+        "API: POST /v1/chats/{id}/messages -> SSE stream\n"
+        "Schema: messages(chat_id, msg_id, parent_id, content) PK(chat_id, msg_id)\n"
+        "Math: 50k concurrent streams * 20 tok/s = 1M tok/s fan-out"
+    )
     ws_res = client.post(
         f"/api/practice/{sid}/workspace",
         json={
             "workspace_context": {
                 "diagram_graph": graph,
                 "diagram_summary": summary,
+                "design_notes": notes,
                 "checked_requirements": [q0["core_requirements"][0]],
             }
         },
     )
     assert ws_res.status_code == 200
 
-    # 3. Reopen saved session and confirm graph & checked requirements persist verbatim
+    # 3. Reopen saved session and confirm graph, design notes & checked requirements persist verbatim
     loaded = client.get(f"/api/practice/sessions/{sid}")
     assert loaded.status_code == 200
     loaded_ws = loaded.json()["session"]["workspace_context"]
     assert len(loaded_ws["diagram_graph"]["nodes"]) == 3
     assert len(loaded_ws["diagram_graph"]["edges"]) == 2
+    assert loaded_ws["design_notes"] == notes
     assert loaded_ws["checked_requirements"] == [q0["core_requirements"][0]]
 
     # 4. Ask AI to review diagram via /turn -> diagram_summary flows into LLM
@@ -106,13 +115,15 @@ def test_system_design_playbook_workspace_roundtrip_and_markdown(tmp_path: Path,
     assert turn_res.status_code == 200
     assert seen_diagrams and "Redis Streams" in seen_diagrams[-1]
 
-    # 5. Debrief + Markdown export includes whiteboard summary
+    # 5. Debrief + Markdown export includes whiteboard summary & design notes
     debrief_res = client.post(f"/api/practice/{sid}/debrief")
     assert debrief_res.status_code == 200
     md_res = client.get(f"/api/practice/{sid}/markdown")
     assert md_res.status_code == 200
     assert "## System Design Whiteboard Summary" in md_res.text
     assert "Edge Gateway -> Redis Streams (Resume offset)" in md_res.text
+    assert "## System Design Notes (API / Schema / Math)" in md_res.text
+    assert "POST /v1/chats/{id}/messages" in md_res.text
 
     # 6. Verify system_design_studio add-on flag toggles cleanly
     off_res = client.post("/api/addons/modules", json={"modules": {"system_design_studio": False}})
@@ -127,9 +138,16 @@ import {
   normalizeDiagramGraph,
   serializeDiagramSummary,
   createStarterGraph,
+  deriveDesignAllowedActions,
   routeEdge,
   placeEdgeLabel,
 } from './src/mockery/static/design_studio.js';
+
+// 0. Notes-only design rounds still permit Ask AI Review with an empty canvas
+const emptyNoNotes = deriveDesignAllowedActions({ interaction: { mode: 'idle' }, nodeCount: 0, hasNotes: false });
+const emptyWithNotes = deriveDesignAllowedActions({ interaction: { mode: 'idle' }, nodeCount: 0, hasNotes: true });
+if (emptyNoNotes.includes('ask_ai_review')) throw new Error('Empty canvas without notes should not allow review');
+if (!emptyWithNotes.includes('ask_ai_review')) throw new Error('Notes-only workspace should allow review');
 
 // 1. Starter graph adapts to streaming AI question
 const g1 = createStarterGraph({ title: 'Streaming AI Assistant', prompt: 'Design Claude.ai' });
@@ -319,15 +337,186 @@ def test_workspace_validation_markdown_fence_and_playbook_coercion(tmp_path: Pat
     )
     assert bad_type_res.status_code == 400
 
-    # Dynamic Markdown fences prevent breakout when diagram_summary or code contains ```
+    # Invalid design_notes types or oversized payloads rejected cleanly with 400
+    bad_notes_type = client.post(
+        f"/api/practice/{sid}/workspace",
+        json={"workspace_context": {"design_notes": {"not": "a string"}}},
+    )
+    assert bad_notes_type.status_code == 400
+
+    bad_notes_len = client.post(
+        f"/api/practice/{sid}/workspace",
+        json={"workspace_context": {"design_notes": "x" * 16_001}},
+    )
+    assert bad_notes_len.status_code == 400
+
+    # Dynamic Markdown fences prevent breakout when diagram_summary or design_notes contain ```
     tricky_summary = "Components:\n```\n<script>alert(1)</script>\n```\nData Flows:\n- A -> B"
+    tricky_notes = "API:\n```\nPOST /v1/items\n```"
     ok_res = client.post(
         f"/api/practice/{sid}/workspace",
-        json={"workspace_context": {"diagram_summary": tricky_summary}},
+        json={"workspace_context": {"diagram_summary": tricky_summary, "design_notes": tricky_notes}},
     )
     assert ok_res.status_code == 200
     md_res = client.get(f"/api/practice/{sid}/markdown")
     assert md_res.status_code == 200
     assert "````text\n" in md_res.text
     assert tricky_summary in md_res.text
+    assert tricky_notes in md_res.text
+
+
+def test_system_design_turn_budget_deep_dives_protocol_and_notes_deltas(tmp_path: Path):
+    import asyncio
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    runtime = app.state.runtime
+    runtime.llm_config.provider = "openai"
+    runtime.llm_config.api_key = "test-key"
+
+    captured_messages: list[list[dict[str, str]]] = []
+
+    async def _fake_complete_messages(messages, **_kwargs):
+        captured_messages.append(list(messages))
+        return json.dumps(
+            {
+                "interviewer_reply": "Assume 50k peak RPS and p99 under 200ms. How will you partition writes?",
+                "should_advance": False,
+                "carl_signals": {
+                    "requirements": "strong",
+                    "architecture": "partial",
+                    "scale": "partial",
+                    "tradeoffs": "missing",
+                },
+                "coach_nudge": {
+                    "tone": "tip",
+                    "message": "Good clarifying question on scale — now sketch the write path and partition key.",
+                },
+            }
+        )
+
+    runtime.llm._complete_messages = _fake_complete_messages  # type: ignore[method-assign]
+    client = TestClient(app)
+
+    start_res = client.post(
+        "/api/practice/start",
+        json={
+            "role_title": "Senior Backend Engineer",
+            "company": "Acme",
+            "interview_type": "system_design",
+            "question_source": "bank_only",
+            "target_level": "L5",
+            "selected_question_id": "sd_ai_stream_01",
+        },
+    )
+    assert start_res.status_code == 200
+    sess_data = start_res.json()["session"]
+    sid = sess_data["id"]
+    q0 = sess_data["questions"][0]
+
+    # Turn 1 with design_notes: verify system prompt uses RAST (no CARL bleed-through),
+    # Turn-1 plan includes deep_dives + SYSTEM_DESIGN_INTERVIEWER_RULES, and notes delta is sent.
+    turn1 = client.post(
+        f"/api/practice/{sid}/turn",
+        json={
+            "text": "Before I draw, what peak concurrent streams and p99 latency SLO should I design for?",
+            "expected_question_id": q0["id"],
+            "workspace_context": {
+                "design_notes": "QPS target: TBD\nAPI: POST /v1/messages",
+            },
+        },
+    )
+    assert turn1.status_code == 200
+    assert turn1.json()["reply"]["should_advance"] is False
+    assert turn1.json()["session"]["questions"][0]["carl_signals"] == {
+        "context": "strong",
+        "action": "partial",
+        "result": "partial",
+        "learning": "missing",
+    }
+
+    sys_msg = captured_messages[-1][0]["content"]
+    user_msg = captured_messages[-1][1]["content"]
+    assert '"requirements": "strong|partial|missing"' in sys_msg
+    assert "Requirements = " in sys_msg
+    assert "Learning = " not in sys_msg
+    assert "Deep-dive bottlenecks & failure modes to probe:" in user_msg
+    assert q0["deep_dives"][0] in user_msg
+    assert "SYSTEM DESIGN INTERVIEWER PROTOCOL:" in user_msg
+    assert "LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):" in user_msg
+    assert "POST /v1/messages" in user_msg
+    assert "after 12 turns" in user_msg
+
+    # Verify system_design does NOT force-advance at follow_up_count == 3 (old hard cap)
+    session_obj = runtime.practice_store.get(sid)
+    assert session_obj is not None
+    session_obj.questions[0].follow_up_count = 5
+    runtime.practice_store.save(session_obj)
+
+    turn_mid = client.post(
+        f"/api/practice/{sid}/turn",
+        json={
+            "text": "I'll shard the stream buffer by conversation_id to avoid cross-node fan-out.",
+            "expected_question_id": q0["id"],
+            "workspace_context": {"design_notes": ""},
+        },
+    )
+    assert turn_mid.status_code == 200
+    assert turn_mid.json()["reply"]["should_advance"] is False
+    assert turn_mid.json()["session"]["phase"] == "active"
+    # Clearing design_notes emits an explicit delta
+    assert "LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n(cleared)" in captured_messages[-1][-1]["content"]
+
+    # Verify hints and debrief receive design_notes too
+    seen_hint_user: list[str] = []
+    seen_debrief_user: list[str] = []
+
+    async def _fake_complete_text(*, user: str, operation: str = "", **_kwargs) -> str:
+        if operation == "practice_hint":
+            seen_hint_user.append(user)
+            return "Think about what happens when a client reconnects mid-stream."
+        if operation == "practice_debrief":
+            seen_debrief_user.append(user)
+            return json.dumps(
+                {
+                    "overall_encouragement": "Solid design reasoning.",
+                    "top_strengths": ["Clear streaming architecture."],
+                    "carl_primer": "Requirements -> Architecture -> Scale -> Tradeoffs.",
+                    "question_reviews": [
+                        {
+                            "question_id": q0["id"],
+                            "title": q0["title"],
+                            "prompt": q0["prompt"],
+                            "carl": {
+                                "requirements": "strong",
+                                "architecture": "strong",
+                                "scale": "partial",
+                                "tradeoffs": "partial",
+                            },
+                            "strength": "Good scoping.",
+                            "coaching_tip": "Quantify buffer retention.",
+                            "carl_reframe": "Name the exact tradeoff on buffer TTL.",
+                        }
+                    ],
+                    "retry_drill": {
+                        "question_id": q0["id"],
+                        "focus": "Defend One Bottleneck & Tradeoff (45s)",
+                        "prompt": "Defend your reconnect buffer tradeoff in 45 seconds.",
+                    },
+                }
+            )
+        return "{}"
+
+    runtime.llm._complete_text = _fake_complete_text  # type: ignore[method-assign]
+    hint_res = client.post(
+        f"/api/practice/{sid}/hint",
+        json={"workspace_context": {"design_notes": "Buffer TTL = 5 min per stream"}},
+    )
+    assert hint_res.status_code == 200
+    assert seen_hint_user and "Buffer TTL = 5 min per stream" in seen_hint_user[-1]
+
+    debrief_res = client.post(f"/api/practice/{sid}/debrief", json={})
+    assert debrief_res.status_code == 200
+    assert seen_debrief_user and "FINAL DESIGN NOTES (API / SCHEMA / MATH):" in seen_debrief_user[-1]
+    assert "Buffer TTL = 5 min per stream" in seen_debrief_user[-1]
+    assert asyncio.iscoroutinefunction(runtime.llm.generate_practice_interviewer_reply)
 

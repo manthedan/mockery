@@ -38,7 +38,7 @@ class Rubric:
     meter_title: str
     summary: str
     signals: tuple[Signal, Signal, Signal, Signal]
-    grader: Literal["carl", "star", "general"]
+    grader: Literal["carl", "star", "general", "system_design", "coding"]
     """Which grading vocabulary in ``prompts.py`` describes these signals to the model."""
     nudge_order: tuple[str, ...]
     """Slots checked, in turn, for the live coach tip."""
@@ -277,12 +277,12 @@ SYSTEM_DESIGN = Rubric(
         "Scale (bottlenecks & numbers) → Tradeoffs (what you chose and why)."
     ),
     signals=(
-        Signal("context", "context", "R", "Requirements"),
-        Signal("action", "action", "A", "Architecture"),
-        Signal("result", "result", "S", "Scale"),
-        Signal("learning", "learning", "T", "Tradeoffs"),
+        Signal("context", "requirements", "R", "Requirements"),
+        Signal("action", "architecture", "A", "Architecture"),
+        Signal("result", "scale", "S", "Scale"),
+        Signal("learning", "tradeoffs", "T", "Tradeoffs"),
     ),
-    grader="carl",
+    grader="system_design",
     nudge_order=(),
     drill_order=("result", "learning", "action", "context"),
     all_landed="Requirements, architecture, scale and tradeoffs all came through clearly.",
@@ -293,8 +293,8 @@ SYSTEM_DESIGN = Rubric(
     reframe_tip="Try closing with: 'The main tradeoff I accepted was [X] in exchange for [Y], because [constraint].'",
     primer="Requirements → Architecture → Scale → Tradeoffs: scope it, sketch it, stress it, then defend your choices.",
     default_focus="Clear requirements, a sound architecture, scaling limits, and the tradeoffs you chose.",
-    focus_label="CARL / Rubric Focus",
-    debrief_name="CARL Coaching Debrief",
+    focus_label="Design Focus",
+    debrief_name="System Design Coaching Debrief",
 )
 
 CODING = Rubric(
@@ -306,12 +306,12 @@ CODING = Rubric(
         "Complexity (time & space) → Edge cases (tested boundaries)."
     ),
     signals=(
-        Signal("context", "context", "A", "Approach"),
-        Signal("action", "action", "C", "Correctness"),
-        Signal("result", "result", "O", "Complexity"),
-        Signal("learning", "learning", "E", "Edge cases"),
+        Signal("context", "approach", "A", "Approach"),
+        Signal("action", "correctness", "C", "Correctness"),
+        Signal("result", "complexity", "O", "Complexity"),
+        Signal("learning", "edge_cases", "E", "Edge cases"),
     ),
-    grader="carl",
+    grader="coding",
     nudge_order=(),
     drill_order=("result", "learning", "action", "context"),
     all_landed="Approach, correctness, complexity and edge cases all came through clearly.",
@@ -320,8 +320,8 @@ CODING = Rubric(
     reframe_tip="Try closing with: 'This runs in [time] and [space], and the edge case I checked was [X].'",
     primer="Approach → Correctness → Complexity → Edge cases: plan it, make it work, size it, then try to break it.",
     default_focus="A clear approach, a working solution, its complexity, and the edge cases you tested.",
-    focus_label="CARL / Rubric Focus",
-    debrief_name="CARL Coaching Debrief",
+    focus_label="Coding Focus",
+    debrief_name="Coding Coaching Debrief",
 )
 
 NO_STRUCTURE = Rubric(

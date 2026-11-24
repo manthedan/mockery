@@ -38,6 +38,7 @@ from .models import (
     fmt_ms,
 )
 from .practice_conversation import (
+    SYSTEM_DESIGN_INTERVIEWER_RULES,
     build_practice_turn_messages,
     messages_prefix_digest,
     render_flat_messages,
@@ -3312,7 +3313,13 @@ class InterviewCopilotLLM:
             rubric = session.config.rubric
         heuristic_carl = estimate_carl_heuristic(candidate_answer, existing_carl, rubric)
         follow_ups = list(current_question.get("follow_ups") or [])
-        max_followups = 3 if interview_type in ("system_design", "coding") else 2
+        deep_dives = list(current_question.get("deep_dives") or [])
+        max_followups = 12 if interview_type == "system_design" else 3 if interview_type == "coding" else 2
+        fallback_probes = (
+            [*follow_ups, *[f"Let's dive deeper into {d} — how would you handle that in your design?" for d in deep_dives]]
+            if interview_type == "system_design"
+            else follow_ups
+        )
 
         # In a conversation round, filler is not an answer: it is neither thanked nor built on.
         is_studio = interview_type in ("system_design", "coding")
@@ -3326,9 +3333,9 @@ class InterviewCopilotLLM:
             if no_answer and follow_up_count < max_followups:
                 reply = f"No rush — take a moment. I'll ask again: {current_question.get('prompt', '')}"
                 advance = False
-            elif not no_answer and follow_up_count < len(follow_ups) and follow_up_count < max_followups:
+            elif not no_answer and follow_up_count < len(fallback_probes) and follow_up_count < max_followups:
                 lead = "Thanks for walking through that. " if has_substance else "Let's make that concrete. "
-                reply = f"{lead}{follow_ups[follow_up_count]}"
+                reply = f"{lead}{fallback_probes[follow_up_count]}"
                 advance = False
             elif next_question is not None:
                 lead = (
@@ -3398,6 +3405,11 @@ class InterviewCopilotLLM:
                 if workspace_context:
                     if workspace_context.get("diagram_summary"):
                         ws_block += f"\nLIVE SYSTEM DESIGN DIAGRAM STATE:\n{str(workspace_context['diagram_summary'])[:2500]}\n"
+                    if workspace_context.get("design_notes"):
+                        ws_block += (
+                            "\nLIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n"
+                            f"{str(workspace_context['design_notes'])[:3000]}\n"
+                        )
                     if workspace_context.get("code"):
                         ws_block += (
                             f"\nLIVE CODING WORKSPACE ({workspace_context.get('language', 'code')}):\n"
@@ -3421,16 +3433,34 @@ class InterviewCopilotLLM:
                     tone_instruction=tone_instruction,
                     **practice_reply_rubric_args(rubric.grader, rubric.signal_keys, coached=rubric.coached),
                 )
+                sd_deep_dives_line = (
+                    f"Deep-dive bottlenecks & failure modes to probe: {deep_dives}\n"
+                    if deep_dives
+                    else ""
+                )
+                sd_protocol_block = (
+                    f"{SYSTEM_DESIGN_INTERVIEWER_RULES}\n"
+                    if interview_type == "system_design"
+                    else ""
+                )
+                pacing_guidance = (
+                    f"(system design: keep should_advance=false while clarifying requirements, sketching the baseline "
+                    f"architecture, or exploring deep dives; advance only after requirements, baseline design, and "
+                    f"2-3 concrete bottlenecks/failure modes are covered OR after {max_followups} turns)."
+                    if interview_type == "system_design"
+                    else f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
+                )
                 stable_prefix = (
                     f"Current Question: {current_question.get('prompt')}\n"
                     f"{rubric.focus_label}: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
+                    f"{sd_deep_dives_line}"
                     f"Suggested follow-up angles: {follow_ups}\n"
+                    f"{sd_protocol_block}"
                     f"{next_q_block}\n\n"
                     f"Recent conversation:\n" + ("\n".join(history_lines) if history_lines else "(Opening turn)")
                 )
                 mutable_suffix = (
-                    f"\n\nFollow-ups already asked on this question: {follow_up_count} "
-                    f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
+                    f"\n\nFollow-ups already asked on this question: {follow_up_count} {pacing_guidance}"
                     f"{ws_block}\n\n"
                     f"Candidate's latest answer:\n{candidate_answer}"
                 )
@@ -3557,6 +3587,8 @@ class InterviewCopilotLLM:
         if workspace_context:
             if workspace_context.get("diagram_summary"):
                 ws_note += f"\nCurrent diagram:\n{str(workspace_context['diagram_summary'])[:1500]}"
+            if workspace_context.get("design_notes"):
+                ws_note += f"\nCurrent design notes (API / schema / math):\n{str(workspace_context['design_notes'])[:1500]}"
             if workspace_context.get("code"):
                 ws_note += f"\nCurrent code:\n{str(workspace_context['code'])[:1500]}"
 
@@ -3711,6 +3743,8 @@ class InterviewCopilotLLM:
         if workspace_context:
             if workspace_context.get("diagram_summary"):
                 ws_block += f"\nFINAL DIAGRAM:\n{str(workspace_context['diagram_summary'])[:2000]}\n"
+            if workspace_context.get("design_notes"):
+                ws_block += f"\nFINAL DESIGN NOTES (API / SCHEMA / MATH):\n{str(workspace_context['design_notes'])[:2500]}\n"
             if workspace_context.get("code"):
                 ws_block += f"\nFINAL CODE:\n{str(workspace_context['code'])[:2500]}\n"
             if workspace_context.get("test_output"):

@@ -18,6 +18,7 @@ const MAX_EDGES = 100;
 const MAX_HISTORY = 40;
 const MAX_SUMMARY_COMP_CHARS = 3400;
 const MAX_SUMMARY_FLOW_CHARS = 2400;
+const MAX_DESIGN_NOTES_CHARS = 8000;
 
 export const NODE_TYPES = [
   { type: "client", label: "Client", badge: "CLI", defaultTitle: "Web / Mobile Client", defaultNote: "Browser / App" },
@@ -682,6 +683,7 @@ export function deriveDesignAllowedActions({
   edgeCount = 0,
   historyLen = 0,
   futureLen = 0,
+  hasNotes = false,
 }) {
   const mode = interaction?.mode || "idle";
   if (mode === "dragging") {
@@ -702,7 +704,7 @@ export function deriveDesignAllowedActions({
   if (futureLen > 0) actions.push("redo");
   actions.push("load_starter_template", "export_png");
   if (nodeCount > 0 || edgeCount > 0) actions.push("clear_canvas");
-  if (nodeCount > 0) actions.push("ask_ai_review");
+  if (nodeCount > 0 || hasNotes) actions.push("ask_ai_review");
   return actions;
 }
 
@@ -719,9 +721,14 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
     const gridId = `${uid}_grid`;
 
     const existingGraph = session?.workspace_context?.diagram_graph;
+    const initialDesignNotes = safeSliceChars(
+      safeStr(session?.workspace_context?.design_notes, ""),
+      MAX_DESIGN_NOTES_CHARS
+    );
     const state = {
       session,
       graph: normalizeDiagramGraph(existingGraph),
+      designNotes: initialDesignNotes,
       checkedReqs: new Set(
         Array.isArray(session?.workspace_context?.checked_requirements)
           ? session.workspace_context.checked_requirements
@@ -733,6 +740,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
       history: [],
       future: [],
       playbookOpen: false,
+      notesOpen: Boolean(initialDesignNotes.trim()),
       placeCursor: 0,
       destroyed: false,
     };
@@ -818,8 +826,9 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
               <span class="sd-count-pill" data-sd-count>0 components · 0 flows</span>
             </div>
             <div class="sd-header-actions">
+              <button type="button" class="sd-chip-btn" data-sd-notes-toggle aria-expanded="false">Notes · API &amp; Math</button>
               <button type="button" class="sd-chip-btn" data-sd-playbook-toggle>Requirements</button>
-              <button type="button" class="btn btn-ink btn-xs sd-review-btn" data-sd-review title="Send this diagram to your interviewer for feedback">
+              <button type="button" class="btn btn-ink btn-xs sd-review-btn" data-sd-review title="Send your diagram and design notes to your interviewer for feedback">
                 <svg class="sd-review-glyph" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 1.6l1.5 4.1 4.1 1.5-4.1 1.5L8 12.8 6.5 8.7 2.4 7.2l4.1-1.5z" fill="currentColor"/></svg>
                 <span>Ask AI to review</span>
               </button>
@@ -827,6 +836,22 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
           </div>
 
           <div class="sd-playbook hidden" data-sd-playbook></div>
+
+          <div class="sd-notes-panel hidden" data-sd-notes-panel>
+            <div class="sd-notes-head">
+              <span class="practice-kicker">API · Schema · Capacity Math</span>
+              <span class="sd-notes-meta" data-sd-notes-meta>Shared live with your interviewer</span>
+            </div>
+            <textarea
+              class="sd-notes-textarea"
+              data-sd-notes
+              rows="5"
+              maxlength="${MAX_DESIGN_NOTES_CHARS}"
+              spellcheck="false"
+              aria-label="System design notes for APIs, schemas, and capacity math"
+              placeholder="APIs: POST /v1/...&#10;Schema: tables, partition keys, indexes&#10;Math: peak QPS, p99 budget, storage/day"
+            ></textarea>
+          </div>
 
           <div class="sd-toolbar">
             <div class="sd-mode-group" role="group" aria-label="Whiteboard tool">
@@ -884,9 +909,9 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
               <g data-sd-nodes></g>
             </svg>
             <div class="sd-empty-hint hidden" data-sd-empty>
-              <span class="sd-empty-title">Sketch your architecture</span>
-              <span class="sd-empty-sub">Add a component from the toolbar, or</span>
-              <button type="button" class="chip-action" data-sd-template>start from a template</button>
+              <span class="sd-empty-title">Start from a blank whiteboard</span>
+              <span class="sd-empty-sub">Clarify requirements first, add components above, or</span>
+              <button type="button" class="chip-action" data-sd-template>load a starter template</button>
             </div>
           </div>
 
@@ -945,15 +970,43 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
           ${
             dives.length
               ? `<div class="sd-playbook-col">
-                  <div class="practice-kicker">Deep dives to expect</div>
-                  <ul class="sd-dive-list">
-                    ${dives.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
-                  </ul>
+                  <details class="sd-dives-spoiler">
+                    <summary class="practice-kicker sd-dives-summary">Expected deep dives (spoilers)</summary>
+                    <ul class="sd-dive-list">
+                      ${dives.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}
+                    </ul>
+                  </details>
                 </div>`
               : ""
           }
         </div>
       `;
+    }
+
+    function renderNotes() {
+      const panel = q("[data-sd-notes-panel]");
+      const toggleBtn = q("[data-sd-notes-toggle]");
+      const metaEl = q("[data-sd-notes-meta]");
+      const ta = q("[data-sd-notes]");
+      const trimmedLen = state.designNotes.trim().length;
+      if (toggleBtn) {
+        toggleBtn.textContent = trimmedLen > 0 ? "Notes · API & Math •" : "Notes · API & Math";
+        toggleBtn.classList.toggle("is-open", !!state.notesOpen);
+        toggleBtn.classList.toggle("is-complete", trimmedLen > 0);
+        toggleBtn.setAttribute("aria-expanded", state.notesOpen ? "true" : "false");
+      }
+      if (panel) {
+        panel.classList.toggle("hidden", !state.notesOpen);
+      }
+      if (ta && document.activeElement !== ta && ta.value !== state.designNotes) {
+        ta.value = state.designNotes;
+      }
+      if (metaEl) {
+        metaEl.textContent =
+          trimmedLen > 0
+            ? `${state.designNotes.length.toLocaleString()} / ${MAX_DESIGN_NOTES_CHARS.toLocaleString()} chars · synced live`
+            : "Shared live with your interviewer";
+      }
     }
 
     function renderCanvas() {
@@ -1146,6 +1199,7 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
 
     function renderAll(opts = {}) {
       renderPlaybook();
+      renderNotes();
       renderCanvas();
       renderInspector(opts);
     }
@@ -1417,6 +1471,15 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
         return;
       }
 
+      if (ev.target.closest("[data-sd-notes-toggle]")) {
+        state.notesOpen = !state.notesOpen;
+        renderNotes();
+        if (state.notesOpen) {
+          q("[data-sd-notes]")?.focus();
+        }
+        return;
+      }
+
       if (ev.target.closest("[data-sd-playbook-toggle]")) {
         state.playbookOpen = !state.playbookOpen;
         renderPlaybook();
@@ -1444,13 +1507,21 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
         return;
       }
       if (ev.target.closest("[data-sd-review]")) {
-        if (state.graph.nodes.length === 0) {
-          showToast("Add a few components (or start from a template) before asking for a review.", 2600);
+        const hasNodes = state.graph.nodes.length > 0;
+        const hasNotes = state.designNotes.trim().length > 0;
+        if (!hasNodes && !hasNotes) {
+          showToast("Add a few components or jot down API/schema notes before asking for a review.", 2600);
           return;
         }
         notifyChanged();
+        const artifact =
+          hasNodes && hasNotes
+            ? "whiteboard diagram and API/schema/capacity notes"
+            : hasNodes
+            ? "whiteboard diagram"
+            : "API/schema/capacity design notes";
         onAskAiReview?.(
-          "Please review my current System Design whiteboard diagram — highlight what looks solid and probe one key bottleneck, trade-off, or missing failure mode."
+          `Please review my current System Design ${artifact} — highlight what looks solid and probe one key bottleneck, trade-off, or missing failure mode.`
         );
         return;
       }
@@ -1674,6 +1745,12 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
     }
 
     function onInput(ev) {
+      if (ev.target.matches("[data-sd-notes]")) {
+        state.designNotes = safeSliceChars(ev.target.value, MAX_DESIGN_NOTES_CHARS);
+        renderNotes();
+        notifyChanged();
+        return;
+      }
       if (state.interaction.mode !== "selected") return;
       if (ev.target.matches("[data-sd-edit-label]") && state.interaction.kind === "node") {
         const n = state.graph.nodes.find((x) => x.id === state.interaction.id);
@@ -1825,11 +1902,13 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
         return {
           diagram_graph: graph,
           diagram_summary: serializeDiagramSummary(graph),
+          design_notes: state.designNotes,
           checked_requirements: Array.from(state.checkedReqs).slice(0, 100),
         };
       },
       getStateSnapshot() {
         const inter = state.interaction;
+        const hasNotes = state.designNotes.trim().length > 0;
         return {
           studio: "system_design",
           mode: inter.mode,
@@ -1842,12 +1921,15 @@ export function createSystemDesignStudioPlugin({ escapeHtml, showToast, clientMa
           canUndo: inter.mode !== "dragging" && state.history.length > 0,
           canRedo: inter.mode !== "dragging" && state.future.length > 0,
           playbookOpen: state.playbookOpen,
+          notesOpen: state.notesOpen,
+          hasNotes,
           allowedActions: deriveDesignAllowedActions({
             interaction: inter,
             nodeCount: state.graph.nodes.length,
             edgeCount: state.graph.edges.length,
             historyLen: state.history.length,
             futureLen: state.future.length,
+            hasNotes,
           }),
         };
       },

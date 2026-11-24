@@ -45,7 +45,7 @@ def practice_tone_instruction(coach_style: str) -> str:
     return "Be realistic, fair, and constructive — probing cleanly while remaining respectful and encouraging."
 
 
-PracticeGrader = Literal["carl", "star", "general"]
+PracticeGrader = Literal["carl", "star", "general", "system_design", "coding"]
 CARL_SIGNAL_KEYS: tuple[str, ...] = ("context", "action", "result", "learning")
 
 _SIGNAL_DEFINITIONS: dict[str, str] = {
@@ -67,6 +67,18 @@ _SIGNAL_DEFINITIONS: dict[str, str] = {
         "Fit = the answer is tied to this role, team, or company rather than any job. "
         "Concise = focused, without rambling or repetition."
     ),
+    "system_design": (
+        "Requirements = functional scope, constraints, and target scale are established. "
+        "Architecture = end-to-end components, APIs/data model, and data flow are coherent. "
+        "Scale = concrete bottlenecks, failure modes, or rough capacity numbers are addressed. "
+        "Tradeoffs = explicit alternatives, downsides, and why the chosen design fits the constraints."
+    ),
+    "coding": (
+        "Approach = a clear plan, invariant, or algorithm is stated before or while coding. "
+        "Correctness = logic and implementation handle the problem accurately and pass tests. "
+        "Complexity = time and space complexity are accurately analyzed. "
+        "Edge cases = boundary conditions (empty, null, duplicates, limits) are checked or tested."
+    ),
 }
 _CARRY_FORWARD_NOTES: dict[str, str] = {
     "carl": (
@@ -75,11 +87,18 @@ _CARRY_FORWARD_NOTES: dict[str, str] = {
     ),
     "star": " When the situation was clearly stated in an earlier turn, keep situation at strong.",
     "general": "",
+    "system_design": (
+        " When requirements or constraints were established in an earlier turn or in the workspace notes, "
+        "keep requirements at strong."
+    ),
+    "coding": " When the approach was clearly stated in an earlier turn, keep approach at strong.",
 }
 _NUDGE_EXAMPLES: dict[str, str] = {
     "carl": "e.g., quantify the Result, add a Learning, mention complexity or tests",
     "star": "e.g., state the Task that was theirs, separate their own Actions from the team's, quantify the Result",
     "general": "e.g., answer the question in the first sentence, name one concrete reason, tie it to this role",
+    "system_design": "e.g., clarify one constraint, name a bottleneck or failure mode, defend one storage or protocol tradeoff",
+    "coding": "e.g., state time/space complexity, trace an edge case, verify invariants before coding",
 }
 _NO_FRAMEWORK_SIGNAL_DEFINITIONS = (
     'This session is not graded on structure: output every one of these values as "missing" and do not assess them.'
@@ -94,6 +113,14 @@ _COACH_FOCUS: dict[str, str] = {
         "helping the candidate give direct, specific answers that are clearly about this role "
         "(these are motivation and fit questions, not stories, so do not impose a story framework such as STAR or CARL)"
     ),
+    "system_design": (
+        "evaluating a System Design round on Requirements, Architecture, Scale, and Tradeoffs "
+        "(do not use behavioral story frameworks such as CARL or STAR)"
+    ),
+    "coding": (
+        "evaluating a Coding round on Approach, Correctness, Complexity, and Edge cases "
+        "(do not use behavioral story frameworks such as CARL or STAR)"
+    ),
 }
 _NO_FRAMEWORK_COACH_FOCUS = (
     "focused on the substance, clarity and specificity of each answer "
@@ -104,30 +131,40 @@ _PRIMER_BRIEFS: dict[str, str] = {
     "carl": "1 crisp sentence reminding how CARL elevates their target level",
     "star": "1 crisp sentence reminding how STAR elevates their target level",
     "general": "1 crisp sentence on what makes these answers land at their target level",
+    "system_design": "1 crisp sentence reminding how Requirements, Architecture, Scale, and Tradeoffs elevate their target level",
+    "coding": "1 crisp sentence reminding how Approach, Correctness, Complexity, and Edge cases elevate their target level",
 }
 _NO_FRAMEWORK_PRIMER_BRIEF = "1 crisp sentence on what will most raise their answers to their target level"
 _REFRAME_BRIEFS: dict[str, str] = {
     "carl": "a concise 2-3 sentence example showing how to rephrase their weakest part into crisp CARL format",
     "star": "a concise 2-3 sentence example showing how to rephrase their weakest part into crisp STAR format",
     "general": "a concise 2-3 sentence example of a more direct, specific version of their weakest answer",
+    "system_design": "a concise 2-3 sentence example showing how to state the weakest design decision, bottleneck, or tradeoff more sharply",
+    "coding": "a concise 2-3 sentence example showing how to explain the approach, complexity, or edge-case check more clearly",
 }
 _NO_FRAMEWORK_REFRAME_BRIEF = "a concise 2-3 sentence example of a stronger way to say their weakest part, in their own voice"
 _DRILL_FOCUS_EXAMPLES: dict[str, str] = {
     "carl": "Quantify Result & Add Learning (45s)",
     "star": "Name the Task & Quantify Result (45s)",
     "general": "Answer First & Tie It to the Role (45s)",
+    "system_design": "Defend One Bottleneck & Tradeoff (45s)",
+    "coding": "Explain Complexity & Edge Cases (45s)",
 }
 _NO_FRAMEWORK_DRILL_FOCUS_EXAMPLE = "Say It Plainly With One Concrete Detail (45s)"
 _BEHAVIORAL_HINT_NUDGES: dict[str, str] = {
     "carl": "nudge structure and ownership (the situation, their specific actions, the result, what they learned)",
     "star": "nudge structure and ownership (the situation, the task that was theirs, their specific actions, the result)",
     "general": "nudge them toward a direct answer with one concrete detail",
+    "system_design": "nudge them to clarify one constraint, trace a bottleneck, or weigh one concrete architectural tradeoff",
+    "coding": "nudge them toward stating an invariant, checking complexity, or testing a tricky edge case",
 }
 _NO_FRAMEWORK_BEHAVIORAL_HINT_NUDGE = "nudge them toward the most concrete, specific version of their own answer"
 _FOCUS_BRIEFS: dict[str, str] = {
     "carl": "what strong Context/Action/Result/Learning looks like here",
     "star": "what strong Situation/Task/Action/Result looks like here",
     "general": "what a direct, specific, role-relevant answer covers here",
+    "system_design": "what strong Requirements/Architecture/Scale/Tradeoffs look like here",
+    "coding": "what strong Approach/Correctness/Complexity/Edge cases look like here",
 }
 _NO_FRAMEWORK_FOCUS_BRIEF = "what a strong answer covers here, without naming an answer framework"
 
