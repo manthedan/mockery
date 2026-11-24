@@ -20,8 +20,108 @@ from .prompts import practice_reply_rubric_args, practice_tone_instruction, rend
 if TYPE_CHECKING:
     from .practice import PracticeSession
 
+PRACTICE_CONVERSATION_VERSION = 2
 MAX_PRACTICE_CONVERSATION_CHARS = 120_000
+MAX_DESIGN_NOTES_CHARS = 16_000
+MAX_DESIGN_NOTES_PROMPT_CHARS = 3_000
+MAX_QUESTION_PLAN_CHARS = 24_000
 _SEED_HISTORY_TARGET_CHARS = MAX_PRACTICE_CONVERSATION_CHARS // 2
+
+
+def practice_max_followups(interview_type: str) -> int:
+    """Maximum follow-up turns allowed on one question before advancing."""
+    if interview_type == "system_design":
+        return 12
+    if interview_type == "coding":
+        return 3
+    return 2
+
+
+def bounded_head_tail(text: str, max_chars: int) -> str:
+    """Keep opening context (35%) and latest trailing edits (65%) strictly within `max_chars`."""
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    marker = "\n[... middle omitted ...]\n"
+    if max_chars <= len(marker) + 4:
+        return text[:max_chars]
+    usable = max_chars - len(marker)
+    head_len = max(1, int(usable * 0.35))
+    tail_len = max(1, usable - head_len)
+    return text[:head_len].rstrip() + marker + text[-tail_len:].lstrip()
+
+
+def format_bounded_list(
+    items: list[Any],
+    *,
+    max_items: int = 8,
+    max_item_chars: int = 240,
+    max_total_chars: int = 1_600,
+) -> str:
+    """Render a compact, budget-safe list representation for prompts (safe for arbitrary custom banks)."""
+    cleaned: list[str] = []
+    used = 0
+    for raw in items[:max_items]:
+        item = " ".join(str(raw or "").split()).strip()
+        if not item:
+            continue
+        if len(item) > max_item_chars:
+            item = item[: max(1, max_item_chars - 1)].rstrip() + "…"
+        cost = len(item) + (3 if cleaned else 0)
+        if cleaned and used + cost > max_total_chars:
+            break
+        if not cleaned and len(item) > max_total_chars:
+            item = item[: max(1, max_total_chars - 1)].rstrip() + "…"
+        cleaned.append(item)
+        used += cost
+    if not cleaned:
+        return ""
+    omitted = max(0, len([x for x in items if str(x or "").strip()]) - len(cleaned))
+    rendered = "; ".join(cleaned)
+    if omitted > 0:
+        rendered += f" (+{omitted} more)"
+    return rendered
+
+
+def _format_notes_delta(prev_notes: str, curr_notes: str, max_chars: int = MAX_DESIGN_NOTES_PROMPT_CHARS) -> str:
+    """Return a bounded view of design notes that always includes the edited region when notes exceed `max_chars`."""
+    if len(curr_notes) <= max_chars:
+        return curr_notes
+    if not prev_notes:
+        return bounded_head_tail(curr_notes, max_chars)
+
+    # Locate the changed slice via common prefix and suffix so edits anywhere in a 16k pad are visible.
+    min_len = min(len(prev_notes), len(curr_notes))
+    prefix = 0
+    while prefix < min_len and prev_notes[prefix] == curr_notes[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < (min_len - prefix)
+        and prev_notes[len(prev_notes) - 1 - suffix] == curr_notes[len(curr_notes) - 1 - suffix]
+    ):
+        suffix += 1
+    edit_start = prefix
+    edit_end = len(curr_notes) - suffix
+
+    # Expand a window around the changed span within `max_chars`.
+    marker_head = "[... earlier notes omitted ...]\n"
+    marker_tail = "\n[... later notes omitted ...]"
+    budget = max_chars - len(marker_head) - len(marker_tail)
+    edit_len = max(0, edit_end - edit_start)
+    if edit_len >= budget:
+        span = bounded_head_tail(curr_notes[edit_start:edit_end], budget)
+        out = (marker_head if edit_start > 0 else "") + span + (marker_tail if edit_end < len(curr_notes) else "")
+        return out[:max_chars]
+
+    slack = budget - edit_len
+    win_start = max(0, edit_start - slack // 2)
+    win_end = min(len(curr_notes), win_start + budget)
+    win_start = max(0, win_end - budget)
+    body = curr_notes[win_start:win_end]
+    out = (marker_head if win_start > 0 else "") + body + (marker_tail if win_end < len(curr_notes) else "")
+    return out[:max_chars]
 
 
 def _build_intervening_notes_budgeted(
@@ -81,7 +181,7 @@ def build_workspace_snapshot(workspace_context: dict[str, Any] | None) -> dict[s
         out["diagram_summary"] = diagram[:2500]
     design_notes = str(workspace_context.get("design_notes") or "").strip()
     if design_notes:
-        out["design_notes"] = design_notes[:3000]
+        out["design_notes"] = design_notes[:MAX_DESIGN_NOTES_CHARS]
     code = str(workspace_context.get("code") or "").strip()
     if code:
         out["language"] = str(workspace_context.get("language") or "code").strip()[:40] or "code"
@@ -103,7 +203,8 @@ def _format_workspace_delta(prev: dict[str, str], curr: dict[str, str]) -> str:
 
     if curr.get("design_notes") != prev.get("design_notes"):
         if curr.get("design_notes"):
-            parts.append(f"LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n{curr['design_notes']}")
+            excerpt = _format_notes_delta(prev.get("design_notes", ""), curr["design_notes"])
+            parts.append(f"LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n{excerpt}")
         elif prev.get("design_notes"):
             parts.append("LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n(cleared)")
 
@@ -136,42 +237,29 @@ def build_practice_session_system_prompt(session: PracticeSession) -> str:
     )
 
 
-SYSTEM_DESIGN_INTERVIEWER_RULES = (
-    "SYSTEM DESIGN INTERVIEWER PROTOCOL:\n"
-    "- Clarifying questions first: when the candidate asks scoping questions (traffic/QPS, latency SLOs, "
-    "consistency vs. availability, payload sizes, multi-region, tenancy), answer directly with realistic, "
-    "concrete assumptions and keep should_advance=false.\n"
-    "- Natural 45-minute pacing: progress through (1) Requirements & scale assumptions, (2) API & data model, "
-    "(3) Baseline end-to-end architecture, (4) 2-3 deep dives into concrete bottlenecks and failure modes, "
-    "and (5) Tradeoff defense before advancing or wrapping up.\n"
-    "- Concrete pushback over generic praise: once the baseline architecture is in place, stress-test ONE "
-    "specific weak spot per turn grounded in their whiteboard diagram or API/schema/math notes (e.g., hot "
-    "keys, cache stampede, backpressure/OOM, dual-write inconsistency, split-brain, node or region failure, "
-    "or a 10x traffic spike). Stay collaborative and warm, and never hand them the solution."
-)
-
-
 def _format_question_plan(session: PracticeSession) -> str:
     """Format the full immutable question plan once on Turn 1 so Q advances never alter prefix."""
     lines = ["SESSION INTERVIEW PLAN (fixed for the full interview):"]
     if session.company:
-        lines.append(f"Company: {session.company}")
+        lines.append(f"Company: {session.company[:160]}")
     for idx, q in enumerate(session.questions, 1):
-        focus = q.carl_focus or ", ".join(q.core_requirements or [])
-        lines.append(f"Q{idx} [{q.id}] {q.title or q.competency or 'Question'}")
-        lines.append(f"  Prompt: {q.prompt}")
+        focus = (q.carl_focus or format_bounded_list(q.core_requirements, max_items=8, max_item_chars=200, max_total_chars=1_000)).strip()[:1_000]
+        title = (q.title or q.competency or "Question").strip()[:160]
+        prompt = str(q.prompt or "").strip()[:2_000]
+        lines.append(f"Q{idx} [{q.id}] {title}")
+        lines.append(f"  Prompt: {prompt}")
         if focus:
             lines.append(f"  {session.config.rubric.focus_label}: {focus}")
         if q.level_bar:
-            lines.append(f"  Depth expected at {session.config.target_level} level: {q.level_bar}")
-        if q.deep_dives:
-            lines.append(f"  Deep-dive bottlenecks & failure modes to probe: {q.deep_dives}")
-        if q.follow_ups:
-            lines.append(f"  Suggested follow-up angles: {q.follow_ups}")
-    if session.config.interview_type == "system_design":
-        lines.append("")
-        lines.append(SYSTEM_DESIGN_INTERVIEWER_RULES)
-    return "\n".join(lines)
+            lines.append(f"  Depth expected at {session.config.target_level} level: {str(q.level_bar).strip()[:600]}")
+        deep_dives_str = format_bounded_list(q.deep_dives, max_items=8, max_item_chars=240, max_total_chars=1_600)
+        if deep_dives_str:
+            lines.append(f"  Deep-dive bottlenecks & failure modes to probe: {deep_dives_str}")
+        follow_ups_str = format_bounded_list(q.follow_ups, max_items=8, max_item_chars=240, max_total_chars=1_600)
+        if follow_ups_str:
+            lines.append(f"  Suggested follow-up angles: {follow_ups_str}")
+    rendered = "\n".join(lines)
+    return rendered[:MAX_QUESTION_PLAN_CHARS]
 
 
 def _format_turn_directive(
@@ -250,13 +338,25 @@ def build_practice_turn_messages(
     """
     curr_ws = build_workspace_snapshot(workspace_context)
     conv = session.llm_conversation
+    expected_system = build_practice_session_system_prompt(session)
 
     total_chars = (
         len(conv.system) + sum(len(m.content) for m in conv.messages)
         if conv is not None
         else 0
     )
-    needs_seed = conv is None or not conv.system or total_chars > MAX_PRACTICE_CONVERSATION_CHARS
+    stale_studio_conv = (
+        conv is not None
+        and conv.version < PRACTICE_CONVERSATION_VERSION
+        and session.config.interview_type in ("system_design", "coding")
+    )
+    needs_seed = (
+        conv is None
+        or not conv.system
+        or stale_studio_conv
+        or conv.system != expected_system
+        or total_chars > MAX_PRACTICE_CONVERSATION_CHARS
+    )
 
     if not needs_seed:
         assert conv is not None
@@ -346,7 +446,7 @@ def commit_practice_conversation_turn(
         assistant_raw = _without_signal_grades(assistant_raw)
     if reset_conversation or session.llm_conversation is None:
         session.llm_conversation = PracticeConversation(
-            version=1,
+            version=PRACTICE_CONVERSATION_VERSION,
             system=system_prompt,
             messages=[
                 PracticeConversationMessage(role="user", content=user_content),

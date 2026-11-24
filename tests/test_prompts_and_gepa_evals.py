@@ -271,13 +271,15 @@ def test_llm_runtime_prompt_parity_all_12_prompts(tmp_path: Path, monkeypatch: p
         interview_type="system_design",
         rubric_block=calibration_rubric_for("system_design"),
     )
+    from mockery.rubrics import SYSTEM_DESIGN
+
     assert captured[9][0] == render_prompt(
         "practice_interviewer_reply",
         interview_type_label="system design",
         role_title="Senior Engineer",
         target_level="Senior (L5)",
         tone_instruction=practice_tone_instruction("supportive"),
-        **practice_reply_rubric_args(),
+        **practice_reply_rubric_args(SYSTEM_DESIGN.grader, SYSTEM_DESIGN.signal_keys),
     )
 
 

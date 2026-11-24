@@ -18,7 +18,7 @@ const MAX_EDGES = 100;
 const MAX_HISTORY = 40;
 const MAX_SUMMARY_COMP_CHARS = 3400;
 const MAX_SUMMARY_FLOW_CHARS = 2400;
-const MAX_DESIGN_NOTES_CHARS = 8000;
+const MAX_DESIGN_NOTES_CHARS = 16000;
 
 export const NODE_TYPES = [
   { type: "client", label: "Client", badge: "CLI", defaultTitle: "Web / Mobile Client", defaultNote: "Browser / App" },

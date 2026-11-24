@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .levels import DEFAULT_LEVEL, normalize_level
 from .models import DEFAULT_PRACTICE_ROLE_TITLE, short_id
-from .practice_conversation import PracticeConversation
+from .practice_conversation import MAX_DESIGN_NOTES_CHARS, PracticeConversation
 from .rubrics import (
     CARL,
     CODING,
@@ -210,7 +210,7 @@ class PracticeSession(BaseModel):
             if design_notes:
                 lines.append("## System Design Notes (API / Schema / Math)")
                 lines.append("")
-                lines.extend(_fenced_block(design_notes[:8000], "text"))
+                lines.extend(_fenced_block(design_notes[:MAX_DESIGN_NOTES_CHARS], "text"))
                 lines.append("")
             code = str(self.workspace_context.get("code") or "").strip()
             if code:

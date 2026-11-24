@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from mockery.llm import _extract_json_object, _head_tail_excerpt
+from mockery.practice_conversation import format_bounded_list, practice_max_followups
 from mockery.prompts import (
     practice_debrief_rubric_args,
     practice_hint_behavioral_nudge,
@@ -19,6 +20,7 @@ from mockery.prompts import (
     triage_diarize_rules,
     validate_prompt_template,
 )
+from mockery.rubrics import rubric_for
 
 TARGET_TO_PROMPT_NAME: dict[str, str] = {
     "triage_window": "triage_window",
@@ -230,6 +232,7 @@ def render_system_prompt_for_example(
     if target == "practice_interviewer":
         interview_type = str(example.get("interview_type") or "behavioral")
         coach_style = str(example.get("coach_style") or "supportive")
+        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
         return render_prompt(
             "practice_interviewer_reply",
             override_text=override_text,
@@ -237,7 +240,7 @@ def render_system_prompt_for_example(
             role_title=str(example.get("role_title") or "Software Engineer"),
             target_level=str(example.get("target_level") or "Senior (L5)"),
             tone_instruction=practice_tone_instruction(coach_style),
-            **practice_reply_rubric_args(),
+            **practice_reply_rubric_args(rubric.grader, rubric.signal_keys, coached=rubric.coached),
         )
     if target == "suggest_probes":
         interview_type = str(example.get("interview_type") or "behavioral")
@@ -247,15 +250,29 @@ def render_system_prompt_for_example(
             probe_guidance=probe_guidance_for(interview_type),
         )
     if target == "practice_retry_eval":
+        interview_type = str(example.get("interview_type") or "behavioral")
+        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
         return render_prompt(
-            "practice_retry_eval", override_text=override_text, signal_schema=practice_signal_schema()
+            "practice_retry_eval",
+            override_text=override_text,
+            signal_schema=practice_signal_schema(rubric.signal_keys, coached=rubric.coached),
         )
     if target == "practice_hint":
+        interview_type = str(example.get("interview_type") or "behavioral")
+        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
         return render_prompt(
-            "practice_hint", override_text=override_text, behavioral_nudge=practice_hint_behavioral_nudge()
+            "practice_hint",
+            override_text=override_text,
+            behavioral_nudge=practice_hint_behavioral_nudge(rubric.grader, coached=rubric.coached),
         )
     if target == "practice_debrief":
-        return render_prompt("practice_debrief", override_text=override_text, **practice_debrief_rubric_args())
+        interview_type = str(example.get("interview_type") or "behavioral")
+        rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
+        return render_prompt(
+            "practice_debrief",
+            override_text=override_text,
+            **practice_debrief_rubric_args(rubric.grader, rubric.signal_keys, coached=rubric.coached),
+        )
     raise ValueError(f"Unsupported eval target: {target!r}")
 
 
@@ -273,11 +290,14 @@ def build_triage_user_prompt(example: dict[str, Any]) -> str:
 def build_practice_interviewer_user_prompt(example: dict[str, Any]) -> str:
     """Matches the exact user prompt built by InterviewCopilotLLM.generate_practice_interviewer_reply."""
     interview_type = str(example.get("interview_type") or "behavioral")
-    max_followups = 3 if interview_type in ("system_design", "coding") else 2
+    rubric = rubric_for(interview_type, str(example.get("answer_framework") or "carl"))
+    max_followups = practice_max_followups(interview_type)
     current_question = example.get("current_question") or {}
     next_question = example.get("next_question")
     recent_turns = example.get("recent_turns") or []
     follow_ups = list(current_question.get("follow_ups") or [])
+    deep_dives = list(current_question.get("deep_dives") or [])
+    core_requirements = list(current_question.get("core_requirements") or [])
     follow_up_count = int(example.get("follow_up_count") or 0)
     candidate_answer = str(example.get("candidate_answer") or "")
     workspace_context = example.get("workspace_context")
@@ -294,6 +314,11 @@ def build_practice_interviewer_user_prompt(example: dict[str, Any]) -> str:
                 "\nLIVE SYSTEM DESIGN DIAGRAM STATE:\n"
                 f"{str(workspace_context['diagram_summary'])[:2500]}\n"
             )
+        if workspace_context.get("design_notes"):
+            ws_block += (
+                "\nLIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n"
+                f"{_head_tail_excerpt(str(workspace_context['design_notes']).strip(), 3000)}\n"
+            )
         if workspace_context.get("code"):
             ws_block += (
                 f"\nLIVE CODING WORKSPACE ({workspace_context.get('language', 'code')}):\n"
@@ -305,14 +330,33 @@ def build_practice_interviewer_user_prompt(example: dict[str, Any]) -> str:
     next_q_block = (
         f"Next planned question (ONLY introduce if should_advance=true): {next_question.get('prompt')}"
         if isinstance(next_question, dict) and next_question.get("prompt")
-        else "This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their CARL Coaching Debrief."
+        else f"This is the FINAL question of the interview. If should_advance=true, wrap up warmly and invite them to view their {rubric.debrief_name}."
+    )
+    bounded_focus = (
+        str(current_question.get("carl_focus") or "").strip()[:1000]
+        or format_bounded_list(core_requirements, max_items=8, max_item_chars=200, max_total_chars=1000)
+    )
+    bounded_dives = format_bounded_list(deep_dives, max_items=8, max_item_chars=240, max_total_chars=1600)
+    bounded_follow_ups = format_bounded_list(follow_ups, max_items=8, max_item_chars=240, max_total_chars=1600)
+    sd_deep_dives_line = (
+        f"Deep-dive bottlenecks & failure modes to probe: {bounded_dives}\n"
+        if bounded_dives
+        else ""
+    )
+    pacing_guidance = (
+        f"(system design: keep should_advance=false while clarifying requirements, sketching the baseline "
+        f"architecture, or exploring deep dives; advance only after requirements, baseline design, and "
+        f"2-3 concrete bottlenecks/failure modes are covered OR after {max_followups} turns)."
+        if interview_type == "system_design"
+        else f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
     )
 
     return (
-        f"Current Question: {current_question.get('prompt')}\n"
-        f"CARL / Rubric Focus: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
-        f"Follow-ups already asked on this question: {follow_up_count} (advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal).\n"
-        f"Suggested follow-up angles: {follow_ups}\n"
+        f"Current Question: {str(current_question.get('prompt') or '')[:2000]}\n"
+        f"{rubric.focus_label}: {bounded_focus}\n"
+        f"{sd_deep_dives_line}"
+        f"Follow-ups already asked on this question: {follow_up_count} {pacing_guidance}\n"
+        f"Suggested follow-up angles: {bounded_follow_ups or '[]'}\n"
         f"{next_q_block}\n"
         f"{ws_block}\n"
         "Recent conversation:\n"
@@ -365,6 +409,11 @@ def build_practice_hint_user_prompt(example: dict[str, Any]) -> str:
     if isinstance(ws, dict):
         if ws.get("diagram_summary"):
             ws_note += f"\nCurrent diagram:\n{str(ws['diagram_summary'])[:1500]}"
+        if ws.get("design_notes"):
+            ws_note += (
+                "\nCurrent design notes (API / schema / math):\n"
+                f"{_head_tail_excerpt(str(ws['design_notes']).strip(), 1500)}"
+            )
         if ws.get("code"):
             ws_note += f"\nCurrent code:\n{str(ws['code'])[:1500]}"
     return (
@@ -401,6 +450,11 @@ def build_practice_debrief_user_prompt(example: dict[str, Any]) -> str:
     if isinstance(workspace_context, dict):
         if workspace_context.get("diagram_summary"):
             ws_block += f"\nFINAL DIAGRAM:\n{str(workspace_context['diagram_summary'])[:2000]}\n"
+        if workspace_context.get("design_notes"):
+            ws_block += (
+                "\nFINAL DESIGN NOTES (API / SCHEMA / MATH):\n"
+                f"{_head_tail_excerpt(str(workspace_context['design_notes']).strip(), 2500)}\n"
+            )
         if workspace_context.get("code"):
             ws_block += f"\nFINAL CODE:\n{str(workspace_context['code'])[:2500]}\n"
         if workspace_context.get("test_output"):
@@ -834,11 +888,18 @@ def score_practice_interviewer_reply(
     nudge_msg = raw_nudge_msg.strip() if nudge_msg_is_str else ""
 
     # 1. Strict schema conformance (no silent coercion of non-strings)
-    carl_valid_dims = sum(
-        1
-        for d in CARL_DIMS
-        if isinstance(raw_carl.get(d), str) and raw_carl[d].strip().lower() in CARL_RANK
+    rubric = rubric_for(
+        str(example.get("interview_type") or "behavioral"),
+        str(example.get("answer_framework") or "carl"),
     )
+    normalized_carl: dict[str, str] = {}
+    for sig in rubric.signals:
+        v = raw_carl.get(sig.key)
+        if v is None and rubric.legacy_slot_fallback:
+            v = raw_carl.get(sig.slot)
+        if isinstance(v, str) and v.strip().lower() in CARL_RANK:
+            normalized_carl[sig.slot] = v.strip().lower()
+    carl_valid_dims = len(normalized_carl)
     schema_checks = [
         reply_is_str and bool(reply),
         isinstance(raw_adv, bool),
@@ -885,8 +946,7 @@ def score_practice_interviewer_reply(
     carl_acc_points: list[float] = []
     monotonic_violations: list[str] = []
     for dim in CARL_DIMS:
-        raw_val = raw_carl.get(dim)
-        pred_val = raw_val.strip().lower() if isinstance(raw_val, str) else ""
+        pred_val = normalized_carl.get(dim, "")
         exp_val = str(exp_carl.get(dim, "missing")).strip().lower()
         prev_val = str(existing_carl.get(dim, "missing")).strip().lower()
         if pred_val not in CARL_RANK:
@@ -1471,16 +1531,31 @@ def score_practice_debrief(
         failures.append(f"Missing or mangled `question_id`(s) in `question_reviews`: {missing_qids}")
         suggestions.append("Copy every answered `question_id` verbatim into `question_reviews` (never rename to Q1/Q2).")
 
+    rubric = rubric_for(
+        str(example.get("interview_type") or "behavioral"),
+        str(example.get("answer_framework") or "carl"),
+    )
+
+    def _norm_debrief_carl(raw_map: Any) -> dict[str, str]:
+        if not isinstance(raw_map, dict):
+            return {}
+        out_map: dict[str, str] = {}
+        for sig in rubric.signals:
+            v = raw_map.get(sig.key)
+            if v is None and rubric.legacy_slot_fallback:
+                v = raw_map.get(sig.slot)
+            if isinstance(v, str) and v.strip().lower() in CARL_RANK:
+                out_map[sig.slot] = v.strip().lower()
+        return out_map
+
     per_review_schema: list[float] = []
     for qid in exp_qids:
         rev = reviews_by_id.get(qid)
         if rev is None:
             per_review_schema.append(0.0)
             continue
-        carl = rev.get("carl") if isinstance(rev.get("carl"), dict) else {}
-        carl_ok = sum(
-            1 for d in CARL_DIMS if isinstance(carl.get(d), str) and carl[d].strip().lower() in CARL_RANK
-        ) == 4
+        carl_norm = _norm_debrief_carl(rev.get("carl"))
+        carl_ok = len(carl_norm) == 4
         fields_ok = [
             isinstance(rev.get("title"), str) and bool(rev["title"].strip()),
             isinstance(rev.get("prompt"), str) and bool(rev["prompt"].strip()),
@@ -1527,9 +1602,9 @@ def score_practice_debrief(
         if rev is None or not isinstance(rev.get("carl"), dict):
             carl_pts.extend([0.0] * len(CARL_DIMS))
             continue
-        raw_c = rev["carl"]
+        raw_c = _norm_debrief_carl(rev["carl"])
         for dim in CARL_DIMS:
-            pv = raw_c.get(dim).strip().lower() if isinstance(raw_c.get(dim), str) else ""
+            pv = raw_c.get(dim, "")
             ev = str(exp_c.get(dim, "missing")).strip().lower()
             if pv not in CARL_RANK:
                 carl_pts.append(0.0)
