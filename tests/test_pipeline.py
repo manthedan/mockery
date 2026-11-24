@@ -537,7 +537,7 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
     with client.websocket_connect("/ws/session") as ws:
         s0 = ws.receive_json()
         _ = ws.receive_json()  # asr_status
-        # A fresh session is immediately `ready`: live capture needs no consent gate or prior configuration
+        # A fresh session is immediately `ready`: live capture needs no prior configuration
         assert s0["session"]["state_machines"]["session"]["phase"] == "ready"
         assert s0["session"]["state_machines"]["invariants_ok"] is True
         assert "start_capture" in s0["session"]["state_machines"]["session"]["allowed_events"]
@@ -638,8 +638,8 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
     violations = validate_session_invariants(sess)
     assert any("Dangling utterance reference" in v for v in violations)
 
-    # 6. Consent no longer gates the session lifecycle: `ready` is the entry state and only an
-    #    already-active capture or a running calibration can block `start_capture`.
+    # 6. `ready` is the entry state of the session lifecycle: only an already-active capture or a
+    #    running calibration can block `start_capture`.
     from mockery.state_machines import (
         AsyncJobState,
         SessionPhase,
@@ -649,13 +649,12 @@ def test_explicit_state_machines_ux_dx_ax(tmp_path: Path) -> None:
 
     assert "setup" not in specs["machines"]["session_phase"]["states"]
     assert "[*] --> ready" in specs["machines"]["session_phase"]["mermaid"]
-    assert "consent" not in specs["machines"]["session_phase"]["mermaid"]
 
-    # Older saved session JSON with `consent_confirmed: false` (or no such key) still deserializes
+    # Older saved session JSON carrying config keys that no longer exist still deserializes
     # and is treated exactly like any other fresh session.
-    legacy = InterviewSession.model_validate({"config": {"consent_confirmed": False, "save_raw_audio": True}})
-    assert SessionConfig().consent_confirmed is True
-    assert InterviewSession.model_validate({"config": {}}).config.consent_confirmed is True
+    legacy = InterviewSession.model_validate({"config": {"retired_flag": False, "save_raw_audio": True}})
+    assert not hasattr(legacy.config, "retired_flag")
+    assert legacy.config.save_raw_audio is True
     legacy_phase = derive_session_phase(legacy, is_capturing=False, calibration_job=AsyncJobState.IDLE)
     assert legacy_phase == SessionPhase.READY
     allowed_idle, blocked_idle = compute_allowed_session_events(
@@ -938,9 +937,8 @@ def test_audit_correctness_regressions(tmp_path: Path, monkeypatch) -> None:
         assert rej["machine"] == "card_probe"
         assert rej["event"] == "dive_deeper"
 
-        # new_session yields a fresh session that is immediately ready to capture. A legacy client that
-        # still sends `consent_confirmed: false` is tolerated and never blocks `start_capture`.
-        ws.send_json({"type": "new_session", "config": {"role_title": "Staff SWE", "consent_confirmed": False}})
+        # new_session yields a fresh session that is immediately ready to capture.
+        ws.send_json({"type": "new_session", "config": {"role_title": "Staff SWE"}})
         s2 = ws.receive_json()
         sess2_id = s2["session"]["id"]
         assert sess2_id != sess1_id
