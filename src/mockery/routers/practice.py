@@ -24,6 +24,7 @@ from ..practice import (
 )
 from ..rubrics import framework_for
 from ..practice_conversation import (
+    MAX_DESIGN_NOTES_CHARS,
     build_practice_session_system_prompt,
     commit_practice_conversation_turn,
 )
@@ -163,8 +164,8 @@ def merge_workspace_context(session: PracticeSession, patch: dict[str, Any] | No
     if "design_notes" in patch and patch["design_notes"] is not None:
         if not isinstance(patch["design_notes"], str):
             raise ValueError("design_notes must be a string.")
-        if len(patch["design_notes"]) > 16_000:
-            raise ValueError("design_notes exceeds maximum length (16,000 characters).")
+        if len(patch["design_notes"]) > MAX_DESIGN_NOTES_CHARS:
+            raise ValueError(f"design_notes exceeds maximum length ({MAX_DESIGN_NOTES_CHARS:,} characters).")
     for map_key in ("code_by_lang", "tests_by_lang"):
         if map_key in patch and patch[map_key] is not None:
             m = patch[map_key]

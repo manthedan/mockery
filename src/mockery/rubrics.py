@@ -63,6 +63,8 @@ class Rubric:
     """False for ``NO_STRUCTURE``: signals are neither stored nor shown, and no framework is taught."""
     named_framework: bool = False
     """True when the rubric is a method people know by name (CARL, STAR) and coaching may say so."""
+    legacy_slot_fallback: bool = False
+    """True for studio rubrics whose older sessions or models may still emit legacy slot names."""
 
     def signal(self, slot: str) -> Signal:
         return next(s for s in self.signals if s.slot == slot)
@@ -88,7 +90,10 @@ class Rubric:
             return {}
         out: dict[str, str] = {}
         for signal in self.signals:
-            level = str(raw.get(signal.key, "")).strip().lower()
+            raw_val = raw.get(signal.key)
+            if raw_val is None and self.legacy_slot_fallback:
+                raw_val = raw.get(signal.slot)
+            level = str(raw_val if raw_val is not None else "").strip().lower()
             if level in SIGNAL_LEVELS:
                 out[signal.slot] = level
         return out
@@ -295,6 +300,7 @@ SYSTEM_DESIGN = Rubric(
     default_focus="Clear requirements, a sound architecture, scaling limits, and the tradeoffs you chose.",
     focus_label="Design Focus",
     debrief_name="System Design Coaching Debrief",
+    legacy_slot_fallback=True,
 )
 
 CODING = Rubric(
@@ -322,6 +328,7 @@ CODING = Rubric(
     default_focus="A clear approach, a working solution, its complexity, and the edge cases you tested.",
     focus_label="Coding Focus",
     debrief_name="Coding Coaching Debrief",
+    legacy_slot_fallback=True,
 )
 
 NO_STRUCTURE = Rubric(

@@ -38,9 +38,10 @@ from .models import (
     fmt_ms,
 )
 from .practice_conversation import (
-    SYSTEM_DESIGN_INTERVIEWER_RULES,
     build_practice_turn_messages,
+    format_bounded_list,
     messages_prefix_digest,
+    practice_max_followups,
     render_flat_messages,
 )
 from .prompts import (
@@ -55,7 +56,7 @@ from .prompts import (
     render_prompt,
     triage_diarize_rules,
 )
-from .rubrics import CARL, SIGNAL_LEVELS, SIGNAL_SLOTS, Rubric
+from .rubrics import CARL, SIGNAL_LEVELS, SIGNAL_SLOTS, Rubric, rubric_for
 
 if TYPE_CHECKING:
     from .practice import PracticeSession
@@ -3299,7 +3300,7 @@ class InterviewCopilotLLM:
         workspace_context: dict[str, Any] | None = None,
         cache_key: str | None = None,
         session: PracticeSession | None = None,
-        rubric: Rubric = CARL,
+        rubric: Rubric | None = None,
     ) -> dict[str, Any]:
         """
         Generate the AI interviewer's natural next turn + live CARL status + supportive coach nudge.
@@ -3311,15 +3312,24 @@ class InterviewCopilotLLM:
 
         if session is not None:
             rubric = session.config.rubric
+        elif rubric is None:
+            rubric = rubric_for(interview_type, "carl")
         heuristic_carl = estimate_carl_heuristic(candidate_answer, existing_carl, rubric)
         follow_ups = list(current_question.get("follow_ups") or [])
         deep_dives = list(current_question.get("deep_dives") or [])
-        max_followups = 12 if interview_type == "system_design" else 3 if interview_type == "coding" else 2
-        fallback_probes = (
-            [*follow_ups, *[f"Let's dive deeper into {d} — how would you handle that in your design?" for d in deep_dives]]
-            if interview_type == "system_design"
-            else follow_ups
-        )
+        core_requirements = list(current_question.get("core_requirements") or [])
+        max_followups = practice_max_followups(interview_type)
+        if interview_type == "system_design":
+            phase_probes = [
+                "Let's lock down the core APIs, data model, and baseline end-to-end architecture on the whiteboard first — how does a single request flow from client to storage?",
+                *follow_ups,
+                *[f"Let's dive deeper into {d} — how would you handle that in your design?" for d in deep_dives],
+                "What breaks first under a 10x traffic spike or hot-key skew, and how would you mitigate it?",
+                "Walk me through a node or region failure — what fails, what degrades gracefully, and what tradeoff are you accepting?",
+            ]
+            fallback_probes = phase_probes
+        else:
+            fallback_probes = follow_ups
 
         # In a conversation round, filler is not an answer: it is neither thanked nor built on.
         is_studio = interview_type in ("system_design", "coding")
@@ -3328,9 +3338,27 @@ class InterviewCopilotLLM:
         has_substance = not no_answer and (
             is_studio or any(heuristic_carl.get(slot) != "missing" for slot in SIGNAL_SLOTS)
         )
+        sd_clarifying_re = re.compile(
+            r"\b(?:qps|rps|tps|dau|mau|latency|p99|p95|sla|slo|scale|traffic|region|consisten|availab|"
+            r"storage|payload|size|read|write|rate|limit|users|budget|scope|clarif|assum|tenant|retention|throughput)\b",
+            re.IGNORECASE,
+        )
+        is_sd_clarification = (
+            interview_type == "system_design"
+            and "?" in (candidate_answer or "")
+            and bool(sd_clarifying_re.search(candidate_answer or ""))
+        )
 
         def _fallback() -> dict[str, Any]:
-            if no_answer and follow_up_count < max_followups:
+            if is_sd_clarification and follow_up_count < max_followups:
+                req_hint = f" Focus first on: {core_requirements[0]}." if core_requirements else ""
+                reply = (
+                    "Good scoping question — assume 50k peak RPS, p99 latency under 200ms, multi-region reads, "
+                    f"and eventual consistency unless a write path strictly needs linearizability.{req_hint} "
+                    "With those assumptions locked in, what core API and baseline architecture would you sketch first?"
+                )
+                advance = False
+            elif no_answer and follow_up_count < max_followups:
                 reply = f"No rush — take a moment. I'll ask again: {current_question.get('prompt', '')}"
                 advance = False
             elif not no_answer and follow_up_count < len(fallback_probes) and follow_up_count < max_followups:
@@ -3408,7 +3436,7 @@ class InterviewCopilotLLM:
                     if workspace_context.get("design_notes"):
                         ws_block += (
                             "\nLIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):\n"
-                            f"{str(workspace_context['design_notes'])[:3000]}\n"
+                            f"{_head_tail_excerpt(str(workspace_context['design_notes']).strip(), 3000)}\n"
                         )
                     if workspace_context.get("code"):
                         ws_block += (
@@ -3433,14 +3461,15 @@ class InterviewCopilotLLM:
                     tone_instruction=tone_instruction,
                     **practice_reply_rubric_args(rubric.grader, rubric.signal_keys, coached=rubric.coached),
                 )
-                sd_deep_dives_line = (
-                    f"Deep-dive bottlenecks & failure modes to probe: {deep_dives}\n"
-                    if deep_dives
-                    else ""
+                bounded_focus = (
+                    str(current_question.get("carl_focus") or "").strip()[:1000]
+                    or format_bounded_list(core_requirements, max_items=8, max_item_chars=200, max_total_chars=1000)
                 )
-                sd_protocol_block = (
-                    f"{SYSTEM_DESIGN_INTERVIEWER_RULES}\n"
-                    if interview_type == "system_design"
+                bounded_dives = format_bounded_list(deep_dives, max_items=8, max_item_chars=240, max_total_chars=1600)
+                bounded_follow_ups = format_bounded_list(follow_ups, max_items=8, max_item_chars=240, max_total_chars=1600)
+                sd_deep_dives_line = (
+                    f"Deep-dive bottlenecks & failure modes to probe: {bounded_dives}\n"
+                    if bounded_dives
                     else ""
                 )
                 pacing_guidance = (
@@ -3451,11 +3480,10 @@ class InterviewCopilotLLM:
                     else f"(advance once you've asked {max_followups} follow-ups OR they've already given strong complete signal)."
                 )
                 stable_prefix = (
-                    f"Current Question: {current_question.get('prompt')}\n"
-                    f"{rubric.focus_label}: {current_question.get('carl_focus') or ', '.join(current_question.get('core_requirements') or [])}\n"
+                    f"Current Question: {str(current_question.get('prompt') or '')[:2000]}\n"
+                    f"{rubric.focus_label}: {bounded_focus}\n"
                     f"{sd_deep_dives_line}"
-                    f"Suggested follow-up angles: {follow_ups}\n"
-                    f"{sd_protocol_block}"
+                    f"Suggested follow-up angles: {bounded_follow_ups or '[]'}\n"
                     f"{next_q_block}\n\n"
                     f"Recent conversation:\n" + ("\n".join(history_lines) if history_lines else "(Opening turn)")
                 )
@@ -3541,13 +3569,15 @@ class InterviewCopilotLLM:
         current_question: dict[str, Any],
         recent_turns: list[dict[str, Any]],
         workspace_context: dict[str, Any] | None = None,
-        rubric: Rubric = CARL,
+        rubric: Rubric | None = None,
         fallback_reasons: list[str] | None = None,
     ) -> str:
         """Return a supportive, non-spoiler coaching hint when the candidate asks for help.
 
         When the connected model fails, the built-in hint is returned and the reason is appended
         to ``fallback_reasons``."""
+        if rubric is None:
+            rubric = rubric_for(interview_type, "carl")
         fallback = rubric.offline_hint.format(
             focus=current_question.get("carl_focus") or "your own decisions & measurable impact"
         )
@@ -3588,7 +3618,10 @@ class InterviewCopilotLLM:
             if workspace_context.get("diagram_summary"):
                 ws_note += f"\nCurrent diagram:\n{str(workspace_context['diagram_summary'])[:1500]}"
             if workspace_context.get("design_notes"):
-                ws_note += f"\nCurrent design notes (API / schema / math):\n{str(workspace_context['design_notes'])[:1500]}"
+                ws_note += (
+                    "\nCurrent design notes (API / schema / math):\n"
+                    f"{_head_tail_excerpt(str(workspace_context['design_notes']).strip(), 1500)}"
+                )
             if workspace_context.get("code"):
                 ws_note += f"\nCurrent code:\n{str(workspace_context['code'])[:1500]}"
 
@@ -3632,7 +3665,7 @@ class InterviewCopilotLLM:
         questions: list[dict[str, Any]],
         turns: list[dict[str, Any]],
         workspace_context: dict[str, Any] | None = None,
-        rubric: Rubric = CARL,
+        rubric: Rubric | None = None,
     ) -> dict[str, Any]:
         """
         Generate a supportive coaching debrief in the session's rubric:
@@ -3640,6 +3673,8 @@ class InterviewCopilotLLM:
           - Per-question signal breakdown + concrete Before -> After reframe
           - One targeted 45-second Retry Weak Part drill
         """
+        if rubric is None:
+            rubric = rubric_for(interview_type, "carl")
         # Build deterministic fallback debrief first (also guarantees schema safety)
         q_reviews_fb: list[dict[str, Any]] = []
         weakest_q: dict[str, Any] | None = None
@@ -3744,7 +3779,10 @@ class InterviewCopilotLLM:
             if workspace_context.get("diagram_summary"):
                 ws_block += f"\nFINAL DIAGRAM:\n{str(workspace_context['diagram_summary'])[:2000]}\n"
             if workspace_context.get("design_notes"):
-                ws_block += f"\nFINAL DESIGN NOTES (API / SCHEMA / MATH):\n{str(workspace_context['design_notes'])[:2500]}\n"
+                ws_block += (
+                    "\nFINAL DESIGN NOTES (API / SCHEMA / MATH):\n"
+                    f"{_head_tail_excerpt(str(workspace_context['design_notes']).strip(), 2500)}\n"
+                )
             if workspace_context.get("code"):
                 ws_block += f"\nFINAL CODE:\n{str(workspace_context['code'])[:2500]}\n"
             if workspace_context.get("test_output"):

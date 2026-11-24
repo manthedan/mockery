@@ -167,6 +167,18 @@ _FOCUS_BRIEFS: dict[str, str] = {
     "coding": "what strong Approach/Correctness/Complexity/Edge cases look like here",
 }
 _NO_FRAMEWORK_FOCUS_BRIEF = "what a strong answer covers here, without naming an answer framework"
+_FORMAT_GUIDANCE: dict[str, str] = {
+    "carl": "",
+    "star": "",
+    "general": "",
+    "coding": "",
+    "system_design": (
+        "\n   - SYSTEM DESIGN CLARIFICATIONS, PACING & PUSHBACK (overrides generic non-answer and early-advance rules above):\n"
+        '     * Short clarifying or scoping questions (even a few words like "Peak QPS?", "Latency SLO?", "Strong or eventual consistency?") ARE valid, substantive turns — never treat them as non-answers or ask the main question again. Answer them directly with realistic, concrete assumptions and keep should_advance=false.\n'
+        "     * Pace like a 45-minute live design round: (1) Requirements & scale assumptions, (2) Core API & data model, (3) End-to-end baseline architecture, (4) 2-3 deep dives into concrete bottlenecks & failure modes, and (5) Tradeoff defense. Keep should_advance=false while clarifying scope, building the baseline, or working through deep dives; set should_advance=true only after requirements, baseline design, and 2-3 concrete bottlenecks/failure modes are covered (or the turn budget is reached).\n"
+        "     * Concrete pushback over generic praise: once the baseline architecture is in place, stress-test ONE concrete weak spot per turn grounded in their whiteboard diagram or API/schema/math notes (e.g., hot keys, cache stampede, backpressure/OOM, dual-write race, split-brain, node/region failure, or a 10x traffic spike). Stay collaborative and warm, and never hand them the solution."
+    ),
+}
 
 
 def practice_signal_schema(signal_keys: tuple[str, ...] = CARL_SIGNAL_KEYS, *, coached: bool = True) -> str:
@@ -190,6 +202,7 @@ def practice_reply_rubric_args(
         "signal_definitions": _SIGNAL_DEFINITIONS[grader] if coached else _NO_FRAMEWORK_SIGNAL_DEFINITIONS,
         "carry_forward_note": _CARRY_FORWARD_NOTES[grader] if coached else "",
         "nudge_examples": _NUDGE_EXAMPLES[grader] if coached else _NO_FRAMEWORK_NUDGE_EXAMPLES,
+        "format_guidance": _FORMAT_GUIDANCE[grader],
     }
 
 
@@ -326,7 +339,7 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             '{"interviewer_reply": "<string>", "should_advance": true|false, "carl_signals": {signal_schema}, "coach_nudge": {"tone": "encourage|tip", "message": "<string>"}}\n\n'
             "FIELD GUIDANCE\n"
             "1. interviewer_reply: 1-3 short spoken sentences. First briefly acknowledge something specific the candidate said (refer to their actual details, code, or edge case); if they have not actually answered (filler, a few words, or off-topic), skip the acknowledgement, never thank or praise them for it, and kindly say you have not heard an answer yet. Then do exactly ONE of: ask ONE crisp follow-up question, or smoothly transition to the next question. Never ask multiple questions. Warm, conversational, no bullet points or lists.\n"
-            "2. should_advance: true only when the candidate has covered the current question well enough (for behavioral: situation, their actions, and a result are reasonably addressed; for technical/coding: the approach is clear and the main concern, such as the edge case, has been handled or discussed). Otherwise false, and your reply should probe the most important missing piece; when the candidate has not actually answered, it is false and your reply asks the same question again more simply. If true, the reply should transition to the next topic rather than re-probing the same one.\n"
+            "2. should_advance: true only when the candidate has covered the current question well enough (for behavioral: situation, their actions, and a result are reasonably addressed; for technical/coding: the approach is clear and the main concern, such as the edge case, has been handled or discussed). Otherwise false, and your reply should probe the most important missing piece; when the candidate has not actually answered, it is false and your reply asks the same question again more simply. If true, the reply should transition to the next topic rather than re-probing the same one.{format_guidance}\n"
             "3. carl_signals: Rate cumulatively across the WHOLE conversation so far, not just the latest turn.\n"
             "   - {signal_definitions}\n"
             "   - Levels: strong = clearly and specifically covered; partial = mentioned but vague or incomplete; missing = absent.\n"
@@ -349,6 +362,7 @@ PROMPT_REGISTRY: dict[str, PromptSpec] = {
             "signal_definitions",
             "carry_forward_note",
             "nudge_examples",
+            "format_guidance",
         ),
         output_format="json",
     ),

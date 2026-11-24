@@ -149,6 +149,13 @@ const emptyWithNotes = deriveDesignAllowedActions({ interaction: { mode: 'idle' 
 if (emptyNoNotes.includes('ask_ai_review')) throw new Error('Empty canvas without notes should not allow review');
 if (!emptyWithNotes.includes('ask_ai_review')) throw new Error('Notes-only workspace should allow review');
 
+// 0b. Studio notes limit matches backend API (16,000 chars) so 9,000+ char notes never truncate on load
+import fs from 'node:fs';
+const studioSrc = fs.readFileSync('./src/mockery/static/design_studio.js', 'utf8');
+if (!studioSrc.includes('const MAX_DESIGN_NOTES_CHARS = 16000;')) {
+  throw new Error('Expected MAX_DESIGN_NOTES_CHARS to match 16000 API limit');
+}
+
 // 1. Starter graph adapts to streaming AI question
 const g1 = createStarterGraph({ title: 'Streaming AI Assistant', prompt: 'Design Claude.ai' });
 if (g1.nodes.length < 4 || g1.edges.length < 4) throw new Error('Expected rich starter graph');
@@ -439,9 +446,10 @@ def test_system_design_turn_budget_deep_dives_protocol_and_notes_deltas(tmp_path
     assert '"requirements": "strong|partial|missing"' in sys_msg
     assert "Requirements = " in sys_msg
     assert "Learning = " not in sys_msg
+    assert "SYSTEM DESIGN CLARIFICATIONS, PACING & PUSHBACK" in sys_msg
+    assert "Peak QPS?" in sys_msg
     assert "Deep-dive bottlenecks & failure modes to probe:" in user_msg
     assert q0["deep_dives"][0] in user_msg
-    assert "SYSTEM DESIGN INTERVIEWER PROTOCOL:" in user_msg
     assert "LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):" in user_msg
     assert "POST /v1/messages" in user_msg
     assert "after 12 turns" in user_msg
@@ -519,4 +527,360 @@ def test_system_design_turn_budget_deep_dives_protocol_and_notes_deltas(tmp_path
     assert seen_debrief_user and "FINAL DESIGN NOTES (API / SCHEMA / MATH):" in seen_debrief_user[-1]
     assert "Buffer TTL = 5 min per stream" in seen_debrief_user[-1]
     assert asyncio.iscoroutinefunction(runtime.llm.generate_practice_interviewer_reply)
+
+
+def test_resumed_pre_upgrade_studio_conversation_reseeds_and_decodes_legacy_grades(tmp_path: Path):
+    """P1 regression: pre-upgrade v1 CARL system prompt on resumed SD/coding sessions reseeds cleanly."""
+    from mockery.practice_conversation import (
+        PRACTICE_CONVERSATION_VERSION,
+        PracticeConversation,
+        PracticeConversationMessage,
+    )
+    from mockery.rubrics import CODING, SYSTEM_DESIGN
+
+    # Legacy slot names still decode cleanly on studio rubrics without breaking STAR/GENERAL
+    assert SYSTEM_DESIGN.signals_from_grader(
+        {"context": "strong", "action": "partial", "result": "strong", "learning": "missing"}
+    ) == {"context": "strong", "action": "partial", "result": "strong", "learning": "missing"}
+    assert CODING.signals_from_grader(
+        {"context": "strong", "action": "strong", "result": "partial", "learning": "strong"}
+    ) == {"context": "strong", "action": "strong", "result": "partial", "learning": "strong"}
+
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    runtime = app.state.runtime
+    runtime.llm_config.provider = "openai"
+    runtime.llm_config.api_key = "test-key"
+
+    captured: list[list[dict[str, str]]] = []
+
+    async def _fake_complete_messages(messages, **_kwargs):
+        captured.append(list(messages))
+        # Simulate a model emitting legacy keys on a resumed session -> still lands in meter
+        return json.dumps(
+            {
+                "interviewer_reply": "Got it — assume 20k RPS. How do you partition the write path?",
+                "should_advance": False,
+                "carl_signals": {"context": "strong", "action": "strong", "result": "partial", "learning": "missing"},
+                "coach_nudge": {"tone": "tip", "message": "Solid baseline — now explain hot-partition mitigation."},
+            }
+        )
+
+    runtime.llm._complete_messages = _fake_complete_messages  # type: ignore[method-assign]
+    client = TestClient(app)
+
+    start_res = client.post(
+        "/api/practice/start",
+        json={
+            "role_title": "Senior Backend Engineer",
+            "company": "Acme",
+            "interview_type": "system_design",
+            "question_source": "bank_only",
+            "target_level": "L5",
+            "selected_question_id": "sd_ai_stream_01",
+        },
+    )
+    assert start_res.status_code == 200
+    sid = start_res.json()["session"]["id"]
+    q0 = start_res.json()["session"]["questions"][0]
+
+    # Inject a pre-upgrade v1 persisted conversation with an old CARL system prompt
+    sess = runtime.practice_store.get(sid)
+    assert sess is not None
+    sess.llm_conversation = PracticeConversation(
+        version=1,
+        system='Legacy prompt asking for {"context": "strong|partial|missing", "learning": "strong|partial|missing"}',
+        messages=[
+            PracticeConversationMessage(role="user", content="Turn 1"),
+            PracticeConversationMessage(role="assistant", content='{"interviewer_reply": "Tell me more"}'),
+        ],
+        last_synced_turn_count=len(sess.turns),
+    )
+    runtime.practice_store.save(sess)
+
+    res = client.post(
+        f"/api/practice/{sid}/turn",
+        json={"text": "Peak QPS?", "expected_question_id": q0["id"]},
+    )
+    assert res.status_code == 200
+    # Must reseed to v2 RAST system prompt with System Design protocol
+    sent_system = captured[-1][0]["content"]
+    assert '"requirements": "strong|partial|missing"' in sent_system
+    assert "SYSTEM DESIGN CLARIFICATIONS, PACING & PUSHBACK" in sent_system
+    # Legacy grades still decoded (not silently dropped to heuristic)
+    assert res.json()["session"]["questions"][0]["carl_signals"] == {
+        "context": "strong",
+        "action": "strong",
+        "result": "partial",
+        "learning": "missing",
+    }
+    reloaded = runtime.practice_store.get(sid)
+    assert reloaded is not None and reloaded.llm_conversation is not None
+    assert reloaded.llm_conversation.version == PRACTICE_CONVERSATION_VERSION
+
+
+def test_offline_system_design_answers_clarifications_and_runs_past_three_probes(tmp_path: Path):
+    """P2 regression: offline bundled SD question clarifies scope, runs past probe 3, and honors hard cap."""
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    runtime = app.state.runtime
+    runtime.llm_config.provider = "none"
+    runtime.llm_config.api_key = ""
+    client = TestClient(app)
+
+    start_res = client.post(
+        "/api/practice/start",
+        json={
+            "role_title": "Senior Backend Engineer",
+            "company": "Acme",
+            "interview_type": "system_design",
+            "question_source": "bank_only",
+            "target_level": "L5",
+            "selected_question_id": "sd_ai_stream_01",
+        },
+    )
+    assert start_res.status_code == 200
+    sid = start_res.json()["session"]["id"]
+    q0 = start_res.json()["session"]["questions"][0]
+
+    # Turn 1: scoping clarification gets concrete assumptions and does NOT advance
+    clarify = client.post(
+        f"/api/practice/{sid}/turn",
+        json={"text": "What peak QPS and p99 should I assume?", "expected_question_id": q0["id"]},
+    )
+    assert clarify.status_code == 200
+    assert clarify.json()["reply"]["should_advance"] is False
+    reply_txt = clarify.json()["reply"]["interviewer_reply"]
+    assert "50k" in reply_txt and "200ms" in reply_txt
+
+    # Turns 2-5: continues well past the old 3-probe cutoff
+    for i in range(4):
+        step = client.post(
+            f"/api/practice/{sid}/turn",
+            json={
+                "text": f"Architecture iteration {i + 1}: adding edge gateway, Redis Streams buffer, and sharded DB.",
+                "expected_question_id": q0["id"],
+            },
+        )
+        assert step.status_code == 200
+        assert step.json()["reply"]["should_advance"] is False
+        assert step.json()["session"]["phase"] == "active"
+
+    # Hard cap at follow_up_count == 12 still ends the round cleanly
+    sess = runtime.practice_store.get(sid)
+    assert sess is not None
+    sess.questions[0].follow_up_count = 12
+    runtime.practice_store.save(sess)
+    final_turn = client.post(
+        f"/api/practice/{sid}/turn",
+        json={"text": "Final tradeoff summary on consistency vs latency.", "expected_question_id": q0["id"]},
+    )
+    assert final_turn.status_code == 200
+    assert final_turn.json()["reply"]["should_advance"] is True
+    assert final_turn.json()["session"]["phase"] == "awaiting_debrief"
+
+
+def test_long_design_notes_preserve_tail_across_reload_export_deltas_hints_and_debrief(tmp_path: Path):
+    """P2 regressions #3 and #4: 9k notes never silently truncate, and edits past char 3,000 reach the model."""
+    app = create_app(project_root=tmp_path, preload_asr=False)
+    runtime = app.state.runtime
+    runtime.llm_config.provider = "openai"
+    runtime.llm_config.api_key = "test-key"
+
+    seen_turn_users: list[str] = []
+    seen_hint_users: list[str] = []
+    seen_debrief_users: list[str] = []
+
+    async def _fake_complete_messages(messages, **_kwargs):
+        seen_turn_users.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "interviewer_reply": "Thanks for adding the storage math. How do you shard hot tenants?",
+                "should_advance": False,
+                "carl_signals": {
+                    "requirements": "strong",
+                    "architecture": "strong",
+                    "scale": "strong",
+                    "tradeoffs": "partial",
+                },
+                "coach_nudge": {"tone": "encourage", "message": "Clear capacity math — now defend hot-key sharding."},
+            }
+        )
+
+    async def _fake_complete_text(*, user: str, operation: str = "", **_kwargs) -> str:
+        if operation == "practice_hint":
+            seen_hint_users.append(user)
+            return "Double-check write amplification on your hottest partition."
+        if operation == "practice_debrief":
+            seen_debrief_users.append(user)
+            return json.dumps(
+                {
+                    "overall_encouragement": "Strong end-to-end architecture and capacity math.",
+                    "top_strengths": ["Concrete storage sizing."],
+                    "carl_primer": "Requirements -> Architecture -> Scale -> Tradeoffs.",
+                    "question_reviews": [
+                        {
+                            "question_id": q0["id"],
+                            "title": q0["title"],
+                            "prompt": q0["prompt"],
+                            "carl": {
+                                "requirements": "strong",
+                                "architecture": "strong",
+                                "scale": "strong",
+                                "tradeoffs": "partial",
+                            },
+                            "strength": "Detailed math.",
+                            "coaching_tip": "Name one consistency tradeoff.",
+                            "carl_reframe": "Explain the failover tradeoff cleanly.",
+                        }
+                    ],
+                    "retry_drill": {
+                        "question_id": q0["id"],
+                        "focus": "Defend One Bottleneck & Tradeoff (45s)",
+                        "prompt": "Defend your shard key tradeoff in 45s.",
+                    },
+                }
+            )
+        return "{}"
+
+    runtime.llm._complete_messages = _fake_complete_messages  # type: ignore[method-assign]
+    runtime.llm._complete_text = _fake_complete_text  # type: ignore[method-assign]
+    client = TestClient(app)
+
+    start_res = client.post(
+        "/api/practice/start",
+        json={
+            "role_title": "Staff Systems Engineer",
+            "company": "Acme",
+            "interview_type": "system_design",
+            "question_source": "bank_only",
+            "target_level": "L6",
+            "selected_question_id": "sd_ai_stream_01",
+        },
+    )
+    assert start_res.status_code == 200
+    sid = start_res.json()["session"]["id"]
+    q0 = start_res.json()["session"]["questions"][0]
+
+    # Save 9,000-char notes, then do an unrelated graph update and verify full 9,000 chars survive + export
+    base_notes = "API: POST /v1/chat\n" + ("# schema-line\n" * 640)
+    assert len(base_notes) > 8_500
+    tail_calc = "CAPACITY_CALC_42PB_PER_YEAR_AT_120K_QPS"
+    notes_v1 = base_notes
+    notes_v2 = base_notes + "\n" + tail_calc
+    assert len(notes_v2) > 9_000
+
+    assert client.post(f"/api/practice/{sid}/workspace", json={"workspace_context": {"design_notes": notes_v1}}).status_code == 200
+    # Unrelated graph edit leaves notes untouched
+    assert client.post(
+        f"/api/practice/{sid}/workspace",
+        json={"workspace_context": {"diagram_graph": {"version": 1, "nodes": [{"id": "n1", "type": "service", "label": "API", "note": "", "x": 40, "y": 40}], "edges": []}}},
+    ).status_code == 200
+    reloaded_ws = client.get(f"/api/practice/sessions/{sid}").json()["session"]["workspace_context"]
+    assert reloaded_ws["design_notes"] == notes_v1
+
+    # Turn 1 with base_notes (>3k), then Turn 2 appends a distinctive calculation after char 9,000
+    assert client.post(f"/api/practice/{sid}/turn", json={"text": "Here is my initial schema.", "expected_question_id": q0["id"]}).status_code == 200
+    assert client.post(
+        f"/api/practice/{sid}/turn",
+        json={"text": "Please review my capacity math.", "expected_question_id": q0["id"], "workspace_context": {"design_notes": notes_v2}},
+    ).status_code == 200
+    assert tail_calc in seen_turn_users[-1]
+
+    # Hint, debrief, and Markdown export ALL see the trailing calculation past char 9,000
+    assert client.post(f"/api/practice/{sid}/hint", json={}).status_code == 200
+    assert seen_hint_users and tail_calc in seen_hint_users[-1]
+
+    assert client.post(f"/api/practice/{sid}/debrief", json={}).status_code == 200
+    assert seen_debrief_users and tail_calc in seen_debrief_users[-1]
+
+    md_res = client.get(f"/api/practice/{sid}/markdown")
+    assert md_res.status_code == 200
+    assert tail_calc in md_res.text
+
+
+def test_oversized_custom_bank_deep_dives_stay_within_conversation_budget(tmp_path: Path):
+    """P2 regression #7: a 120k-char custom deep_dive never overflows MAX_PRACTICE_CONVERSATION_CHARS or loops reseeds."""
+    from mockery.practice import PracticeConfig, PracticeQuestionItem, PracticeSession
+    from mockery.practice_conversation import (
+        MAX_PRACTICE_CONVERSATION_CHARS,
+        build_practice_turn_messages,
+        commit_practice_conversation_turn,
+    )
+
+    huge_dive = "hot-key-skew " * 10_000  # ~130,000 chars
+    q = PracticeQuestionItem(
+        id="pq_huge",
+        category="system_design",
+        title="Custom Huge Bank Item",
+        prompt="Design a global event router.",
+        deep_dives=[huge_dive, "failover", "backpressure"],
+        follow_ups=["How do you shard? " * 500],
+        status="active",
+    )
+    sess = PracticeSession(
+        role_title="Staff Engineer",
+        company="Acme",
+        config=PracticeConfig(interview_type="system_design", target_level="L6"),
+        questions=[q],
+    )
+
+    msgs1, user1, ws1, sys1, reset1 = build_practice_turn_messages(
+        sess,
+        current_question=q.model_dump(),
+        next_question=None,
+        candidate_answer="Peak QPS?",
+        follow_up_count=0,
+        max_followups=12,
+    )
+    assert reset1 is True
+    assert len(sys1) + len(user1) < MAX_PRACTICE_CONVERSATION_CHARS // 2
+    assert len(msgs1) == 2
+
+    commit_practice_conversation_turn(
+        sess,
+        system_prompt=sys1,
+        user_content=user1,
+        assistant_raw='{"interviewer_reply": "Assume 100k RPS."}',
+        workspace_snapshot=ws1,
+        synced_turn_count=2,
+        reset_conversation=reset1,
+    )
+
+    # Turn 2 MUST append normally without triggering an overflow reseed
+    msgs2, _user2, _ws2, _sys2, reset2 = build_practice_turn_messages(
+        sess,
+        current_question=q.model_dump(),
+        next_question=None,
+        candidate_answer="I'll start with an ingestion gateway and Kafka.",
+        follow_up_count=1,
+        max_followups=12,
+    )
+    assert reset2 is False
+    assert len(msgs2) == 4
+
+
+def test_eval_harness_supports_system_design_rast_and_held_out_clarification_case():
+    """P2 regression #6: eval harness uses RAST schema, 12-turn SD budget, design_notes, and scores RAST outputs."""
+    from evals.metrics import (
+        build_user_prompt_for_example,
+        load_jsonl_dataset,
+        render_system_prompt_for_example,
+        score_practice_interviewer_reply,
+    )
+
+    repo_root = Path(__file__).resolve().parents[1]
+    rows = {r["id"]: r for r in load_jsonl_dataset(repo_root / "evals" / "datasets" / "practice_interviewer.jsonl")}
+    ex = rows["pi_16_val_sysdesign_clarify_past_three"]
+    assert ex["split"] == "val"
+    assert ex["follow_up_count"] == 4
+
+    sys_p = render_system_prompt_for_example("practice_interviewer", ex)
+    usr_p = build_user_prompt_for_example("practice_interviewer", ex)
+    assert '"requirements": "strong|partial|missing"' in sys_p
+    assert "SYSTEM DESIGN CLARIFICATIONS, PACING & PUSHBACK" in sys_p
+    assert "after 12 turns" in usr_p
+    assert "LIVE SYSTEM DESIGN NOTES (API / SCHEMA / MATH):" in usr_p
+    assert "Partition key: tenant_id" in usr_p
+
+    score, info = score_practice_interviewer_reply(ex["reference_response"], ex)
+    assert score >= 0.95, f"Expected RAST clarification reference response to score high, got {score}: {info}"
 
