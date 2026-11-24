@@ -39,7 +39,7 @@ def _project_version() -> str:
             return version
     except Exception:
         pass
-    return "0.2.4"
+    return "0.2.5"
 
 
 def _write_png_rgba(path: Path, width: int, height: int, rgba: bytes) -> None:
@@ -250,7 +250,7 @@ def build_app(*, force_shell: bool = False) -> Path:
   <key>CFBundleShortVersionString</key>
   <string>{_project_version()}</string>
   <key>CFBundleVersion</key>
-  <string>6</string>
+  <string>7</string>
   {"<key>CFBundleIconFile</key><string>AppIcon</string>" if has_icon else ""}
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
